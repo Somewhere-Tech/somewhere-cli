@@ -114,7 +114,8 @@ function collectFiles(
     const content = readFileSync(fullPath, 'utf-8');
 
     if (relPath.startsWith('functions/')) {
-      functions[relPath] = content;
+      // Platform expects keys relative to functions/ (e.g. "api/health.js")
+      functions[relPath.slice('functions/'.length)] = content;
     } else {
       files[relPath] = content;
     }
