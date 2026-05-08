@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { extname, join, relative } from 'node:path';
 import ora from 'ora';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
@@ -19,6 +19,14 @@ const IGNORE = new Set([
 ]);
 
 const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB per file
+
+const BINARY_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.avif',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.pdf', '.zip', '.gz', '.tar', '.br',
+  '.mp3', '.mp4', '.wav', '.ogg', '.webm', '.mov', '.m4a',
+  '.wasm',
+]);
 
 export function registerDeploy(program: Command) {
   program
@@ -45,13 +53,20 @@ export function registerDeploy(program: Command) {
       const spinner = ora('Collecting files...').start();
 
       const files: Record<string, string> = {};
+      const binaryFiles: Record<string, string> = {};
       const functions: Record<string, string> = {};
-      collectFiles(targetDir, targetDir, files, functions);
+      collectFiles(targetDir, targetDir, files, binaryFiles, functions);
 
-      const totalFiles = Object.keys(files).length + Object.keys(functions).length;
-      const totalBytes = Object.values(files)
+      const totalFiles =
+        Object.keys(files).length +
+        Object.keys(binaryFiles).length +
+        Object.keys(functions).length;
+      const textBytes = Object.values(files)
         .concat(Object.values(functions))
         .reduce((sum, c) => sum + c.length, 0);
+      const binaryBytes = Object.values(binaryFiles)
+        .reduce((sum, b64) => sum + Math.floor((b64.length * 3) / 4), 0);
+      const totalBytes = textBytes + binaryBytes;
 
       spinner.text = `Deploying ${totalFiles} files (${formatBytes(totalBytes)})...`;
 
@@ -60,6 +75,9 @@ export function registerDeploy(program: Command) {
           project_id: projectId,
           files,
         };
+        if (Object.keys(binaryFiles).length > 0) {
+          body.binary_files = binaryFiles;
+        }
         if (Object.keys(functions).length > 0) {
           body.functions = functions;
         }
@@ -93,6 +111,7 @@ function collectFiles(
   baseDir: string,
   currentDir: string,
   files: Record<string, string>,
+  binaryFiles: Record<string, string>,
   functions: Record<string, string>,
 ) {
   for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
@@ -102,7 +121,7 @@ function collectFiles(
     const relPath = relative(baseDir, fullPath);
 
     if (entry.isDirectory()) {
-      collectFiles(baseDir, fullPath, files, functions);
+      collectFiles(baseDir, fullPath, files, binaryFiles, functions);
       continue;
     }
 
@@ -111,13 +130,15 @@ function collectFiles(
     const stat = statSync(fullPath);
     if (stat.size > MAX_FILE_SIZE) continue;
 
-    const content = readFileSync(fullPath, 'utf-8');
+    const isBinary = BINARY_EXTS.has(extname(entry.name).toLowerCase());
 
     if (relPath.startsWith('functions/')) {
-      // Platform expects keys relative to functions/ (e.g. "api/health.js")
-      functions[relPath.slice('functions/'.length)] = content;
+      const key = relPath.slice('functions/'.length);
+      functions[key] = readFileSync(fullPath, 'utf-8');
+    } else if (isBinary) {
+      binaryFiles[relPath] = readFileSync(fullPath).toString('base64');
     } else {
-      files[relPath] = content;
+      files[relPath] = readFileSync(fullPath, 'utf-8');
     }
   }
 }

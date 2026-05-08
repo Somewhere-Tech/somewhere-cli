@@ -52,6 +52,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere open --dashboard` | Open the dashboard |
 | `somewhere dev` | Run local dev with platform env vars |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
+| `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 
 Short alias: `sw` works everywhere `somewhere` does.
 

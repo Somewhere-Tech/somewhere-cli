@@ -4,7 +4,9 @@ import ora from 'ora';
 import { ApiClient } from '../lib/client.js';
 import {
   getToken,
+  hasGlobalMcpConfig,
   loadProjectConfig,
+  saveGlobalMcpConfig,
   saveMcpConfig,
   saveProjectConfig,
 } from '../lib/config.js';
@@ -50,18 +52,23 @@ export function registerInit(program: Command) {
         if (!name) return;
       }
 
-      const subRes = await prompts({
-        type: 'text',
-        name: 'subdomain',
-        message: 'Deploy to',
-        initial: name.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-        format: (v: string) => `${v}.somewhere.tech`,
-      });
-
-      const subdomain = (subRes.subdomain as string)
-        ?.replace('.somewhere.tech', '')
-        .trim();
-      if (!subdomain) return;
+      // If --name was provided, derive subdomain automatically (no prompt)
+      let subdomain: string;
+      if (opts.name) {
+        subdomain = name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+      } else {
+        const subRes = await prompts({
+          type: 'text',
+          name: 'subdomain',
+          message: 'Deploy to',
+          initial: name.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
+          format: (v: string) => `${v}.somewhere.tech`,
+        });
+        subdomain = (subRes.subdomain as string)
+          ?.replace('.somewhere.tech', '')
+          .trim();
+        if (!subdomain) return;
+      }
 
       const spinner = ora('Creating project...').start();
       try {
@@ -83,12 +90,14 @@ export function registerInit(program: Command) {
         success('.somewhere.json written');
 
         saveMcpConfig(dir, token);
-        success('.mcp.json written — Claude Code and Codex are now connected');
+
+        if (!hasGlobalMcpConfig()) {
+          saveGlobalMcpConfig(token);
+          success('~/.claude.json updated — Claude Code MCP connected');
+        }
 
         console.log('');
-        info('Your project is ready. Start building:');
-        info(`  ${dim('claude "build me a landing page"')}`);
-        info(`  ${dim('somewhere deploy')}`);
+        info('Project created. Run claude to start building.');
       } catch (err) {
         spinner.fail('Failed to create project');
         error(err instanceof Error ? err.message : String(err));
@@ -134,5 +143,12 @@ async function linkExisting(
   success(`.somewhere.json linked to ${teal(project.name)}`);
 
   saveMcpConfig(dir, token);
-  success('.mcp.json written — Claude Code and Codex are now connected');
+
+  if (!hasGlobalMcpConfig()) {
+    saveGlobalMcpConfig(token);
+    success('~/.claude.json updated — Claude Code MCP connected');
+  }
+
+  console.log('');
+  info('Project created. Run claude to start building.');
 }

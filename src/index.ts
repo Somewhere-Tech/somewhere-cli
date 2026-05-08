@@ -1,3 +1,6 @@
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { registerAuth } from './commands/auth.js';
 import { registerInit } from './commands/init.js';
@@ -9,11 +12,16 @@ import { registerStatus } from './commands/status.js';
 import { registerOpen } from './commands/open.js';
 import { registerDev } from './commands/dev.js';
 import { registerApi } from './commands/api.js';
+import { registerMcp } from './commands/mcp.js';
+
+const pkg = JSON.parse(
+  readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
+) as { version: string };
 
 const program = new Command()
   .name('somewhere')
   .description('CLI for somewhere.tech')
-  .version('0.1.0');
+  .version(pkg.version);
 
 registerAuth(program);
 registerInit(program);
@@ -25,5 +33,6 @@ registerStatus(program);
 registerOpen(program);
 registerDev(program);
 registerApi(program);
+registerMcp(program);
 
 program.parse();
