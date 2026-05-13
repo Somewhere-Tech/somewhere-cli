@@ -1,7 +1,7 @@
 {
   "name": "@somewhere-tech/cli",
-  "version": "0.3.0",
-  "description": "CLI for somewhere.tech — auth, projects, deploy, logs, env, MCP bridge.",
+  "version": "0.7.0",
+  "description": "CLI for somewhere.tech — auth, projects, deploy, pull, promote, db, logs, env, MCP bridge.",
   "keywords": [
     "somewhere",
     "somewhere.tech",
@@ -15,7 +15,7 @@
     "url": "git+https://github.com/Somewhere-Tech/somewhere-cli.git"
   },
   "license": "MIT",
-  "author": "somewhere.tech",
+  "author": { "name": "somewhere.tech", "email": "support@somewhere.tech" },
   "type": "module",
   "bin": {
     "somewhere": "bin/somewhere.js",
