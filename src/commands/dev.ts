@@ -1,84 +1,290 @@
 import { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, relative } from 'node:path';
+import chokidar from 'chokidar';
+import open from 'open';
 import ora from 'ora';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, teal } from '../lib/output.js';
+import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
+import { bold, dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+
+const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
+const DEBOUNCE_MS = 500;
+
+interface DeployResult {
+  files?: string[] | number;
+  url: string;
+  has_functions?: boolean;
+  build_log?: string[];
+  warnings?: string[];
+}
+
+interface PatchResult {
+  url: string;
+  version: number;
+  warnings?: string[];
+  function_errors?: Array<{ route?: string; error?: string } | string>;
+  bundle_error?: string;
+  status?: 'success' | 'partial' | 'compile_degraded' | 'functions_degraded';
+}
 
 export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
-    .description('Start local dev with platform env vars injected')
-    .action(async (cmdParts: string[]) => {
-      const token = getToken();
-      const client = new ApiClient(token);
-      const config = loadProjectConfig();
-
-      if (!config) {
-        error('No project linked. Run `somewhere init` first.');
-        process.exit(1);
+    .description(
+      'Hot-deploy watcher: save a file → live in seconds, no local server. ' +
+        'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars instead.',
+    )
+    .option('--project <id>', 'Override project ID')
+    .action(async (cmdParts: string[] | undefined, opts: { project?: string }) => {
+      // A passed command keeps the legacy local-exec behavior (Option B —
+      // run your own server with platform context injected). No command =
+      // the hot-deploy watcher (Option A — the platform's no-localhost answer).
+      if (cmdParts && cmdParts.length > 0) {
+        return runLegacyExec(cmdParts);
       }
-
-      const spinner = ora('Loading env vars from somewhere.tech...').start();
-      try {
-        const result = await client.call<{
-          keys?: Array<{ key: string }>;
-          vars?: Array<{ key: string }>;
-        }>('GET', '/env', undefined, { project_id: config.project_id });
-
-        const vars = result.keys ?? result.vars ?? [];
-        spinner.stop();
-        success(`${vars.length} env vars loaded`);
-
-        // Detect dev command
-        let command = cmdParts.join(' ');
-        if (!command) {
-          command = detectDevCommand();
-        }
-        if (!command) {
-          error(
-            'Could not detect a dev command. Pass one: somewhere dev npm run dev',
-          );
-          process.exit(1);
-        }
-
-        info(`Starting: ${dim(command)}`);
-        console.log('');
-
-        const envOverrides: Record<string, string> = {
-          SOMEWHERE_PROJECT_ID: config.project_id,
-          SOMEWHERE_SUBDOMAIN: config.subdomain,
-          SOMEWHERE_URL: `https://${config.subdomain}.somewhere.tech`,
-        };
-        // Env var VALUES aren't returned by the API (encrypted). The user's
-        // functions/server will read them from the platform at runtime.
-        // Here we just inject the project context vars.
-
-        const child = spawn(command, {
-          shell: true,
-          stdio: 'inherit',
-          env: { ...process.env, ...envOverrides },
-        });
-
-        child.on('exit', (code) => process.exit(code ?? 0));
-      } catch (err) {
-        spinner.fail('Failed to load env vars');
-        error(err instanceof Error ? err.message : String(err));
-        process.exit(1);
-      }
+      return runHotDeploy(opts);
     });
 }
 
-function detectDevCommand(): string {
-  const pkgPath = join(process.cwd(), 'package.json');
-  if (existsSync(pkgPath)) {
-    try {
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8'));
-      if (pkg.scripts?.dev) return 'npm run dev';
-      if (pkg.scripts?.start) return 'npm start';
-    } catch {}
+async function runHotDeploy(opts: { project?: string }) {
+  const token = getToken();
+  const client = new ApiClient(token);
+  const cwd = process.cwd();
+
+  let projectId = opts.project;
+  let subdomain: string | undefined;
+  if (!projectId) {
+    const config = loadProjectConfig();
+    if (!config) {
+      error('No project linked. Run `somewhere init` or pass --project <id>.');
+      process.exit(1);
+    }
+    projectId = config.project_id;
+    subdomain = config.subdomain;
   }
-  return '';
+
+  // Initial full sync. /deploy/patch rejects projects with no prior deploy, so
+  // a full deploy first guarantees the project is live AND gives us the URL.
+  const spinner = ora('Syncing current state...').start();
+  const { files, binaryFiles, functions } = collectFiles(cwd);
+  let url: string;
+  try {
+    const body: Record<string, unknown> = { project_id: projectId, files };
+    if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
+    if (Object.keys(functions).length) body.functions = functions;
+    const res = await client.call<DeployResult>('POST', '/deploy', body);
+    url = res.url;
+    spinner.stop();
+    const n = typeof res.files === 'number' ? res.files : (res.files ?? []).length;
+    success(`Synced ${n} files`);
+    if (res.warnings?.length) for (const w of res.warnings) warn(w);
+  } catch (err) {
+    spinner.fail('Initial sync failed');
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  console.log('');
+  console.log(`${green('👀')} ${bold('Watching')} ${dim(cwd)} ${dim('for changes')}`);
+  console.log(`${teal('🌐')} ${teal(url)}`);
+  console.log(dim('   save a file and it goes live. Ctrl-C to stop.\n'));
+  open(url).catch(() => {});
+
+  // Debounced batch of changes. Saving three files in quick succession ships
+  // one patch, not three.
+  const pendingChanged = new Set<string>();
+  const pendingDeleted = new Set<string>();
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let deploying = false;
+
+  const schedule = () => {
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(flush, DEBOUNCE_MS);
+  };
+
+  const flush = async () => {
+    if (deploying) {
+      schedule(); // re-arm; a deploy is in flight
+      return;
+    }
+    const changed = [...pendingChanged];
+    const deleted = [...pendingDeleted];
+    if (!changed.length && !deleted.length) return;
+    pendingChanged.clear();
+    pendingDeleted.clear();
+    deploying = true;
+    try {
+      await deployBatch(client, projectId!, cwd, changed, deleted);
+    } finally {
+      deploying = false;
+      if (pendingChanged.size || pendingDeleted.size) schedule();
+    }
+  };
+
+  const watcher = chokidar.watch(cwd, {
+    ignoreInitial: true,
+    ignored: (p: string) => {
+      const rel = relative(cwd, p);
+      if (!rel || rel.startsWith('..')) return false;
+      return rel.split(/[\\/]/).some(
+        (seg) => IGNORE.has(seg) || (seg.startsWith('.') && seg !== '.' && seg !== ''),
+      );
+    },
+  });
+
+  const onChange = (abs: string) => {
+    const rel = relative(cwd, abs);
+    if (!WATCH_EXTS.test(rel)) return;
+    pendingChanged.add(rel);
+    pendingDeleted.delete(rel);
+    schedule();
+  };
+  const onUnlink = (abs: string) => {
+    const rel = relative(cwd, abs);
+    if (!WATCH_EXTS.test(rel)) return;
+    pendingDeleted.add(rel);
+    pendingChanged.delete(rel);
+    schedule();
+  };
+
+  watcher.on('add', onChange).on('change', onChange).on('unlink', onUnlink);
+
+  process.on('SIGINT', () => {
+    console.log(`\n${dim('Stopped watching.')}`);
+    watcher.close().finally(() => process.exit(0));
+  });
+}
+
+async function deployBatch(
+  client: ApiClient,
+  projectId: string,
+  cwd: string,
+  changed: string[],
+  deleted: string[],
+) {
+  const updateFiles: Record<string, string> = {};
+  const updateFunctions: Record<string, string> = {};
+  const updateBinary: Record<string, string> = {};
+  const deleteKeys: string[] = [];
+
+  for (const rel of changed) {
+    const abs = join(cwd, rel);
+    if (!existsSync(abs)) continue; // changed-then-deleted within the window
+    const { kind, key } = classifyKey(rel);
+    if (kind === 'function') updateFunctions[key] = readFileSync(abs, 'utf-8');
+    else if (kind === 'binary') updateBinary[key] = readFileSync(abs).toString('base64');
+    else updateFiles[key] = readFileSync(abs, 'utf-8');
+  }
+  for (const rel of deleted) deleteKeys.push(classifyKey(rel).key);
+
+  const body: Record<string, unknown> = { project_id: projectId };
+  if (Object.keys(updateFiles).length) body.update_files = updateFiles;
+  if (Object.keys(updateFunctions).length) body.update_functions = updateFunctions;
+  if (Object.keys(updateBinary).length) body.update_binary_files = updateBinary;
+  if (deleteKeys.length) body.delete_files = deleteKeys;
+
+  // Nothing real to ship (e.g. every changed file vanished) — skip quietly.
+  if (Object.keys(body).length === 1) return;
+
+  const label = describeBatch(changed, deleted);
+  const t0 = Date.now();
+  process.stdout.write(`${dim(stamp())} ${label} ${dim('→ deploying...')}`);
+
+  try {
+    const r = await client.call<PatchResult>('POST', '/deploy/patch', body);
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    // Carriage-return overwrites the "deploying..." line with the verdict.
+    process.stdout.write('\r\x1b[K');
+
+    if (r.bundle_error) {
+      console.log(`${dim(stamp())} ${label} ${red('✗ compile failed')} ${dim(`(${secs}s)`)}`);
+      error(r.bundle_error);
+      info(dim('Previous working version is still live. Fix and save again.'));
+      return;
+    }
+    if (r.function_errors?.length) {
+      console.log(`${dim(stamp())} ${label} ${yellow('⚠ functions degraded')} ${dim(`(${secs}s)`)}`);
+      for (const fe of r.function_errors) {
+        const route = typeof fe === 'string' ? fe : fe.route ?? '';
+        const detail = typeof fe === 'string' ? '' : fe.error ? ` — ${fe.error}` : '';
+        warn(`${route}${detail}`);
+      }
+      return;
+    }
+    if (r.warnings?.length) {
+      console.log(`${dim(stamp())} ${label} ${yellow('⚠ live')} ${dim(`(${secs}s)`)}`);
+      for (const w of r.warnings) warn(w);
+      return;
+    }
+    console.log(`${dim(stamp())} ${label} ${green('✓ live')} ${dim(`(${secs}s, v${r.version})`)}`);
+  } catch (err) {
+    const secs = ((Date.now() - t0) / 1000).toFixed(1);
+    process.stdout.write('\r\x1b[K');
+    console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
+    error(err instanceof Error ? err.message : String(err));
+  }
+}
+
+function describeBatch(changed: string[], deleted: string[]): string {
+  const parts: string[] = [];
+  if (changed.length === 1 && !deleted.length) return teal(changed[0]);
+  if (deleted.length === 1 && !changed.length) return `${teal(deleted[0])} ${dim('(deleted)')}`;
+  if (changed.length) parts.push(`${changed.length} changed`);
+  if (deleted.length) parts.push(`${deleted.length} deleted`);
+  return teal(parts.join(', '));
+}
+
+function stamp(): string {
+  const d = new Date();
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `[${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
+}
+
+// ─── Legacy: `somewhere dev <cmd>` runs a local command with platform context.
+// Kept for anyone scripting against the old behavior; the no-arg form is the
+// recommended hot-deploy watcher above.
+async function runLegacyExec(cmdParts: string[]) {
+  const token = getToken();
+  const client = new ApiClient(token);
+  const config = loadProjectConfig();
+  if (!config) {
+    error('No project linked. Run `somewhere init` first.');
+    process.exit(1);
+  }
+
+  const spinner = ora('Loading project context from somewhere.tech...').start();
+  try {
+    const result = await client.call<{ keys?: Array<{ key: string }>; vars?: Array<{ key: string }> }>(
+      'GET',
+      '/env',
+      undefined,
+      { project_id: config.project_id },
+    );
+    const vars = result.keys ?? result.vars ?? [];
+    spinner.stop();
+    success(`${vars.length} env vars available (values stay server-side)`);
+
+    const command = cmdParts.join(' ');
+    info(`Starting: ${dim(command)}`);
+    console.log('');
+
+    const child = spawn(command, {
+      shell: true,
+      stdio: 'inherit',
+      env: {
+        ...process.env,
+        SOMEWHERE_PROJECT_ID: config.project_id,
+        SOMEWHERE_SUBDOMAIN: config.subdomain,
+        SOMEWHERE_URL: `https://${config.subdomain}.somewhere.tech`,
+      },
+    });
+    child.on('exit', (code) => process.exit(code ?? 0));
+  } catch (err) {
+    spinner.fail('Failed to load project context');
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }

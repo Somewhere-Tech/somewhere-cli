@@ -1,0 +1,107 @@
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { extname, join, relative } from 'node:path';
+
+// Directories / files never uploaded. Mirrors the deploy collector.
+export const IGNORE = new Set([
+  'node_modules',
+  '.git',
+  '.somewhere.json',
+  '.mcp.json',
+  '.env',
+  '.DS_Store',
+  'dist',
+  '.next',
+  '.vercel',
+]);
+
+export const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB per file
+
+export const BINARY_EXTS = new Set([
+  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.avif',
+  '.woff', '.woff2', '.ttf', '.otf', '.eot',
+  '.pdf', '.zip', '.gz', '.tar', '.br',
+  '.mp3', '.mp4', '.wav', '.ogg', '.webm', '.mov', '.m4a',
+  '.wasm',
+]);
+
+// Mirror of worker/src/routes/deploy.ts:isFunctionPath. Files matching these
+// patterns must ship in `functions`/`update_functions`, not `files` — otherwise
+// the worker writes them to static storage and never invokes the bundler, so
+// the routes never register.
+export function isFunctionPath(p: string): boolean {
+  if (!/\.(ts|js|mjs)$/i.test(p)) return false;
+  if (p.startsWith('api/') || p.startsWith('_lib/')) return true;
+  if (/^\[[^/]+\]\.(ts|js|mjs)$/.test(p)) return true;
+  return false;
+}
+
+export function isBinaryPath(p: string): boolean {
+  return BINARY_EXTS.has(extname(p).toLowerCase());
+}
+
+export interface CollectedFiles {
+  files: Record<string, string>;
+  binaryFiles: Record<string, string>;
+  functions: Record<string, string>;
+}
+
+/** Walk a directory tree and bucket every file into static / binary / function,
+ *  applying the same path remapping the deploy command uses. */
+export function collectFiles(baseDir: string): CollectedFiles {
+  const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {} };
+  walk(baseDir, baseDir, out);
+  return out;
+}
+
+function walk(baseDir: string, currentDir: string, out: CollectedFiles) {
+  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
+    if (IGNORE.has(entry.name) || entry.name.startsWith('.')) continue;
+
+    const fullPath = join(currentDir, entry.name);
+    if (entry.isDirectory()) {
+      walk(baseDir, fullPath, out);
+      continue;
+    }
+    if (!entry.isFile()) continue;
+    if (statSync(fullPath).size > MAX_FILE_SIZE) continue;
+
+    const relPath = relative(baseDir, fullPath);
+    classifyInto(out, baseDir, relPath);
+  }
+}
+
+export type FileKind = 'static' | 'binary' | 'function';
+
+/** The deploy key + bucket a relative path maps to. `functions/`-prefixed paths
+ *  are stripped to their route; root-level api/_lib/[param] paths are functions. */
+export function classifyKey(relPath: string): { kind: FileKind; key: string } {
+  if (relPath.startsWith('functions/')) {
+    return { kind: 'function', key: relPath.slice('functions/'.length) };
+  }
+  if (isFunctionPath(relPath)) {
+    return { kind: 'function', key: relPath };
+  }
+  if (isBinaryPath(relPath)) {
+    return { kind: 'binary', key: relPath };
+  }
+  return { kind: 'static', key: relPath };
+}
+
+/** Read one file off disk and place it in the right bucket of `out`. */
+export function classifyInto(out: CollectedFiles, baseDir: string, relPath: string) {
+  const fullPath = join(baseDir, relPath);
+  const { kind, key } = classifyKey(relPath);
+  if (kind === 'function') {
+    out.functions[key] = readFileSync(fullPath, 'utf-8');
+  } else if (kind === 'binary') {
+    out.binaryFiles[key] = readFileSync(fullPath).toString('base64');
+  } else {
+    out.files[key] = readFileSync(fullPath, 'utf-8');
+  }
+}
+
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

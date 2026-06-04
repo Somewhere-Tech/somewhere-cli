@@ -1,44 +1,10 @@
 import { Command } from 'commander';
-import { readdirSync, readFileSync, statSync } from 'node:fs';
-import { extname, join, relative } from 'node:path';
+import { join } from 'node:path';
 import ora from 'ora';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
+import { collectFiles, formatBytes } from '../lib/files.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
-
-const IGNORE = new Set([
-  'node_modules',
-  '.git',
-  '.somewhere.json',
-  '.mcp.json',
-  '.env',
-  '.DS_Store',
-  'dist',
-  '.next',
-  '.vercel',
-]);
-
-const MAX_FILE_SIZE = 5 * 1024 * 1024; // 5MB per file
-
-// Mirror of worker/src/routes/deploy.ts:isFunctionPath. Files matching
-// these patterns must ship in body.functions, not body.files — otherwise
-// the worker writes them to static R2 and never invokes the bundler, so
-// the routes never register. (Bug found 2026-05-09: api/* at project
-// root silently shipped as static.)
-function isFunctionPath(p: string): boolean {
-  if (!/\.(ts|js|mjs)$/i.test(p)) return false;
-  if (p.startsWith('api/') || p.startsWith('_lib/')) return true;
-  if (/^\[[^/]+\]\.(ts|js|mjs)$/.test(p)) return true;
-  return false;
-}
-
-const BINARY_EXTS = new Set([
-  '.png', '.jpg', '.jpeg', '.gif', '.webp', '.ico', '.bmp', '.avif',
-  '.woff', '.woff2', '.ttf', '.otf', '.eot',
-  '.pdf', '.zip', '.gz', '.tar', '.br',
-  '.mp3', '.mp4', '.wav', '.ogg', '.webm', '.mov', '.m4a',
-  '.wasm',
-]);
 
 export function registerDeploy(program: Command) {
   program
@@ -88,10 +54,7 @@ export function registerDeploy(program: Command) {
 
       const spinner = ora('Collecting files...').start();
 
-      const files: Record<string, string> = {};
-      const binaryFiles: Record<string, string> = {};
-      const functions: Record<string, string> = {};
-      collectFiles(targetDir, targetDir, files, binaryFiles, functions);
+      const { files, binaryFiles, functions } = collectFiles(targetDir);
 
       const totalFiles =
         Object.keys(files).length +
@@ -298,48 +261,4 @@ function printDryRun(plan: DryRunResult, scope?: 'functions' | 'static') {
     }
   }
   console.log('');
-}
-
-function collectFiles(
-  baseDir: string,
-  currentDir: string,
-  files: Record<string, string>,
-  binaryFiles: Record<string, string>,
-  functions: Record<string, string>,
-) {
-  for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
-    if (IGNORE.has(entry.name) || entry.name.startsWith('.')) continue;
-
-    const fullPath = join(currentDir, entry.name);
-    const relPath = relative(baseDir, fullPath);
-
-    if (entry.isDirectory()) {
-      collectFiles(baseDir, fullPath, files, binaryFiles, functions);
-      continue;
-    }
-
-    if (!entry.isFile()) continue;
-
-    const stat = statSync(fullPath);
-    if (stat.size > MAX_FILE_SIZE) continue;
-
-    const isBinary = BINARY_EXTS.has(extname(entry.name).toLowerCase());
-
-    if (relPath.startsWith('functions/')) {
-      const key = relPath.slice('functions/'.length);
-      functions[key] = readFileSync(fullPath, 'utf-8');
-    } else if (isFunctionPath(relPath)) {
-      functions[relPath] = readFileSync(fullPath, 'utf-8');
-    } else if (isBinary) {
-      binaryFiles[relPath] = readFileSync(fullPath).toString('base64');
-    } else {
-      files[relPath] = readFileSync(fullPath, 'utf-8');
-    }
-  }
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }

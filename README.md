@@ -52,7 +52,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere status` | Show project + workspace status |
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |
-| `somewhere dev` | Run local dev with platform env vars |
+| `somewhere dev` | Hot-deploy watcher — save a file, it goes live in seconds (no local server) |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 
@@ -93,6 +93,32 @@ After a successful deploy the CLI prints a **build log** — the entry chunk, ea
 somewhere deploy --dry-run            # preview the diff first
 somewhere deploy --scope functions    # ship a backend fix without touching the site
 ```
+
+## Hot reload: `somewhere dev`
+
+```sh
+somewhere dev
+```
+
+Starts a file watcher that hot-deploys on every save — no local server, no
+emulator. Edit a file, save, and it's live on the real platform in a couple of
+seconds with full `sw.*` context. Single-file saves ship as incremental patches;
+compile errors show up in the terminal immediately (with the file + line) and the
+previous working version keeps serving until you fix it.
+
+```
+$ somewhere dev
+✓ Synced 3 files
+👀 Watching /my-app for changes
+🌐 https://my-app.somewhere.tech
+
+[13:41:01] src/main.tsx → ✓ live (1.2s, v2)
+[13:41:18] api/users.ts → ✗ compile failed (1.4s)  ← previous version still live
+[13:41:24] api/users.ts → ✓ live (0.9s, v3)
+```
+
+Passing a command (`somewhere dev npm run dev`) keeps the legacy behavior — run
+your own process locally with `SOMEWHERE_PROJECT_ID` / `SOMEWHERE_URL` injected.
 
 ## Client-side code: use the SDK
 
