@@ -5,16 +5,20 @@ import { dim, error, info, statusDot, teal, timeAgo } from '../lib/output.js';
 
 export function registerStatus(program: Command) {
   program
-    .command('status')
+    .command('status [project]')
     .description('Show project and workspace status')
-    .action(async () => {
+    .action(async (projectArg: string | undefined) => {
       const token = getToken();
       const client = new ApiClient(token);
-      const config = loadProjectConfig();
 
-      if (!config) {
-        error('No project linked. Run `somewhere init` first.');
-        process.exit(1);
+      let projectId = projectArg;
+      if (!projectId) {
+        const config = loadProjectConfig();
+        if (!config) {
+          error('No project specified and no .somewhere.json found. Pass a project ID or run `somewhere init`.');
+          process.exit(1);
+        }
+        projectId = config.project_id;
       }
 
       try {
@@ -23,7 +27,7 @@ export function registerStatus(program: Command) {
           status: string;
           subdomain: string;
           updated_at?: string;
-        }>('GET', `/projects/${encodeURIComponent(config.project_id)}`);
+        }>('GET', `/projects/${encodeURIComponent(projectId)}`);
 
         console.log(`\n  Project: ${teal(p.name)} (${statusDot(p.status)})`);
         if (p.subdomain) {

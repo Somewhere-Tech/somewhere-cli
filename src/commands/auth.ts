@@ -50,26 +50,22 @@ export function registerAuth(program: Command) {
 
       const client = new ApiClient(config.token);
       try {
-        const billing = await client.call<{
-          tier: string;
-          apps_used: number;
-          total_app_slots: number;
-        }>('GET', '/billing/status');
+        const r = await client.call<{
+          user: {
+            email: string;
+            name: string | null;
+            username: string | null;
+            effective_tier: string;
+          };
+          stats: { api_keys: number; projects: number };
+        }>('GET', '/auth/whoami');
 
-        const projects = await client.call<{
-          projects: Array<{ status: string }>;
-          deployed_count: number;
-        }>('GET', '/projects');
-
-        const deployed = projects.deployed_count ?? 0;
-        const draft = (projects.projects ?? []).filter(
-          (p) => p.status === 'draft',
-        ).length;
-
-        console.log(`${teal(config.user.email)} (${config.user.username})`);
-        info(`Plan: ${billing.tier === 'builder' ? 'Builder' : 'Free'}`);
-        info(`Projects: ${projects.projects.length} (${deployed} deployed, ${draft} draft)`);
-        info(`Profile: ${config.user.username}.somewhere.tech`);
+        const tier = r.user.effective_tier === 'builder' ? 'Builder' : 'Free';
+        console.log(`${teal(r.user.email)}  ${dim(`(${tier})`)}`);
+        if (r.user.name) info(dim(r.user.name));
+        if (r.user.username) info(dim(`@${r.user.username}`));
+        info(dim(`${r.stats.projects} project${r.stats.projects === 1 ? '' : 's'}, ${r.stats.api_keys} active key${r.stats.api_keys === 1 ? '' : 's'}`));
+        info(dim(`key ${config.token.slice(0, 12)}…`));
       } catch {
         console.log(teal(config.user.email));
         info(dim('Could not fetch account details'));

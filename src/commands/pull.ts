@@ -1,0 +1,100 @@
+import { Command } from 'commander';
+import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
+import { dirname, join, resolve } from 'node:path';
+import ora from 'ora';
+import { ApiClient } from '../lib/client.js';
+import { getToken, loadProjectConfig } from '../lib/config.js';
+import { dim, error, info, success, teal, warn } from '../lib/output.js';
+
+interface SourceResponse {
+  project_id: string;
+  env: 'dev' | 'prod';
+  version: number;
+  static_files: Record<string, string>;
+  binary_files: Record<string, string>;
+  functions: Record<string, string>;
+  counts: { static_files: number; binary_files: number; functions: number };
+}
+
+export function registerPull(program: Command) {
+  program
+    .command('pull [project]')
+    .description('Download a project\'s deployed source files to the current directory')
+    .option('--env <env>', 'Environment to pull from (dev or prod)', 'dev')
+    .option('--out <dir>', 'Output directory', '.')
+    .option('--force', 'Overwrite existing files without prompting')
+    .action(async (projectArg: string | undefined, opts) => {
+      const token = getToken();
+      const client = new ApiClient(token);
+
+      const envSlot = String(opts.env).toLowerCase();
+      if (envSlot !== 'dev' && envSlot !== 'prod') {
+        error('--env must be "dev" or "prod"');
+        process.exit(1);
+      }
+
+      let projectId = projectArg;
+      if (!projectId) {
+        const config = loadProjectConfig();
+        if (!config) {
+          error('No project specified and no .somewhere.json found. Pass a project ID or run `somewhere init`.');
+          process.exit(1);
+        }
+        projectId = config.project_id;
+      }
+
+      const outDir = resolve(process.cwd(), String(opts.out));
+      if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
+
+      const spinner = ora(`Fetching ${envSlot} source...`).start();
+      let body: SourceResponse;
+      try {
+        body = await client.call<SourceResponse>('GET', '/deploy/source', undefined, {
+          project_id: projectId,
+          env: envSlot,
+        });
+      } catch (err) {
+        spinner.fail('Pull failed');
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      spinner.stop();
+
+      const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
+      if (total === 0) {
+        warn(`No files in ${envSlot} for this project.`);
+        return;
+      }
+
+      const written: string[] = [];
+      const skipped: string[] = [];
+
+      const writeOne = (relPath: string, contents: Buffer | string) => {
+        const target = join(outDir, relPath);
+        if (existsSync(target) && !opts.force) {
+          skipped.push(relPath);
+          return;
+        }
+        mkdirSync(dirname(target), { recursive: true });
+        writeFileSync(target, contents);
+        written.push(relPath);
+      };
+
+      for (const [path, content] of Object.entries(body.static_files)) {
+        writeOne(path, content);
+      }
+      for (const [path, b64] of Object.entries(body.binary_files)) {
+        writeOne(path, Buffer.from(b64, 'base64'));
+      }
+      for (const [path, content] of Object.entries(body.functions)) {
+        writeOne(join('functions', path), content);
+      }
+
+      success(`Pulled ${written.length} file${written.length === 1 ? '' : 's'} from ${teal(envSlot)} (v${body.version}) to ${teal(outDir)}`);
+      if (skipped.length > 0) {
+        warn(`Skipped ${skipped.length} existing file${skipped.length === 1 ? '' : 's'} (use --force to overwrite):`);
+        for (const p of skipped.slice(0, 10)) info(dim(`  ${p}`));
+        if (skipped.length > 10) info(dim(`  ...and ${skipped.length - 10} more`));
+      }
+    });
+}
