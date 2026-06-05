@@ -34,7 +34,7 @@ export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
     .description(
-      'Hot-deploy watcher: save a file → live in seconds, no local server. ' +
+      'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing to prod, no version bump). ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars instead.',
     )
     .option('--project <id>', 'Override project ID')
@@ -66,20 +66,22 @@ async function runHotDeploy(opts: { project?: string }) {
     subdomain = config.subdomain;
   }
 
-  // Initial full sync. /deploy/patch rejects projects with no prior deploy, so
-  // a full deploy first guarantees the project is live AND gives us the URL.
-  const spinner = ora('Syncing current state...').start();
+  // Initial full sync to the PREVIEW slot (preview: true). Writes only the
+  // owner-gated dev slot — never prod, never a version bump or history entry.
+  // /deploy/patch rejects projects with no prior deploy, so a full (preview)
+  // deploy first establishes the sandbox AND returns the {slug}-dev URL.
+  const spinner = ora('Syncing to preview...').start();
   const { files, binaryFiles, functions } = collectFiles(cwd);
   let url: string;
   try {
-    const body: Record<string, unknown> = { project_id: projectId, files };
+    const body: Record<string, unknown> = { project_id: projectId, files, preview: true };
     if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
     if (Object.keys(functions).length) body.functions = functions;
     const res = await client.call<DeployResult>('POST', '/deploy', body);
     url = res.url;
     spinner.stop();
     const n = typeof res.files === 'number' ? res.files : (res.files ?? []).length;
-    success(`Synced ${n} files`);
+    success(`Synced ${n} files to preview`);
     if (res.warnings?.length) for (const w of res.warnings) warn(w);
   } catch (err) {
     spinner.fail('Initial sync failed');
@@ -89,8 +91,9 @@ async function runHotDeploy(opts: { project?: string }) {
 
   console.log('');
   console.log(`${green('👀')} ${bold('Watching')} ${dim(cwd)} ${dim('for changes')}`);
-  console.log(`${teal('🌐')} ${teal(url)}`);
-  console.log(dim('   save a file and it goes live. Ctrl-C to stop.\n'));
+  console.log(`${teal('🌐')} ${bold('Preview:')} ${teal(url)}`);
+  console.log(dim('   private to you — save a file and the preview updates. Not live to users.'));
+  console.log(dim('   run `somewhere deploy` to ship to production. Ctrl-C to stop.\n'));
   open(url).catch(() => {});
 
   // Debounced batch of changes. Saving three files in quick succession ships
@@ -180,29 +183,29 @@ async function deployBatch(
   }
   for (const rel of deleted) deleteKeys.push(classifyKey(rel).key);
 
-  const body: Record<string, unknown> = { project_id: projectId };
+  const body: Record<string, unknown> = { project_id: projectId, preview: true };
   if (Object.keys(updateFiles).length) body.update_files = updateFiles;
   if (Object.keys(updateFunctions).length) body.update_functions = updateFunctions;
   if (Object.keys(updateBinary).length) body.update_binary_files = updateBinary;
   if (deleteKeys.length) body.delete_files = deleteKeys;
 
   // Nothing real to ship (e.g. every changed file vanished) — skip quietly.
-  if (Object.keys(body).length === 1) return;
+  if (Object.keys(body).length === 2) return;
 
   const label = describeBatch(changed, deleted);
   const t0 = Date.now();
-  process.stdout.write(`${dim(stamp())} ${label} ${dim('→ deploying...')}`);
+  process.stdout.write(`${dim(stamp())} ${label} ${dim('→ updating preview...')}`);
 
   try {
     const r = await client.call<PatchResult>('POST', '/deploy/patch', body);
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
-    // Carriage-return overwrites the "deploying..." line with the verdict.
+    // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');
 
     if (r.bundle_error) {
       console.log(`${dim(stamp())} ${label} ${red('✗ compile failed')} ${dim(`(${secs}s)`)}`);
       error(r.bundle_error);
-      info(dim('Previous working version is still live. Fix and save again.'));
+      info(dim('Your last working preview is still up. Fix and save again.'));
       return;
     }
     if (r.function_errors?.length) {
@@ -215,11 +218,11 @@ async function deployBatch(
       return;
     }
     if (r.warnings?.length) {
-      console.log(`${dim(stamp())} ${label} ${yellow('⚠ live')} ${dim(`(${secs}s)`)}`);
+      console.log(`${dim(stamp())} ${label} ${yellow('⚠ preview')} ${dim(`(${secs}s)`)}`);
       for (const w of r.warnings) warn(w);
       return;
     }
-    console.log(`${dim(stamp())} ${label} ${green('✓ live')} ${dim(`(${secs}s, v${r.version})`)}`);
+    console.log(`${dim(stamp())} ${label} ${green('✓ preview')} ${dim(`(${secs}s)`)}`);
   } catch (err) {
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     process.stdout.write('\r\x1b[K');

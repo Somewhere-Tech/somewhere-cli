@@ -52,7 +52,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere status` | Show project + workspace status |
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |
-| `somewhere dev` | Hot-deploy watcher — save a file, it goes live in seconds (no local server) |
+| `somewhere dev` | Private preview watcher — save a file, your owner-only preview updates in seconds (no local server, nothing to prod) |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 
@@ -100,21 +100,28 @@ somewhere deploy --scope functions    # ship a backend fix without touching the 
 somewhere dev
 ```
 
-Starts a file watcher that hot-deploys on every save — no local server, no
-emulator. Edit a file, save, and it's live on the real platform in a couple of
-seconds with full `sw.*` context. Single-file saves ship as incremental patches;
-compile errors show up in the terminal immediately (with the file + line) and the
-previous working version keeps serving until you fix it.
+Starts a file watcher that updates a **private preview** on every save — no local
+server, no emulator. You get a preview link (`{project}-dev.somewhere.tech`) that
+**only you can see** (owner-gated). Edit a file, save, and the preview refreshes
+in a couple of seconds on the real platform with full `sw.*` context.
+
+**It is not a deploy.** Nothing goes to production, no version number changes, no
+deployment-history entry — your real users never see your half-finished work.
+When it looks right, run `somewhere deploy` to ship to production. Compile errors
+show up in the terminal immediately (file + line); your last working preview keeps
+serving until you fix them.
 
 ```
 $ somewhere dev
-✓ Synced 3 files
+✓ Synced 3 files to preview
 👀 Watching /my-app for changes
-🌐 https://my-app.somewhere.tech
+🌐 Preview: https://my-app-dev.somewhere.tech
+   private to you — save a file and the preview updates. Not live to users.
+   run `somewhere deploy` to ship to production.
 
-[13:41:01] src/main.tsx → ✓ live (1.2s, v2)
-[13:41:18] api/users.ts → ✗ compile failed (1.4s)  ← previous version still live
-[13:41:24] api/users.ts → ✓ live (0.9s, v3)
+[13:41:01] src/main.tsx → ✓ preview (1.2s)
+[13:41:18] api/users.ts → ✗ compile failed (1.4s)  ← last working preview still up
+[13:41:24] api/users.ts → ✓ preview (0.9s)
 ```
 
 Passing a command (`somewhere dev npm run dev`) keeps the legacy behavior — run
