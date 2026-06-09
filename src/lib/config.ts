@@ -99,3 +99,38 @@ export function hasGlobalMcpConfig(): boolean {
     return false;
   }
 }
+
+const CURSOR_DIR = join(homedir(), '.cursor');
+export const CURSOR_MCP_PATH = join(CURSOR_DIR, 'mcp.json');
+
+/** Cursor gets the stdio bridge (`somewhere mcp`) rather than an embedded
+ *  bearer token: the bridge reads ~/.somewhere/config.json at runtime, so a
+ *  re-login never leaves a stale token behind in Cursor's config. */
+export function saveCursorMcpConfig(): void {
+  let config: Record<string, unknown> = {};
+  if (existsSync(CURSOR_MCP_PATH)) {
+    try {
+      config = JSON.parse(readFileSync(CURSOR_MCP_PATH, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      // Malformed — preserve nothing, write fresh
+    }
+  }
+
+  const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
+  servers.somewhere = { command: 'somewhere', args: ['mcp'] };
+  config.mcpServers = servers;
+
+  if (!existsSync(CURSOR_DIR)) mkdirSync(CURSOR_DIR, { recursive: true });
+  writeFileSync(CURSOR_MCP_PATH, JSON.stringify(config, null, 2) + '\n');
+}
+
+export function hasCursorMcpConfig(): boolean {
+  if (!existsSync(CURSOR_MCP_PATH)) return false;
+  try {
+    const config = JSON.parse(readFileSync(CURSOR_MCP_PATH, 'utf-8')) as Record<string, unknown>;
+    const servers = config.mcpServers as Record<string, unknown> | undefined;
+    return !!servers?.somewhere;
+  } catch {
+    return false;
+  }
+}

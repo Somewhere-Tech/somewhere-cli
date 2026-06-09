@@ -31,6 +31,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | Command | What it does |
 |---|---|
 | `somewhere login` | Authenticate via browser (Google OAuth) |
+| `somewhere auth login` | Alias of `somewhere login` |
 | `somewhere logout` | Clear stored credentials |
 | `somewhere whoami` | Show current user, plan, project count |
 | `somewhere init` | Create project + write `.somewhere.json` + `.mcp.json` |
@@ -55,6 +56,8 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere dev` | Private preview watcher — save a file, your owner-only preview updates in seconds (no local server, nothing to prod) |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
+| `somewhere mcp install <host>` | Configure an MCP host (`codex`, `claude-code`, `cursor`) |
+| `somewhere mcp doctor` | Check MCP setup: login, token, server reachability, host configs |
 
 Short alias: `sw` works everywhere `somewhere` does.
 

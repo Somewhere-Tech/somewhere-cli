@@ -17,18 +17,20 @@ import {
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
 import { dim, error, info, success, teal } from '../lib/output.js';
 
+async function loginAction(opts: { legacy?: boolean }): Promise<void> {
+  if (opts.legacy) {
+    await runLegacyLogin();
+    return;
+  }
+  await runDeviceLogin();
+}
+
 export function registerAuth(program: Command) {
   program
     .command('login')
     .description('Authenticate with somewhere.tech')
     .option('--legacy', 'Use the localhost-callback flow instead of device code')
-    .action(async (opts: { legacy?: boolean }) => {
-      if (opts.legacy) {
-        await runLegacyLogin();
-        return;
-      }
-      await runDeviceLogin();
-    });
+    .action(loginAction);
 
   program
     .command('logout')
@@ -73,6 +75,14 @@ export function registerAuth(program: Command) {
     });
 
   const auth = program.command('auth').description('Manage stored credentials');
+
+  // Alias of the top-level `login` — published docs and gh-style muscle
+  // memory both expect `somewhere auth login` to work.
+  auth
+    .command('login')
+    .description('Authenticate with somewhere.tech (alias of `somewhere login`)')
+    .option('--legacy', 'Use the localhost-callback flow instead of device code')
+    .action(loginAction);
 
   auth
     .command('set <token>')
