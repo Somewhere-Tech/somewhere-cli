@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import ora from 'ora';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
@@ -10,7 +10,10 @@ export function registerDeploy(program: Command) {
   program
     .command('deploy [dir]')
     .description('Deploy the current directory to the linked project')
-    .option('--project <id>', 'Override project ID')
+    .option(
+      '--project <ref>',
+      'Project to deploy to — accepts the project UUID, slug, or subdomain (all three resolve server-side)',
+    )
     .option(
       '--scope <scope>',
       "Partial deploy: 'functions' (backend only, leaves the site untouched) or 'static' (site only, leaves functions untouched). Default deploys both.",
@@ -151,7 +154,16 @@ export function registerDeploy(program: Command) {
         }
       } catch (err) {
         spinner.fail(opts.dryRun ? 'Dry run failed' : 'Deploy failed');
-        error(err instanceof Error ? err.message : String(err));
+        // Always show the error code + HTTP status — "Project not found"
+        // with no code/status left a customer unable to tell auth from
+        // routing from payload failures (pfb_70e9d140c5a0).
+        if (err instanceof CliApiError) {
+          error(
+            `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
+          );
+        } else {
+          error(err instanceof Error ? err.message : String(err));
+        }
         process.exit(1);
       }
     });

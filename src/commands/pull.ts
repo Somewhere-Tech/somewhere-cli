@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import ora from 'ora';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, success, teal, warn } from '../lib/output.js';
 
@@ -55,7 +55,13 @@ export function registerPull(program: Command) {
         });
       } catch (err) {
         spinner.fail('Pull failed');
-        error(err instanceof Error ? err.message : String(err));
+        if (err instanceof CliApiError) {
+          error(
+            `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
+          );
+        } else {
+          error(err instanceof Error ? err.message : String(err));
+        }
         process.exit(1);
       }
       spinner.stop();

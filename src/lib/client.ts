@@ -32,7 +32,29 @@ export class ApiClient {
       reqBody = JSON.stringify(body);
     }
 
-    const res = await fetch(url, { method, headers, body: reqBody });
+    let res: Response;
+    try {
+      res = await fetch(url, { method, headers, body: reqBody });
+    } catch (err) {
+      // Node's fetch rejects network-level failures with a bare
+      // "fetch failed" and buries the real reason (ENOTFOUND,
+      // ECONNRESET, UND_ERR_*) in err.cause. Surfacing only the bare
+      // message cost a customer an hour of guessing whether it was
+      // auth, payload, or network (pfb_70e9d140c5a0) — name the
+      // endpoint and the underlying cause.
+      const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      const detail =
+        cause?.code ??
+        cause?.message ??
+        (err instanceof Error ? err.message : String(err));
+      throw new CliApiError(
+        'NETWORK_ERROR',
+        `Could not reach ${method} ${url.split('?')[0]} — ${detail}. ` +
+          'No HTTP response was received (this is a connection problem, not a server rejection). ' +
+          'Check your network and retry; for large deploys a flaky connection can drop the upload mid-request.',
+        0,
+      );
+    }
     const text = await res.text();
     let parsed: ApiResponse<T>;
 
