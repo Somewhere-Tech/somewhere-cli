@@ -14,6 +14,7 @@ import { registerEnv } from './commands/env.js';
 import { registerStatus } from './commands/status.js';
 import { registerOpen } from './commands/open.js';
 import { registerDev } from './commands/dev.js';
+import { registerExec } from './commands/exec.js';
 import { registerApi } from './commands/api.js';
 import { registerMcp } from './commands/mcp.js';
 
@@ -38,6 +39,7 @@ registerEnv(program);
 registerStatus(program);
 registerOpen(program);
 registerDev(program);
+registerExec(program);
 registerApi(program);
 registerMcp(program);
 

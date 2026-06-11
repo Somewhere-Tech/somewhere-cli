@@ -9,6 +9,9 @@ import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
 import { bold, dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+import { assertNodeSupport, installLoader } from '../local/loader.js';
+import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
+import { startLocalServer } from '../local/server.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -35,18 +38,78 @@ export function registerDev(program: Command) {
     .command('dev [cmd...]')
     .description(
       'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing to prod, no version bump). ' +
+        '--local runs your functions in local Node with sw.* talking to the real project (no deploy in the loop). ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars instead.',
     )
     .option('--project <id>', 'Override project ID')
-    .action(async (cmdParts: string[] | undefined, opts: { project?: string }) => {
-      // A passed command keeps the legacy local-exec behavior (Option B —
-      // run your own server with platform context injected). No command =
-      // the hot-deploy watcher (Option A — the platform's no-localhost answer).
-      if (cmdParts && cmdParts.length > 0) {
-        return runLegacyExec(cmdParts);
-      }
-      return runHotDeploy(opts);
-    });
+    .option('--local', 'Run functions locally; sw.db/sw.fs/sw.ai/sw.auth proxy to the live platform')
+    .option('--port <port>', 'Port for --local (default 8787)')
+    .action(
+      async (
+        cmdParts: string[] | undefined,
+        opts: { project?: string; local?: boolean; port?: string },
+      ) => {
+        if (opts.local) {
+          return runLocalRuntime(opts);
+        }
+        // A passed command keeps the legacy local-exec behavior (Option B —
+        // run your own server with platform context injected). No command =
+        // the hot-deploy watcher (Option A — the platform's no-localhost answer).
+        if (cmdParts && cmdParts.length > 0) {
+          return runLegacyExec(cmdParts);
+        }
+        return runHotDeploy(opts);
+      },
+    );
+}
+
+async function runLocalRuntime(opts: { project?: string; port?: string }) {
+  try {
+    assertNodeSupport();
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const cwd = process.cwd();
+  let projectId = opts.project;
+  if (!projectId) {
+    const config = loadProjectConfig();
+    if (!config) {
+      error('No project linked. Run `somewhere init` or pass --project <id>.');
+      process.exit(1);
+    }
+    projectId = config.project_id;
+  }
+  const port = opts.port ? Number(opts.port) : 8787;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    error(`Invalid --port: ${opts.port}`);
+    process.exit(1);
+  }
+
+  const token = getToken();
+  const client = new ApiClient(token);
+  const spinner = ora('Loading project context (env keys, scopes, routes)...').start();
+  try {
+    installLoader(cwd);
+    await loadVendoredRuntime();
+    const state = await prepareLocalProject(client, token, projectId, cwd);
+    spinner.stop();
+    if (state.routes.length === 0) {
+      error(
+        'No routable functions found — put a file under api/ (e.g. api/hello.ts) or a root catch-all ([...path].ts).',
+      );
+      process.exit(1);
+    }
+    success(
+      `${state.routes.length} function route${state.routes.length === 1 ? '' : 's'} · project ${state.subdomain} · env: ${state.localEnvKeys.length} local value${state.localEnvKeys.length === 1 ? '' : 's'}`,
+    );
+    startLocalServer(state, { port });
+  } catch (err) {
+    spinner.fail('Failed to start local runtime');
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
 }
 
 async function runHotDeploy(opts: { project?: string }) {
