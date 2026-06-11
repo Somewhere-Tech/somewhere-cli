@@ -1,4 +1,4 @@
-// VENDORED from worker/src/utils/function-bundle.ts (PLATFORM_CONTEXT_JS) @ 8c58200
+// VENDORED from worker/src/utils/function-bundle.ts (PLATFORM_CONTEXT_JS) @ 58927b3
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 // Process-wide cache for sw.auth.me — keyed by the JWT signature
@@ -128,6 +128,17 @@ function buildPlatformContext(env, request) {
       throw err;
     }
     return data.data;
+  }
+
+  // fs paths accept both '/avatars/x.png' and 'avatars/x.png' — code ported
+  // from Supabase storage never uses the leading slash. A missing slash used
+  // to glue the path onto the projectId in the URL ('/v1/fs/<id>avatars/…')
+  // → malformed route → opaque "fs.write failed: 403" (pfb_06445ed51a8b).
+  function __sw_fsPath(path) {
+    if (typeof path !== 'string' || path.length === 0) {
+      throw new Error('sw.fs: path must be a non-empty string (got ' + (path === '' ? 'an empty string' : typeof path) + ')');
+    }
+    return path.startsWith('/') ? path : '/' + path;
   }
 
   // Header-based auto-refresh stash. When sw.auth.fromRequest or
@@ -1328,6 +1339,7 @@ function buildPlatformContext(env, request) {
 
     fs: {
       async read(path, opts) {
+        path = __sw_fsPath(path);
         opts = opts || {};
         // { user } scopes the read to one end-user: the platform enforces the
         // file's per-end-user ACL (owner_subject_*). Pass the app_user id so a
@@ -1348,6 +1360,7 @@ function buildPlatformContext(env, request) {
         return r;
       },
       async write(path, body, opts) {
+        path = __sw_fsPath(path);
         opts = opts || {};
         // Accept both camelCase and snake_case so docs that say
         // content_type and SDKs that pass contentType both work. Without
@@ -1369,10 +1382,10 @@ function buildPlatformContext(env, request) {
         return r.json();
       },
       delete(path) {
-        return platformFetch('/v1/fs/' + projectId + path, { method: 'DELETE' }).then(r => r.json());
+        return platformFetch('/v1/fs/' + projectId + __sw_fsPath(path), { method: 'DELETE' }).then(r => r.json());
       },
       move(from, to, opts) {
-        const body = { from, to };
+        const body = { from: __sw_fsPath(from), to: __sw_fsPath(to) };
         if (opts && opts.overwrite === true) body.overwrite = true;
         return platformJSON('/v1/fs/' + projectId + '/move', {
           method: 'POST',
@@ -1382,20 +1395,20 @@ function buildPlatformContext(env, request) {
       copy(from, to) {
         return platformJSON('/v1/fs/' + projectId + '/copy', {
           method: 'POST',
-          body: JSON.stringify({ from, to }),
+          body: JSON.stringify({ from: __sw_fsPath(from), to: __sw_fsPath(to) }),
         });
       },
       restore(path, version) {
         return platformJSON('/v1/fs/' + projectId + '/restore', {
           method: 'POST',
-          body: JSON.stringify({ path, version }),
+          body: JSON.stringify({ path: __sw_fsPath(path), version }),
         });
       },
       stat(path) {
-        return platformJSON('/v1/fs/' + projectId + '/stat' + path);
+        return platformJSON('/v1/fs/' + projectId + '/stat' + __sw_fsPath(path));
       },
       versions(path) {
-        return platformJSON('/v1/fs/' + projectId + '/versions' + path);
+        return platformJSON('/v1/fs/' + projectId + '/versions' + __sw_fsPath(path));
       },
       list(path, opts) {
         opts = opts || {};
@@ -1403,12 +1416,13 @@ function buildPlatformContext(env, request) {
         if (opts.recursive) query.push('recursive=1');
         if (opts.depth) query.push('depth=' + Number(opts.depth));
         const qs = query.length ? '?' + query.join('&') : '';
+        if (path) path = __sw_fsPath(path);
         const dirPath = path && path !== '/' && !path.endsWith('/') ? path + '/' : (path || '/');
         return platformJSON('/v1/fs/' + projectId + dirPath + qs);
       },
       diff(path, opts) {
         opts = opts || {};
-        const body = { path };
+        const body = { path: __sw_fsPath(path) };
         if (typeof opts.version === 'number') body.version = opts.version;
         return platformJSON('/v1/fs/' + projectId + '/diff', {
           method: 'POST',
@@ -1427,7 +1441,7 @@ function buildPlatformContext(env, request) {
         return platformJSON('/v1/fs/' + projectId + '/search', {
           method: 'POST',
           body: JSON.stringify({
-            path: opts.path || '/',
+            path: opts.path ? __sw_fsPath(opts.path) : '/',
             query: opts.query,
             limit: opts.limit,
             max_files: opts.max_files,
@@ -1438,7 +1452,7 @@ function buildPlatformContext(env, request) {
         return platformJSON('/v1/fs/' + projectId + '/replace', {
           method: 'POST',
           body: JSON.stringify({
-            path: opts.path,
+            path: __sw_fsPath(opts.path),
             find: opts.find,
             replace: opts.replace,
           }),
@@ -1454,7 +1468,7 @@ function buildPlatformContext(env, request) {
           method: 'POST',
           body: JSON.stringify({
             project_id: projectId,
-            path: opts.path,
+            path: __sw_fsPath(opts.path),
             max_size: opts.maxSize ?? opts.max_size,
             content_type: opts.contentType ?? opts.content_type,
             expires_in: opts.expiresIn ?? opts.expires_in,
@@ -1472,7 +1486,7 @@ function buildPlatformContext(env, request) {
         return platformJSON('/v1/fs/' + projectId + '/sign', {
           method: 'POST',
           body: JSON.stringify({
-            path,
+            path: __sw_fsPath(path),
             expires_in: opts.expiresIn ?? opts.expires_in,
             // { user } mints a link only if that end-user owns the file
             // (per-end-user ACL, owner_subject_*). Omit for full backend access.
@@ -1485,10 +1499,10 @@ function buildPlatformContext(env, request) {
       // URL. Advertised in AGENT.md but was missing from the shim (doc/runtime
       // drift — a function calling it got "undefined is not a function").
       public_url(path) {
-        return platformJSON('/v1/fs/' + projectId + '/public-url?path=' + encodeURIComponent(path));
+        return platformJSON('/v1/fs/' + projectId + '/public-url?path=' + encodeURIComponent(__sw_fsPath(path)));
       },
       publicUrl(path) {
-        return platformJSON('/v1/fs/' + projectId + '/public-url?path=' + encodeURIComponent(path));
+        return platformJSON('/v1/fs/' + projectId + '/public-url?path=' + encodeURIComponent(__sw_fsPath(path)));
       },
       // sw.fs.setOwner(path, user)
       //   → { path, owner_subject_type, owner_subject_id }
@@ -1499,7 +1513,7 @@ function buildPlatformContext(env, request) {
       setOwner(path, user) {
         return platformJSON('/v1/fs/' + projectId + '/owner', {
           method: 'POST',
-          body: JSON.stringify({ path, owner: user ?? null }),
+          body: JSON.stringify({ path: __sw_fsPath(path), owner: user ?? null }),
         });
       },
       // sw.fs.uploadFromRequest(req, { path, maxBytes?, allowedTypes?, fieldName? })
