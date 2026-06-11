@@ -35,7 +35,9 @@
     "build": "tsc",
     "dev": "tsc --watch",
     "prepublishOnly": "npm run build",
-    "test": "npm run build && node --test \"test/*.test.mjs\""
+    "test": "npm run build && node --test \"test/*.test.mjs\"",
+    "test:roundtrip": "node scripts/e2e-roundtrip.mjs",
+    "test:e2e-local": "node scripts/e2e-local.mjs"
   },
   "engines": {
     "node": ">=18"
