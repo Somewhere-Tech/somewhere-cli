@@ -5,7 +5,8 @@ import { join, relative } from 'node:path';
 import chokidar from 'chokidar';
 import open from 'open';
 import ora from 'ora';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
+import { buildErrorSummary, isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
 import { bold, dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
@@ -140,7 +141,9 @@ async function runHotDeploy(opts: { project?: string }) {
     const body: Record<string, unknown> = { project_id: projectId, files, preview: true };
     if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
     if (Object.keys(functions).length) body.functions = functions;
-    const res = await client.call<DeployResult>('POST', '/deploy', body);
+    const res = await client.call<DeployResult>('POST', '/deploy', body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
     url = res.url;
     spinner.stop();
     const n = typeof res.files === 'number' ? res.files : (res.files ?? []).length;
@@ -148,7 +151,9 @@ async function runHotDeploy(opts: { project?: string }) {
     if (res.warnings?.length) for (const w of res.warnings) warn(w);
   } catch (err) {
     spinner.fail('Initial sync failed');
-    error(err instanceof Error ? err.message : String(err));
+    if (!(isBuildError(err) && renderBuildError(err, cwd))) {
+      error(err instanceof Error ? err.message : String(err));
+    }
     process.exit(1);
   }
 
@@ -260,7 +265,9 @@ async function deployBatch(
   process.stdout.write(`${dim(stamp())} ${label} ${dim('→ updating preview...')}`);
 
   try {
-    const r = await client.call<PatchResult>('POST', '/deploy/patch', body);
+    const r = await client.call<PatchResult>('POST', '/deploy/patch', body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');
@@ -289,6 +296,12 @@ async function deployBatch(
   } catch (err) {
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     process.stdout.write('\r\x1b[K');
+    if (isBuildError(err)) {
+      console.log(`${dim(stamp())} ${label} ${red('✗ compile failed')} ${dim(`(${secs}s)`)} ${yellow(buildErrorSummary(err))}`);
+      renderBuildError(err, cwd);
+      info(dim('Your last working preview is still up. Fix and save again.'));
+      return;
+    }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
     error(err instanceof Error ? err.message : String(err));
   }

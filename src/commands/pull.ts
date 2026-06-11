@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import ora from 'ora';
-import { ApiClient, CliApiError } from '../lib/client.js';
+import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, success, teal, warn } from '../lib/output.js';
 
@@ -49,10 +49,13 @@ export function registerPull(program: Command) {
       const spinner = ora(`Fetching ${envSlot} source...`).start();
       let body: SourceResponse;
       try {
-        body = await client.call<SourceResponse>('GET', '/deploy/source', undefined, {
-          project_id: projectId,
-          env: envSlot,
-        });
+        body = await client.call<SourceResponse>(
+          'GET',
+          '/deploy/source',
+          undefined,
+          { project_id: projectId, env: envSlot },
+          { timeoutMs: LONG_CALL_TIMEOUT_MS },
+        );
       } catch (err) {
         spinner.fail('Pull failed');
         if (err instanceof CliApiError) {

@@ -2,6 +2,14 @@ import type { ApiResponse } from '../types.js';
 
 const BASE_URL = 'https://api.somewhere.tech/v1';
 
+/** Default request timeout. Long-running calls (deploy compiles, pulls)
+ *  pass an explicit budget via opts.timeoutMs instead. */
+const DEFAULT_TIMEOUT_MS = 60_000;
+
+/** Budget for calls that run a real build server-side (npm install alone
+ *  can take minutes): /deploy, /deploy/patch, pull/export. */
+export const LONG_CALL_TIMEOUT_MS = 10 * 60_000;
+
 export class ApiClient {
   constructor(private readonly token: string) {}
 
@@ -10,6 +18,7 @@ export class ApiClient {
     path: string,
     body?: unknown,
     query?: Record<string, string | number | undefined>,
+    opts?: { timeoutMs?: number },
   ): Promise<T> {
     let url = `${BASE_URL}${path}`;
     if (query) {
@@ -32,10 +41,27 @@ export class ApiClient {
       reqBody = JSON.stringify(body);
     }
 
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     let res: Response;
     try {
-      res = await fetch(url, { method, headers, body: reqBody });
+      res = await fetch(url, {
+        method,
+        headers,
+        body: reqBody,
+        signal: AbortSignal.timeout(timeoutMs),
+      });
     } catch (err) {
+      // AbortSignal.timeout fired — no bytes back within the budget. Name it
+      // so the user can tell a hang from a rejection (review F8/Q5: a bare
+      // fetch hung `somewhere deploy` forever on network silence).
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        throw new CliApiError(
+          'TIMEOUT',
+          `No response from ${method} ${url.split('?')[0]} after ${Math.round(timeoutMs / 1000)}s. ` +
+            'The request may still be processing server-side — check `somewhere status` before retrying a deploy.',
+          0,
+        );
+      }
       // Node's fetch rejects network-level failures with a bare
       // "fetch failed" and buries the real reason (ENOTFOUND,
       // ECONNRESET, UND_ERR_*) in err.cause. Surfacing only the bare
@@ -70,10 +96,18 @@ export class ApiClient {
 
     if (parsed.ok === true) return parsed.data;
 
+    const errBody = parsed as {
+      error?: string;
+      message?: string;
+      data?: Record<string, unknown>;
+      hint?: string;
+    };
     throw new CliApiError(
-      (parsed as { error?: string }).error ?? 'UNKNOWN',
-      (parsed as { message?: string }).message ?? 'Unknown error',
+      errBody.error ?? 'UNKNOWN',
+      errBody.message ?? 'Unknown error',
       res.status,
+      errBody.data,
+      errBody.hint,
     );
   }
 }
@@ -83,6 +117,9 @@ export class CliApiError extends Error {
     public readonly code: string,
     message: string,
     public readonly statusCode: number,
+    /** Structured payload some errors carry (e.g. BUILD_ERROR file/line/frame). */
+    public readonly data?: Record<string, unknown>,
+    public readonly hint?: string,
   ) {
     super(message);
     this.name = 'CliApiError';

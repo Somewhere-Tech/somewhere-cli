@@ -1,7 +1,8 @@
 import { Command } from 'commander';
 import { join } from 'node:path';
 import ora from 'ora';
-import { ApiClient, CliApiError } from '../lib/client.js';
+import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
+import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
@@ -90,13 +91,17 @@ export function registerDeploy(program: Command) {
         if (opts.dryRun) body.dry_run = true;
 
         if (opts.dryRun) {
-          const plan = await client.call<DryRunResult>('POST', '/deploy', body);
+          const plan = await client.call<DryRunResult>('POST', '/deploy', body, undefined, {
+            timeoutMs: LONG_CALL_TIMEOUT_MS,
+          });
           spinner.stop();
           printDryRun(plan, scope);
           return;
         }
 
-        const result = await client.call<DeployResult>('POST', '/deploy', body);
+        const result = await client.call<DeployResult>('POST', '/deploy', body, undefined, {
+          timeoutMs: LONG_CALL_TIMEOUT_MS,
+        });
 
         spinner.stop();
         const fileCount =
@@ -154,6 +159,13 @@ export function registerDeploy(program: Command) {
         }
       } catch (err) {
         spinner.fail(opts.dryRun ? 'Dry run failed' : 'Deploy failed');
+        // Structured build failures get the full treatment: file:line
+        // heading + a code frame rebuilt from the local source (we have the
+        // files the server compiled — this is where the CLI beats a remote
+        // log dump).
+        if (isBuildError(err) && renderBuildError(err, targetDir)) {
+          process.exit(1);
+        }
         // Always show the error code + HTTP status — "Project not found"
         // with no code/status left a customer unable to tell auth from
         // routing from payload failures (pfb_70e9d140c5a0).
