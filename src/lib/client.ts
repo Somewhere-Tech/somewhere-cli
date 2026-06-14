@@ -1,4 +1,5 @@
 import type { ApiResponse } from '../types.js';
+import { Agent } from 'undici';
 
 const BASE_URL = 'https://api.somewhere.tech/v1';
 
@@ -49,7 +50,14 @@ export class ApiClient {
         headers,
         body: reqBody,
         signal: AbortSignal.timeout(timeoutMs),
-      });
+        // Match undici's internal header/body timeouts to OUR budget. Node's
+        // global fetch defaults headersTimeout to ~300s — SHORTER than a long
+        // deploy's 10-min budget — so a cold first deploy (while the project is
+        // provisioned) tripped UND_ERR_HEADERS_TIMEOUT before our AbortSignal
+        // fired, and the failure got mislabeled as the user's network
+        // (tsk_896f9c7b). Now our AbortSignal is the only real deadline.
+        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
+      } as RequestInit & { dispatcher: Agent });
     } catch (err) {
       // AbortSignal.timeout fired — no bytes back within the budget. Name it
       // so the user can tell a hang from a rejection (review F8/Q5: a bare
@@ -69,8 +77,24 @@ export class ApiClient {
       // auth, payload, or network (pfb_70e9d140c5a0) — name the
       // endpoint and the underlying cause.
       const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      const code = cause?.code;
+      // undici's own header/body timeout means the CONNECTION established but the
+      // server was slow to respond — NOT the user's network. Common on a first
+      // deploy while the project is provisioned (tsk_896f9c7b). With the matching
+      // dispatcher above this should rarely fire now, but if it does, say what's
+      // actually happening instead of blaming the network.
+      if (code === 'UND_ERR_HEADERS_TIMEOUT' || code === 'UND_ERR_BODY_TIMEOUT') {
+        throw new CliApiError(
+          'SERVER_SLOW',
+          `${method} ${url.split('?')[0]} connected, but the server didn't finish responding in time. ` +
+            'This is usually a first deploy while your project is being provisioned — the request may ' +
+            'still be completing server-side. Check `somewhere status` before retrying ' +
+            '(retrying a first deploy is safe — it just creates a new version).',
+          0,
+        );
+      }
       const detail =
-        cause?.code ??
+        code ??
         cause?.message ??
         (err instanceof Error ? err.message : String(err));
       throw new CliApiError(

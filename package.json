@@ -1,7 +1,7 @@
 {
   "name": "@somewhere-tech/cli",
-  "version": "0.12.0",
-  "description": "CLI for somewhere.tech \u2014 auth, projects, deploy, pull, promote, db, logs, env, MCP bridge.",
+  "version": "0.12.1",
+  "description": "CLI for somewhere.tech — auth, projects, deploy, pull, promote, db, logs, env, MCP bridge.",
   "keywords": [
     "somewhere",
     "somewhere.tech",
@@ -49,7 +49,8 @@
     "commander": "^12.0.0",
     "open": "^10.0.0",
     "ora": "^8.0.0",
-    "prompts": "^2.4.2"
+    "prompts": "^2.4.2",
+    "undici": "^8.4.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",
