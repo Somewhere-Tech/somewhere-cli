@@ -8,6 +8,7 @@ export function registerApi(program: Command) {
     .command('api <method> <path>')
     .description('Make a raw API call (adds auth automatically)')
     .option('-d, --data <json>', 'JSON body')
+    .option('--raw', 'Print the response body as-is without JSON-parsing — for non-JSON endpoints (e.g. a SQL db dump); a 200 non-JSON body is not treated as an error')
     .action(async (method: string, path: string, opts) => {
       const client = new ApiClient(getToken());
       let body: unknown;
@@ -20,8 +21,23 @@ export function registerApi(program: Command) {
         }
       }
 
+      const apiPath = path.startsWith('/v1/') ? path.slice(3) : path;
+
+      // Raw mode: stream the response body verbatim. A 200 with a non-JSON body
+      // (e.g. /v1/db/dump returns SQL) must NOT be an error (audit #14).
+      if (opts.raw) {
+        try {
+          const r = await client.callRaw(method.toUpperCase(), apiPath, body);
+          process.stdout.write(r.body.endsWith('\n') ? r.body : r.body + '\n');
+          if (!r.ok) process.exitCode = 1;
+        } catch (err) {
+          error(String(err));
+          process.exit(1);
+        }
+        return;
+      }
+
       try {
-        const apiPath = path.startsWith('/v1/') ? path.slice(3) : path;
         const result = await client.call(method.toUpperCase(), apiPath, body);
         console.log(JSON.stringify(result, null, 2));
       } catch (err) {

@@ -134,6 +134,46 @@ export class ApiClient {
       errBody.hint,
     );
   }
+
+  /** Like call(), but returns the raw response TEXT instead of JSON-parsing it
+   *  — for endpoints that legitimately return non-JSON (e.g. a SQL db dump). A
+   *  200 with a non-JSON body is NOT an error (audit #14 / tsk_30633bb3). Used
+   *  by `somewhere api --raw`. call() is intentionally left untouched so every
+   *  existing command keeps its exact behavior. */
+  async callRaw(
+    method: string,
+    path: string,
+    body?: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<{ status: number; ok: boolean; body: string }> {
+    const url = `${BASE_URL}${path}`;
+    const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
+    let reqBody: string | undefined;
+    if (body !== undefined) {
+      headers['Content-Type'] = 'application/json';
+      reqBody = JSON.stringify(body);
+    }
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    let res: Response;
+    try {
+      res = await fetch(url, {
+        method,
+        headers,
+        body: reqBody,
+        signal: AbortSignal.timeout(timeoutMs),
+        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
+      } as RequestInit & { dispatcher: Agent });
+    } catch (err) {
+      const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      const detail = cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));
+      throw new CliApiError(
+        'NETWORK_ERROR',
+        `Could not reach ${method} ${url} — ${detail}. No HTTP response was received.`,
+        0,
+      );
+    }
+    return { status: res.status, ok: res.status < 400, body: await res.text() };
+  }
 }
 
 export class CliApiError extends Error {

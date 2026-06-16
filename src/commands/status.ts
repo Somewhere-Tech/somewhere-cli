@@ -47,8 +47,12 @@ export function registerStatus(program: Command) {
         }>('GET', '/hosted/status');
 
         console.log('');
-        const wsStatus = ws.status === 'ready' ? `Running` : ws.status;
-        info(`Workspace: ${wsStatus}`);
+        // The hosted code workspace is OPTIONAL and separate from the deployed
+        // app — a non-'ready' status here (e.g. "waking") NEVER means the live
+        // site is down (audit #8 / tsk_30633bb3). Label it as the dev workspace
+        // and say so, so "waking" doesn't read as an outage.
+        const wsStatus = ws.status === 'ready' ? 'running' : `${ws.status} (starting)`;
+        info(`Dev workspace: ${wsStatus} ${dim('— optional code workspace; your deployed app serves regardless')}`);
         if (ws.terminal_url) {
           info(`Terminal: ${dim(ws.terminal_url)}`);
         }
