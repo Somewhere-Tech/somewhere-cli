@@ -1,5 +1,5 @@
 import type { ApiResponse } from '../types.js';
-import { Agent } from 'undici';
+import { Agent, fetch as undiciFetch } from 'undici';
 
 const BASE_URL = 'https://api.somewhere.tech/v1';
 
@@ -43,21 +43,21 @@ export class ApiClient {
     }
 
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    let res: Response;
+    let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
-      res = await fetch(url, {
+      // Use undici's OWN fetch (not Node's global fetch) so the Agent dispatcher
+      // is from the SAME undici instance — a standalone-undici Agent on the
+      // global fetch throws UND_ERR_INVALID_ARG on newer Node (dual-undici;
+      // tsk_0a3f106d). The Agent also pins undici's header/body timeouts to OUR
+      // budget so a cold first deploy isn't mislabeled as a network failure
+      // (tsk_896f9c7b) — our AbortSignal stays the only real deadline.
+      res = await undiciFetch(url, {
         method,
         headers,
         body: reqBody,
         signal: AbortSignal.timeout(timeoutMs),
-        // Match undici's internal header/body timeouts to OUR budget. Node's
-        // global fetch defaults headersTimeout to ~300s — SHORTER than a long
-        // deploy's 10-min budget — so a cold first deploy (while the project is
-        // provisioned) tripped UND_ERR_HEADERS_TIMEOUT before our AbortSignal
-        // fired, and the failure got mislabeled as the user's network
-        // (tsk_896f9c7b). Now our AbortSignal is the only real deadline.
         dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (err) {
       // AbortSignal.timeout fired — no bytes back within the budget. Name it
       // so the user can tell a hang from a rejection (review F8/Q5: a bare
@@ -154,15 +154,16 @@ export class ApiClient {
       reqBody = JSON.stringify(body);
     }
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
-    let res: Response;
+    let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
-      res = await fetch(url, {
+      // undici's own fetch — see call() for why (dual-undici, tsk_0a3f106d).
+      res = await undiciFetch(url, {
         method,
         headers,
         body: reqBody,
         signal: AbortSignal.timeout(timeoutMs),
         dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
-      } as RequestInit & { dispatcher: Agent });
+      });
     } catch (err) {
       const cause = (err as { cause?: { code?: string; message?: string } }).cause;
       const detail = cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));
