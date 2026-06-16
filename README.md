@@ -48,9 +48,14 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere logs` | Show recent logs |
 | `somewhere logs --follow` | Stream logs in real-time |
 | `somewhere logs --level error` | Filter by level |
+| `somewhere run <script.js>` | Run a one-off script once against the project's live dev bindings (`sw.db`/`sw.fs`/`sw.ai`…) and print its return value + logs — no deploy |
+| `somewhere errors` | Show the most recent exceptions (endpoint, status, error, time) — the curated error view |
+| `somewhere promote [draft_id]` | Ship the current dev/preview build to production (pass a `draft_id` to publish exactly that build) |
+| `somewhere rollback` | Revert production to the previous deployed version |
 | `somewhere env list` | Show environment variables |
 | `somewhere env set KEY value` | Set an env var |
 | `somewhere env delete KEY` | Delete an env var |
+| `somewhere env pull` | Write a local `.env` listing the keys the project expects (values blank — secrets never leave the platform) |
 | `somewhere status` | Show project + workspace status |
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |

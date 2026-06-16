@@ -3,6 +3,16 @@ import { Agent, fetch as undiciFetch } from 'undici';
 
 const BASE_URL = 'https://api.somewhere.tech/v1';
 
+/** The dedicated run_code runner worker (somewhere-tech-runner). `somewhere run`
+ *  MUST hit this host, NOT the /v1 API: the runner is the request ROOT — it
+ *  invokes the sandbox, the sandbox fetches the API worker as a LEAF, so there's
+ *  no self-loop (CF returns 522 when a worker re-enters itself). There is
+ *  deliberately no /v1/code/run proxy. The runner accepts the SAME `smt_`
+ *  developer key the rest of the CLI uses. Override for staging via
+ *  SOMEWHERE_RUNNER_URL. */
+const RUNNER_BASE_URL =
+  process.env.SOMEWHERE_RUNNER_URL?.replace(/\/$/, '') || 'https://runner.somewhere.tech';
+
 /** Default request timeout. Long-running calls (deploy compiles, pulls)
  *  pass an explicit budget via opts.timeoutMs instead. */
 const DEFAULT_TIMEOUT_MS = 60_000;
@@ -14,14 +24,26 @@ export const LONG_CALL_TIMEOUT_MS = 10 * 60_000;
 export class ApiClient {
   constructor(private readonly token: string) {}
 
+  /** Run a one-off script against the project's live DEV bindings via the
+   *  dedicated runner worker. Same auth + `{ ok, data }` envelope as call(), but
+   *  rooted at RUNNER_BASE_URL instead of the /v1 API (see that constant for the
+   *  loop-protection reason). Body: { project_id, code, timeout_ms?, include_env? };
+   *  resolves to { result, logs, duration_ms, error? }. */
+  async callRunner<T = unknown>(
+    body: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.call<T>('POST', '/run', body, undefined, { ...opts, baseUrl: RUNNER_BASE_URL });
+  }
+
   async call<T = unknown>(
     method: string,
     path: string,
     body?: unknown,
     query?: Record<string, string | number | undefined>,
-    opts?: { timeoutMs?: number },
+    opts?: { timeoutMs?: number; baseUrl?: string },
   ): Promise<T> {
-    let url = `${BASE_URL}${path}`;
+    let url = `${opts?.baseUrl ?? BASE_URL}${path}`;
     if (query) {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(query)) {

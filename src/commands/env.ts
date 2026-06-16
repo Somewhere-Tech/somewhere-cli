@@ -1,7 +1,11 @@
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Command } from 'commander';
+import prompts from 'prompts';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, teal } from '../lib/output.js';
+import { buildEnvTemplate } from '../lib/envfile-write.js';
+import { dim, error, info, success, teal, warn } from '../lib/output.js';
 
 function resolveProjectId(explicit?: string): string {
   if (explicit) return explicit;
@@ -44,6 +48,60 @@ export function registerEnv(program: Command) {
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
+    });
+
+  env
+    .command('pull')
+    .description(
+      'Write a local .env file listing the env vars this project expects (for ' +
+        'the local-dev loop). Values are NOT included — the platform never ' +
+        'returns secret values; fill them in for `somewhere dev --local`.',
+    )
+    .option('--project <id>', 'Project ID')
+    .option('--out <file>', 'Output path', '.env')
+    .option('--force', 'Overwrite the file without prompting')
+    .action(async (opts) => {
+      const client = new ApiClient(getToken());
+      const pid = resolveProjectId(opts.project);
+      let keys: Array<{ key: string; scope?: string }>;
+      try {
+        const result = await client.call<{
+          keys?: Array<{ key: string; scope?: string }>;
+          vars?: Array<{ key: string; scope?: string }>;
+        }>('GET', '/env', undefined, { project_id: pid });
+        keys = result.keys ?? result.vars ?? [];
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+
+      if (!keys.length) {
+        info(dim('No environment variables set for this project — nothing to pull.'));
+        return;
+      }
+
+      const outPath = resolve(process.cwd(), String(opts.out));
+      if (existsSync(outPath) && !opts.force) {
+        const existing = readFileSync(outPath, 'utf-8');
+        const hasValues = existing
+          .split('\n')
+          .some((l) => /^[^#=]+=.+/.test(l.trim()));
+        const { ok } = await prompts({
+          type: 'confirm',
+          name: 'ok',
+          message: hasValues
+            ? `${opts.out} exists and has values set. Overwrite (you'll lose those values)?`
+            : `${opts.out} exists. Overwrite?`,
+          initial: !hasValues,
+        });
+        if (!ok) {
+          warn('Aborted — existing file left untouched.');
+          return;
+        }
+      }
+
+      writeFileSync(outPath, buildEnvTemplate(keys, { projectId: pid }));
+      success(`Wrote ${keys.length} key${keys.length === 1 ? '' : 's'} to ${teal(opts.out)} (values blank — fill them in for local runs)`);
     });
 
   env
