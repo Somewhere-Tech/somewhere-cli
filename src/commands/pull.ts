@@ -1,10 +1,17 @@
 import { Command } from 'commander';
 import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve } from 'node:path';
 import ora from 'ora';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, success, teal, warn } from '../lib/output.js';
+import {
+  SCAFFOLD_PACKAGE_FILENAME,
+  SCAFFOLD_TSCONFIG_FILENAME,
+  buildScaffoldPackageJson,
+  buildScaffoldTsconfig,
+  extractDeps,
+} from '../lib/scaffold.js';
 
 interface SourceResponse {
   project_id: string;
@@ -19,7 +26,11 @@ interface SourceResponse {
 export function registerPull(program: Command) {
   program
     .command('pull [project]')
-    .description('Download a project\'s deployed source files to the current directory')
+    .description(
+      'Download a project\'s deployed source files to the current directory. ' +
+        'Scaffolds a tsconfig.json + package.json (only if absent) so `somewhere typecheck` ' +
+        'can catch undefined symbols locally before you deploy.',
+    )
     .option('--env <env>', 'Environment to pull from (dev or prod)', 'dev')
     .option('--out <dir>', 'Output directory', '.')
     .option('--force', 'Overwrite existing files without prompting')
@@ -105,5 +116,46 @@ export function registerPull(program: Command) {
         for (const p of skipped.slice(0, 10)) info(dim(`  ${p}`));
         if (skipped.length > 10) info(dim(`  ...and ${skipped.length - 10} more`));
       }
+
+      // Scaffold the two files a local typecheck needs (tsconfig + package.json)
+      // so `somewhere typecheck` / `tsc --noEmit` can catch a dropped import
+      // BEFORE deploy. Written only when absent — never clobbers a project's
+      // own config, even with --force (that flag is for source files, not
+      // local tooling we're adding on top).
+      const scaffolded = scaffoldTypecheckFiles(outDir, body.static_files);
+      if (scaffolded.length) {
+        info(dim(`Added ${scaffolded.join(' + ')} for local typechecking.`));
+        info(`Run ${teal('somewhere typecheck')} before deploy to catch undefined symbols.`);
+      }
     });
+}
+
+/**
+ * Write tsconfig.json + package.json into a pulled tree if they're not already
+ * there. Returns the filenames actually written. Deps for the scaffolded
+ * package.json come from the project's own package.json when it shipped one.
+ */
+function scaffoldTypecheckFiles(
+  outDir: string,
+  staticFiles: Record<string, string>,
+): string[] {
+  const added: string[] = [];
+
+  const tsconfigPath = join(outDir, SCAFFOLD_TSCONFIG_FILENAME);
+  if (!existsSync(tsconfigPath)) {
+    writeFileSync(tsconfigPath, buildScaffoldTsconfig());
+    added.push(SCAFFOLD_TSCONFIG_FILENAME);
+  }
+
+  const packagePath = join(outDir, SCAFFOLD_PACKAGE_FILENAME);
+  if (!existsSync(packagePath)) {
+    const deps = extractDeps(staticFiles['package.json']);
+    writeFileSync(
+      packagePath,
+      buildScaffoldPackageJson(basename(outDir), deps),
+    );
+    added.push(SCAFFOLD_PACKAGE_FILENAME);
+  }
+
+  return added;
 }

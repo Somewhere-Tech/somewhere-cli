@@ -2,6 +2,8 @@ import { Command } from 'commander';
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
+import { reportTypecheck } from './typecheck.js';
+import { runTypecheck } from '../lib/typecheck.js';
 import chokidar from 'chokidar';
 import open from 'open';
 import ora from 'ora';
@@ -39,16 +41,22 @@ export function registerDev(program: Command) {
     .command('dev [cmd...]')
     .description(
       'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing to prod, no version bump). ' +
-        '--local runs your functions in local Node with sw.* talking to the real project (no deploy in the loop). ' +
+        '--local runs your functions in local Node with sw.* talking to the real project (no deploy in the loop); ' +
+        'it typechecks before starting and on every reload so a dropped import surfaces in the terminal, not as a 500 ' +
+        '(add --check to EXIT on type errors). ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars instead.',
     )
     .option('--project <id>', 'Override project ID')
     .option('--local', 'Run functions locally; sw.db/sw.fs/sw.ai/sw.auth proxy to the live platform')
     .option('--port <port>', 'Port for --local (default 8787)')
+    .option(
+      '--check',
+      'With --local: typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning',
+    )
     .action(
       async (
         cmdParts: string[] | undefined,
-        opts: { project?: string; local?: boolean; port?: string },
+        opts: { project?: string; local?: boolean; port?: string; check?: boolean },
       ) => {
         if (opts.local) {
           return runLocalRuntime(opts);
@@ -64,7 +72,7 @@ export function registerDev(program: Command) {
     );
 }
 
-async function runLocalRuntime(opts: { project?: string; port?: string }) {
+async function runLocalRuntime(opts: { project?: string; port?: string; check?: boolean }) {
   try {
     assertNodeSupport();
   } catch (err) {
@@ -73,6 +81,39 @@ async function runLocalRuntime(opts: { project?: string; port?: string }) {
   }
 
   const cwd = process.cwd();
+
+  // The local runtime runs functions through Node's TYPE STRIPPING, not a
+  // typechecker — a dropped import sails through here and only crashes at
+  // request time (the `sanitizeForSpeech is not defined` 500 class). Run an
+  // explicit typecheck pass first so the type error surfaces in the terminal
+  // BEFORE you hit the route. Needs the tsconfig `somewhere pull` scaffolds;
+  // skipped (with a hint) when absent so a bare `dev --local` still starts.
+  if (existsSync(join(cwd, 'tsconfig.json'))) {
+    const spinner = ora('Typechecking before local runtime (tsc --noEmit)...').start();
+    const result = await runTypecheck(cwd);
+    spinner.stop();
+    reportTypecheck(result);
+    if (!result.ok && opts.check) {
+      error('Type errors found and --check is set — not starting the local runtime.');
+      process.exit(1);
+    }
+    if (!result.ok) {
+      warn(
+        'Starting anyway — local runtime STRIPS types, so the above will crash at request time. ' +
+          'Fix them, or use `somewhere dev --local --check` to gate on a clean typecheck.',
+      );
+      console.log('');
+    }
+  } else if (opts.check) {
+    error('--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).');
+    process.exit(1);
+  } else {
+    warn(
+      'No tsconfig.json — skipping the pre-start typecheck. Run `somewhere pull` to scaffold one ' +
+        'so type errors surface before runtime.',
+    );
+  }
+
   let projectId = opts.project;
   if (!projectId) {
     const config = loadProjectConfig();
@@ -105,7 +146,18 @@ async function runLocalRuntime(opts: { project?: string; port?: string }) {
     success(
       `${state.routes.length} function route${state.routes.length === 1 ? '' : 's'} · project ${state.subdomain} · env: ${state.localEnvKeys.length} local value${state.localEnvKeys.length === 1 ? '' : 's'}`,
     );
-    startLocalServer(state, { port });
+    // Re-typecheck on each save: the runtime strips types, so a dropped import
+    // would otherwise reload "clean" and only crash on the next request.
+    const hasTsconfig = existsSync(join(cwd, 'tsconfig.json'));
+    startLocalServer(state, {
+      port,
+      onReloadTypecheck: hasTsconfig
+        ? async () => {
+            const r = await runTypecheck(cwd);
+            reportTypecheck(r);
+          }
+        : undefined,
+    });
   } catch (err) {
     spinner.fail('Failed to start local runtime');
     error(err instanceof Error ? err.message : String(err));

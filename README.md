@@ -43,7 +43,8 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere deploy` | Deploy current directory to linked project |
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
-| `somewhere pull` | Download a project's deployed source to the current directory |
+| `somewhere pull` | Download a project's deployed source + scaffold tsconfig/package.json for local typechecking |
+| `somewhere typecheck` | `tsc --noEmit` over a pulled tree — the "safe to deploy?" gate; catches a dropped import (TS2304) with file:line |
 | `somewhere logs` | Show recent logs |
 | `somewhere logs --follow` | Stream logs in real-time |
 | `somewhere logs --level error` | Filter by level |
@@ -54,6 +55,8 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |
 | `somewhere dev` | Private preview watcher — save a file, your owner-only preview updates in seconds (no local server, nothing to prod) |
+| `somewhere dev --local` | Run functions in local Node (sw.* hits the real project); typechecks before start + on every reload so a dropped import surfaces in the terminal, not as a 500 |
+| `somewhere dev --local --check` | Same, but EXIT on type errors instead of warning |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 | `somewhere mcp install <host>` | Configure an MCP host (`codex`, `claude-code`, `cursor`) |

@@ -63,6 +63,12 @@ function stamp(): string {
 
 export interface LocalServerOptions {
   port: number;
+  /**
+   * Optional re-typecheck run after each hot reload. The runtime strips types,
+   * so without this a save that drops an import reloads "clean" and only 500s
+   * on the next request. Wired by `dev --local` when a tsconfig is present.
+   */
+  onReloadTypecheck?: () => void | Promise<void>;
 }
 
 export function startLocalServer(state: LocalProjectState, opts: LocalServerOptions): void {
@@ -139,6 +145,11 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
         }
       }
       console.log(`${dim(stamp())} ${teal(rel)} ${dim('reloaded')}`);
+      if (opts.onReloadTypecheck) {
+        void Promise.resolve(opts.onReloadTypecheck()).catch((err) => {
+          console.error(red(`Typecheck failed to run: ${err instanceof Error ? err.message : String(err)}`));
+        });
+      }
     }, 150);
   };
 
