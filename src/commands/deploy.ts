@@ -1,11 +1,18 @@
 import { Command } from 'commander';
-import { join } from 'node:path';
+import { resolve } from 'node:path';
 import ora from 'ora';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+
+// Resolve the deploy target directory. `resolve` (not `join`) so an absolute
+// `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
+// → ENOENT (tsk_c616fe5d). `resolve` also normalizes `..` segments.
+export function resolveTargetDir(dir?: string, cwd = process.cwd()): string {
+  return dir ? resolve(cwd, dir) : cwd;
+}
 
 export function registerDeploy(program: Command) {
   program
@@ -30,7 +37,7 @@ export function registerDeploy(program: Command) {
     .action(async (dir: string | undefined, opts) => {
       const token = getToken();
       const client = new ApiClient(token);
-      const targetDir = dir ? join(process.cwd(), dir) : process.cwd();
+      const targetDir = resolveTargetDir(dir);
 
       // --scope maps to the worker's partial-deploy guard. Reject unknown
       // values up front so a typo can't silently fall back to a full deploy
