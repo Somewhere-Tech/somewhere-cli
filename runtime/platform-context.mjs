@@ -1,4 +1,4 @@
-// VENDORED from worker/src/utils/function-bundle.ts (PLATFORM_CONTEXT_JS) @ 58927b3
+// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ e8da46e
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 // Process-wide cache for sw.auth.me — keyed by the JWT signature
@@ -104,6 +104,16 @@ function buildPlatformContext(env, request) {
     opts = opts || {};
     const headers = {
       'Authorization': 'Bearer ' + apiKey,
+      // tsk_95ecae23 — tell the platform which execution slot this bundle is
+      // running in (prod vs dev), so the REST-fallback data path (/v1/db/query,
+      // /v1/db/batch) and the direct `dev --local` client select the DEV data
+      // slot instead of silently defaulting to prod. The slot is baked into the
+      // bundle at deploy/run time as PROJECT_ENV (see function-bundle.ts /
+      // code-bundle.ts); 'dev' for run_code + preview + draft, 'prod' for the
+      // promoted production bundle. The server only DIVERTS off prod when the
+      // project is enrolled in DEV_SLOT_ENFORCE_PROJECTS, so an unenrolled
+      // project sees this header but its binding is unchanged.
+      'X-Sw-Env-Slot': projectEnv,
       ...(opts.headers || {}),
     };
     if (opts.body && !headers['Content-Type'] && !headers['content-type']) {
@@ -171,6 +181,94 @@ function buildPlatformContext(env, request) {
   function __sw_clearAuthCookies() {
     __sw_pendingCookies.push(__sw_authCookie('token', '', 0));
     __sw_pendingCookies.push(__sw_authCookie('sw_refresh_token', '', 0));
+  }
+
+  // Expected-failure marking for the cookie helpers (tsk_a5f3e7d3). The
+  // routing shim's catch-all turns every uncaught throw into an opaque 500
+  // FUNCTION_ERROR — right for real bugs, wrong for "wrong password": the
+  // doc'd cookie snippet has no try/catch, so every expected auth failure
+  // surfaced as a 500 (and fed the 5xx-based uptime alerting). An error
+  // flagged here carries a customer-safe message from the platform auth
+  // API; the shim returns it as a structured 4xx with the real code +
+  // message instead. Platform 5xx and anything unflagged stay opaque.
+  function __sw_markExpected(err) {
+    if (err && typeof err.status === 'number' && err.status >= 400 && err.status < 500) {
+      err.__sw_expose = true;
+    }
+    return err;
+  }
+
+  // Arg-shape forgiveness for the cookie helpers (tsk_3bc373ea): every other
+  // sw.auth method takes one options object, so agents naturally pass one
+  // here too — and req is never read by these helpers. Accepted shapes:
+  //   (req, email, password)      — documented positional form
+  //   (req, { email, password })
+  //   ({ email, password })       — req omitted
+  // Anything else throws a 400 VALIDATION_ERROR naming the supported shapes,
+  // surfaced as a structured 4xx via __sw_expose (never INTERNAL_ERROR/500).
+  function __sw_cookieCreds(method, req, email, password) {
+    if (email !== null && typeof email === 'object') {
+      password = email.password;
+      email = email.email;
+    } else if (req !== null && typeof req === 'object' &&
+               !(req.headers && typeof req.headers.get === 'function') &&
+               email === undefined && password === undefined) {
+      password = req.password;
+      email = req.email;
+    }
+    if (typeof email !== 'string' || !email || typeof password !== 'string' || !password) {
+      const err = new Error('sw.auth.' + method + ': email and password are required — call ' +
+        method + '(req, email, password) or ' + method + '(req, { email, password }).');
+      err.code = 'VALIDATION_ERROR';
+      err.status = 400;
+      err.__sw_expose = true;
+      throw err;
+    }
+    return { email: email, password: password };
+  }
+
+  // Cross-origin guard for cookie sessions (tsk_1dd4e1b4). SameSite=Lax
+  // stops cross-SITE cookie sends, but every *.<platformDomain> project is
+  // the SAME site in browser terms, so a sibling project's page can make
+  // the browser attach THIS app's cookies — and the platform's permissive
+  // /api/* CORS (reflected origin + credentials) would even let it read the
+  // response. A cookie-authed request whose cross-origin source names a
+  // different host is therefore treated as unauthenticated, unless both
+  // hosts share a customer-owned registrable domain (www.shop.com →
+  // shop.com) — never across the shared platform domain (sibling projects
+  // are different security principals).
+  //   - Writes (POST/PUT/PATCH/DELETE): checked against Origin, falling
+  //     back to Referer (CSRF).
+  //   - Reads (GET/HEAD): checked only when an explicit CORS Origin header
+  //     is present (credentialed cross-origin fetch). Top-level navigations
+  //     carry no Origin and stay allowed — that's exactly what Lax intends —
+  //     and their Referer legitimately names the previous, often foreign,
+  //     page, so Referer is ignored for reads.
+  //   - No Origin/Referer at all (curl, server-to-server), same-origin
+  //     requests, and Bearer-header auth are all unaffected.
+  function __sw_cookieCsrfBlocked(req) {
+    const method = (req.method || 'GET').toUpperCase();
+    const isRead = method === 'GET' || method === 'HEAD' || method === 'OPTIONS';
+    let src = req.headers.get('Origin') || req.headers.get('origin');
+    if (!src && !isRead) src = req.headers.get('Referer') || req.headers.get('referer');
+    if (!src) return false;
+    let srcHost, reqHost;
+    try {
+      // 'null' (opaque origin: sandboxed iframe, data: page) fails to parse
+      // and is rejected — a same-site sandboxed page still sends the cookie
+      // under Lax, so it must never authenticate.
+      srcHost = new URL(src).hostname;
+      reqHost = new URL(req.url).hostname;
+    } catch (_) {
+      return true;
+    }
+    if (srcHost === reqHost) return false;
+    const tail2 = function (h) { return h.split('.').slice(-2).join('.'); };
+    const t = tail2(srcHost);
+    if (t !== tail2(reqHost)) return true;
+    if (t === platformDomain) return true;
+    if (reqHost === platformDomain || reqHost.slice(-(platformDomain.length + 1)) === '.' + platformDomain) return true;
+    return false;
   }
 
   const sw = {
@@ -363,6 +461,105 @@ function buildPlatformContext(env, request) {
         catch (_) { return {}; }
       })();
 
+      // Rule-9 grace for newly-baked scopes (tsk_fa2f41f6). Map of
+      // lowercased table name -> epoch-ms after which a scope violation
+      // THROWS. Before the deadline a violation logs loudly and the
+      // query PROCEEDS, so declaring a scope can never 500 already-
+      // deployed, previously-working code on the next deploy (the
+      // RailTime outage class). Absent/empty -> no grace, enforcement
+      // exactly as before. Deadlines come from loadProjectScopesForBake
+      // at deploy time; the check is re-evaluated per query, so a
+      // window closes on time without needing a redeploy.
+      const SCOPE_GRACE = (function () {
+        try { return env.PROJECT_SCOPES_GRACE ? JSON.parse(env.PROJECT_SCOPES_GRACE) : {}; }
+        catch (_) { return {}; }
+      })();
+
+      // Owner-shaped-but-UNSCOPED tables baked at deploy (scope-hardening,
+      // pfb_02e0d66c1275). Map of lowercased table name -> owner-style column.
+      // These are GRANDFATHERED tables: they have a user_id/owner_id-style
+      // column but NO declared scope, and predate the deploy hard-block, so the
+      // deploy still ships them. The runtime uses this set to close the
+      // fails-open hole where passing { user } against such a table was a
+      // SILENT NO-OP (the table is not in SCOPES, so __sw_checkScope returns
+      // null and the raw, unscoped query ran). New deploys cannot introduce
+      // such a table (the deploy is blocked), so for new code this set is
+      // empty and the no-op cannot arise. Absent/empty -> unchanged behavior.
+      const UNSCOPED_OWNER = (function () {
+        try { return env.PROJECT_UNSCOPED_OWNER ? JSON.parse(env.PROJECT_UNSCOPED_OWNER) : {}; }
+        catch (_) { return {}; }
+      })();
+
+      // Per-table grace deadline (epoch-ms) for the UNSCOPED_OWNER set. Passing
+      // { user } against an unscoped-owner table WARNS loudly before the
+      // deadline and THROWS SCOPE_NOT_DECLARED after it — same warn-then-arm
+      // shape as SCOPE_GRACE. A table in UNSCOPED_OWNER with no deadline here
+      // is treated as already armed (throws).
+      const UNSCOPED_OWNER_GRACE = (function () {
+        try { return env.PROJECT_UNSCOPED_OWNER_GRACE ? JSON.parse(env.PROJECT_UNSCOPED_OWNER_GRACE) : {}; }
+        catch (_) { return {}; }
+      })();
+
+      function __sw_scopeInGrace(table) {
+        const until = SCOPE_GRACE[table];
+        return typeof until === 'number' && Date.now() < until;
+      }
+
+      function __sw_scopeGraceWarn(v, api) {
+        try {
+          console.error('[scope-grace] ' + api + ' ran UNSCOPED on user-scoped table "' + v.table + '": ' + v.reason +
+            ' Enforcement arms at ' + new Date(SCOPE_GRACE[v.table]).toISOString() +
+            ' - after that this exact query THROWS SCOPE_VIOLATION. Fix now: pass { user } (the platform auto-scopes simple queries) or { unscoped: true } if cross-user access is intentional.');
+        } catch (_) { /* logging must never break the query */ }
+      }
+
+      // scope-hardening (pfb_02e0d66c1275): the { user } no-op closer. Returns
+      // { table, ownerCol } when the query touches a table that is owner-shaped
+      // but has no declared scope (so { user } would do nothing), else null.
+      function __sw_checkUnscopedOwner(sql) {
+        const names = Object.keys(UNSCOPED_OWNER);
+        if (names.length === 0) return null;
+        const touched = __sw_extractTables(sql);
+        for (const table of touched) {
+          const ownerCol = UNSCOPED_OWNER[table];
+          if (ownerCol) return { table: table, ownerCol: ownerCol };
+        }
+        return null;
+      }
+
+      function __sw_unscopedOwnerInGrace(table) {
+        const until = UNSCOPED_OWNER_GRACE[table];
+        return typeof until === 'number' && Date.now() < until;
+      }
+
+      function __sw_unscopedOwnerWarn(u, api) {
+        try {
+          const until = UNSCOPED_OWNER_GRACE[u.table];
+          const when = (typeof until === 'number') ? new Date(until).toISOString() : 'the next deploy';
+          console.error('[scope-grace] ' + api + ' was passed { user } on table "' + u.table +
+            '" which has an owner-style column "' + u.ownerCol + '" but NO declared per-user scope, ' +
+            'so { user } did NOTHING and the query ran UNSCOPED (every user can see every row). ' +
+            'This throws SCOPE_NOT_DECLARED after ' + when + '. Fix now: declare a scope so the ' +
+            'platform filters by the current user (sw.db.scope("' + u.table + '", { owner_column: "' +
+            u.ownerCol + '" }) then redeploy), or mark it sw.db.scope("' + u.table +
+            '", { intent: "shared" }) if cross-user access is intended and pass { unscoped: true } here.');
+        } catch (_) { /* logging must never break the query */ }
+      }
+
+      function __sw_throwScopeNotDeclared(u, api) {
+        const err = new Error(api + ' was passed { user } on table "' + u.table +
+          '", which has an owner-style column "' + u.ownerCol + '" but no declared per-user scope. ' +
+          'Passing { user } here does NOT scope the query — without a declared scope every user would ' +
+          'see every row. Declare the scope so the platform filters by the current user: ' +
+          'sw.db.scope("' + u.table + '", { owner_column: "' + u.ownerCol + '" }) then redeploy. ' +
+          'If "' + u.table + '" is intentionally shared across users, mark it sw.db.scope("' + u.table +
+          '", { intent: "shared" }) and pass { unscoped: true } here.');
+        err.code = 'SCOPE_NOT_DECLARED';
+        err.table = u.table;
+        err.owner_column = u.ownerCol;
+        throw err;
+      }
+
       function ensureBinding() {
         // Always satisfied now — DB is either the native binding or
         // the REST facade. Kept as a no-op so the call sites below
@@ -370,6 +567,16 @@ function buildPlatformContext(env, request) {
       }
 
       function __sw_stripStringsAndComments(sql) {
+        // BLANKS every string-literal and comment character with a SPACE,
+        // one-for-one, so the returned string is the SAME LENGTH as the input.
+        // __sw_autoScopeRewrite computes a tail-clause anchor offset against
+        // the STRIPPED sql and then slices the ORIGINAL sql at that offset to
+        // inject the owner predicate — so the two must stay byte-aligned. The
+        // earlier version collapsed each literal to a single space, which
+        // shifted every offset after the first literal; a query like
+        // "... WHERE user_id = ? AND status = 'confirmed' ORDER BY ..." had the
+        // predicate spliced INTO the literal, producing SQL that silently
+        // matched no rows (pfb_20be20f5ec83 / pfb_60b8d245f609).
         let out = '', i = 0;
         const n = sql.length;
         while (i < n) {
@@ -377,20 +584,20 @@ function buildPlatformContext(env, request) {
           if (ch === "'") {
             out += ' '; i++;
             while (i < n) {
-              if (sql[i] === "'" && sql[i + 1] === "'") { i += 2; continue; }
-              if (sql[i] === "'") { i++; break; }
-              i++;
+              if (sql[i] === "'" && sql[i + 1] === "'") { out += '  '; i += 2; continue; }
+              if (sql[i] === "'") { out += ' '; i++; break; }
+              out += ' '; i++;
             }
             continue;
           }
           if (ch === '-' && sql[i + 1] === '-') {
-            while (i < n && sql[i] !== '\n') i++;
+            while (i < n && sql[i] !== '\n') { out += ' '; i++; }
             continue;
           }
           if (ch === '/' && sql[i + 1] === '*') {
-            i += 2;
-            while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++;
-            if (i < n) i += 2;
+            out += '  '; i += 2;
+            while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) { out += ' '; i++; }
+            if (i < n) { out += '  '; i += 2; }
             continue;
           }
           out += ch; i++;
@@ -429,6 +636,227 @@ function buildPlatformContext(env, request) {
         return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       }
 
+      // ─── Positional owner proof (tsk_6475aa86) ──────────────────────────
+      // The original single-table check (the bindRx below) was NON-POSITIONAL:
+      // it accepted "<owner> = $current_user" appearing ANYWHERE in the SQL,
+      // so an app-user could park the sentinel in the SELECT projection, an
+      // ORDER BY, an UPDATE SET, or inside an OR and read/overwrite every
+      // user's rows. There is no SQL parser inside the deployed function
+      // bundle (this is the byte-escaped runtime mirror of the REST checker in
+      // worker/src/utils/scope-enforcement.ts), so the proof is a small
+      // structural scan of the (length-preserving-stripped) WHERE clause:
+      // '<owner> = $current_user' must be an AND-reachable, top-level conjunct
+      // of the WHERE — descent stops at any OR exactly as the REST AST does.
+
+      // True iff the uppercase keyword 'word' sits at offset i in 'up' with a
+      // word boundary on both sides.
+      function __sw_kwAt(up, i, word) {
+        if (up.substr(i, word.length) !== word) return false;
+        const before = up[i - 1];
+        const after = up[i + word.length];
+        const isWord = function (ch) { return ch != null && /[A-Z0-9_]/.test(ch); };
+        return !isWord(before) && !isWord(after);
+      }
+
+      // Index of the ')' matching the '(' at 'open', or -1 if unbalanced.
+      function __sw_matchingParen(s, open) {
+        let depth = 0;
+        for (let i = open; i < s.length; i++) {
+          if (s[i] === '(') depth++;
+          else if (s[i] === ')') { depth--; if (depth === 0) return i; }
+        }
+        return -1;
+      }
+
+      // Remove one (or more) fully-enclosing paren pair(s): "((x))" -> "x".
+      function __sw_stripWrapParens(s) {
+        s = s.trim();
+        while (s.length >= 2 && s[0] === '(' && __sw_matchingParen(s, 0) === s.length - 1) {
+          s = s.slice(1, -1).trim();
+        }
+        return s;
+      }
+
+      // Split 'expr' on the depth-0, word-bounded keyword 'kw' ('AND' / 'OR').
+      function __sw_splitTopLevel(expr, kw) {
+        const up = expr.toUpperCase();
+        const parts = [];
+        let depth = 0, last = 0, i = 0;
+        const n = expr.length;
+        while (i < n) {
+          const ch = expr[i];
+          if (ch === '(') { depth++; i++; continue; }
+          if (ch === ')') { if (depth > 0) depth--; i++; continue; }
+          if (depth === 0 && __sw_kwAt(up, i, kw)) {
+            parts.push(expr.slice(last, i));
+            i += kw.length;
+            last = i;
+            continue;
+          }
+          i++;
+        }
+        parts.push(expr.slice(last));
+        return parts;
+      }
+
+      // True iff the atomic term is exactly "<owner> = $current_user" (either
+      // side). The owner column may be bare, table-qualified, or double-quoted.
+      function __sw_isOwnerEqTerm(term, ownerCol) {
+        const t = term.trim();
+        const oc = __sw_escapeRegex(ownerCol);
+        const col = '(?:[A-Za-z_][A-Za-z0-9_]*\\.)?"?' + oc + '"?';
+        const fwd = new RegExp('^' + col + '\\s*=\\s*\\$current_user$', 'i');
+        const rev = new RegExp('^\\$current_user\\s*=\\s*' + col + '$', 'i');
+        return fwd.test(t) || rev.test(t);
+      }
+
+      // True iff "<owner> = $current_user" is AND-reachable from the root of
+      // the boolean expression 'expr' (a top-level conjunct). A top-level OR
+      // anywhere on the path makes the constraint non-guaranteeing -> false.
+      function __sw_andReachesOwner(expr, ownerCol) {
+        expr = __sw_stripWrapParens(expr);
+        if (__sw_splitTopLevel(expr, 'OR').length > 1) return false;
+        const ands = __sw_splitTopLevel(expr, 'AND');
+        if (ands.length > 1) {
+          for (let i = 0; i < ands.length; i++) {
+            if (__sw_andReachesOwner(ands[i], ownerCol)) return true;
+          }
+          return false;
+        }
+        return __sw_isOwnerEqTerm(expr, ownerCol);
+      }
+
+      // Extract the depth-0 WHERE clause text (between WHERE and the next
+      // top-level tail keyword / ';' / end), or null when there is no
+      // top-level WHERE. Anything in a subquery WHERE is at depth>0 and is
+      // intentionally ignored.
+      function __sw_whereClauseSpan(stripped) {
+        const up = stripped.toUpperCase();
+        const n = stripped.length;
+        let depth = 0, start = -1, i = 0;
+        while (i < n) {
+          const ch = stripped[i];
+          if (ch === '(') { depth++; i++; continue; }
+          if (ch === ')') { if (depth > 0) depth--; i++; continue; }
+          if (depth === 0) {
+            if (start === -1) {
+              if (__sw_kwAt(up, i, 'WHERE')) { start = i + 5; i = start; continue; }
+            } else {
+              if (ch === ';') return stripped.slice(start, i);
+              if (__sw_kwAt(up, i, 'GROUP') || __sw_kwAt(up, i, 'ORDER') ||
+                  __sw_kwAt(up, i, 'LIMIT') || __sw_kwAt(up, i, 'HAVING') ||
+                  __sw_kwAt(up, i, 'WINDOW') || __sw_kwAt(up, i, 'RETURNING') ||
+                  __sw_kwAt(up, i, 'OFFSET')) {
+                return stripped.slice(start, i);
+              }
+            }
+          }
+          i++;
+        }
+        if (start === -1) return null;
+        return stripped.slice(start);
+      }
+
+      // Prove the owner predicate constrains the WHERE clause. 'stripped' is the
+      // length-preserving-blanked SQL (string literals/comments already removed)
+      // so keyword/paren scanning is never fooled by literal contents.
+      function __sw_whereProvesOwner(stripped, ownerCol) {
+        const span = __sw_whereClauseSpan(stripped);
+        if (span == null || span.trim() === '') return false;
+        return __sw_andReachesOwner(span, ownerCol);
+      }
+
+      // Split 's' on depth-0 commas (parens-aware). Used to walk an INSERT
+      // column list and each VALUES tuple positionally.
+      function __sw_splitTopLevelComma(s) {
+        const parts = [];
+        let depth = 0, last = 0;
+        for (let i = 0; i < s.length; i++) {
+          const ch = s[i];
+          if (ch === '(') depth++;
+          else if (ch === ')') { if (depth > 0) depth--; }
+          else if (ch === ',' && depth === 0) { parts.push(s.slice(last, i)); last = i + 1; }
+        }
+        parts.push(s.slice(last));
+        return parts;
+      }
+
+      // ─── Positional INSERT owner proof (tsk_3006e8bc) ───────────────────
+      // The original INSERT check only asked whether the owner column APPEARED
+      // in the column list and the $current_user sentinel APPEARED somewhere —
+      // never whether the owner column's VALUE is the sentinel. An app-user
+      // could park the sentinel in a non-owner column and plant a row owned by
+      // someone else:  INSERT INTO notes (user_id, body) VALUES ('VICTIM', $current_user).
+      // 'stripped' is the length-preserving-blanked SQL (string literals
+      // removed), so the sentinel survives while any literal in the owner slot
+      // is blanked away. Proven only when the owner column's VALUE is
+      // $current_user at the owner column's own index in EVERY VALUES tuple, or
+      // (INSERT...SELECT) in the matching SELECT projection. Fail-closed.
+      function __sw_insertProvesOwner(stripped, ownerCol) {
+        const up = stripped.toUpperCase();
+        function isSentinelTerm(seg) {
+          let s = __sw_stripWrapParens(String(seg).trim());
+          s = s.replace(/\s+AS\s+[A-Za-z_][A-Za-z0-9_]*$/i, '').trim();
+          return s.toLowerCase() === '$current_user';
+        }
+        // Locate the explicit column list: first '(' after the INTO keyword.
+        let intoEnd = -1;
+        for (let i = 0; i < stripped.length; i++) {
+          if (__sw_kwAt(up, i, 'INTO')) { intoEnd = i + 4; break; }
+        }
+        if (intoEnd === -1) return false;
+        const open = stripped.indexOf('(', intoEnd);
+        if (open === -1) return false;
+        const close = __sw_matchingParen(stripped, open);
+        if (close === -1) return false;
+        const cols = __sw_splitTopLevelComma(stripped.slice(open + 1, close)).map(function (c) {
+          return c.trim().replace(/^"|"$/g, '').toLowerCase();
+        });
+        const ownerIdx = cols.indexOf(ownerCol.toLowerCase());
+        if (ownerIdx === -1) return false;
+        // After the column list: VALUES (...)[, (...)]... or SELECT ...
+        const rest = stripped.slice(close + 1);
+        const restUp = rest.toUpperCase();
+        let depth = 0, kind = null, kidx = -1;
+        for (let i = 0; i < rest.length; i++) {
+          const ch = rest[i];
+          if (ch === '(') { depth++; continue; }
+          if (ch === ')') { if (depth > 0) depth--; continue; }
+          if (depth === 0) {
+            if (__sw_kwAt(restUp, i, 'VALUES')) { kind = 'values'; kidx = i + 6; break; }
+            if (__sw_kwAt(restUp, i, 'SELECT')) { kind = 'select'; kidx = i + 6; break; }
+          }
+        }
+        if (kind === 'values') {
+          let j = kidx, tuples = 0;
+          while (j < rest.length) {
+            while (j < rest.length && /[\s,]/.test(rest[j])) j++;
+            if (j >= rest.length || rest[j] !== '(') break; // RETURNING / end
+            const tClose = __sw_matchingParen(rest, j);
+            if (tClose === -1) return false;
+            const parts = __sw_splitTopLevelComma(rest.slice(j + 1, tClose));
+            if (ownerIdx >= parts.length) return false;
+            if (!isSentinelTerm(parts[ownerIdx])) return false;
+            tuples++;
+            j = tClose + 1;
+          }
+          return tuples > 0;
+        }
+        if (kind === 'select') {
+          let d2 = 0, projEnd = rest.length;
+          for (let i = kidx; i < rest.length; i++) {
+            const ch = rest[i];
+            if (ch === '(') { d2++; continue; }
+            if (ch === ')') { if (d2 > 0) d2--; continue; }
+            if (d2 === 0 && __sw_kwAt(restUp, i, 'FROM')) { projEnd = i; break; }
+          }
+          const parts = __sw_splitTopLevelComma(rest.slice(kidx, projEnd));
+          if (ownerIdx >= parts.length) return false;
+          return isSentinelTerm(parts[ownerIdx]);
+        }
+        return false;
+      }
+
       function __sw_checkScope(sql) {
         const tableNames = Object.keys(SCOPES);
         if (tableNames.length === 0) return null;
@@ -443,13 +871,19 @@ function buildPlatformContext(env, request) {
             if (!m) return { table: table, ownerCol: ownerCol, reason: 'INSERT into scoped table `' + table + '` must use the explicit-column form: INSERT INTO ' + table + ' (' + ownerCol + ', …) VALUES ($current_user, …).' };
             const cols = m[1].split(',').map(function (s) { return s.trim().replace(/^"|"$/g, '').toLowerCase(); });
             if (cols.indexOf(ownerCol.toLowerCase()) === -1) return { table: table, ownerCol: ownerCol, reason: 'INSERT into scoped table `' + table + '` must include column `' + ownerCol + '` set to $current_user.' };
-            if (!/\$current_user\b/.test(sql)) return { table: table, ownerCol: ownerCol, reason: 'INSERT into scoped table `' + table + '` must bind `' + ownerCol + '` to $current_user.' };
+            // POSITIONAL proof (tsk_3006e8bc): the owner column's VALUE must be
+            // $current_user at the owner column's own index — in every VALUES
+            // row, or the matching SELECT projection for INSERT...SELECT. A
+            // sentinel parked in a different column does not scope the row.
+            if (!__sw_insertProvesOwner(stripped, ownerCol)) return { table: table, ownerCol: ownerCol, reason: 'INSERT into scoped table `' + table + '` must bind `' + ownerCol + '` to $current_user at its own position in every VALUES row (or the matching SELECT column for INSERT…SELECT). A $current_user value in a different column does not scope the row to the current user.' };
             continue;
           }
           if (kind === 'select' || kind === 'update' || kind === 'delete') {
             if (!/\bWHERE\b/i.test(stripped)) return { table: table, ownerCol: ownerCol, reason: kind.toUpperCase() + ' on scoped table `' + table + '` must have a WHERE clause that constrains `' + ownerCol + '` to $current_user.' };
-            const bindRx = new RegExp('(?:\\b|\\.|")' + __sw_escapeRegex(ownerCol) + '"?\\s*=\\s*\\$current_user\\b', 'i');
-            if (!bindRx.test(stripped)) return { table: table, ownerCol: ownerCol, reason: kind.toUpperCase() + ' on scoped table `' + table + '` must constrain `' + ownerCol + '` with: ' + ownerCol + ' = $current_user.' };
+            // POSITIONAL proof (tsk_6475aa86): the owner predicate must be a
+            // top-level AND condition of the WHERE clause, not merely present
+            // somewhere in the SQL (projection / ORDER BY / SET / OR).
+            if (!__sw_whereProvesOwner(stripped, ownerCol)) return { table: table, ownerCol: ownerCol, reason: kind.toUpperCase() + ' on scoped table `' + table + '` must constrain `' + ownerCol + '` to the current user with `' + ownerCol + ' = $current_user` as a top-level condition in the WHERE clause - AND-ed (not inside an OR), and not only in the SELECT list, ORDER BY, or an UPDATE SET.' };
             continue;
           }
           return { table: table, ownerCol: ownerCol, reason: 'Statement type not recognized for scope enforcement on `' + table + '`. Use SELECT, INSERT, UPDATE, or DELETE.' };
@@ -583,6 +1017,14 @@ function buildPlatformContext(env, request) {
         err.code = 'SCOPE_VIOLATION';
         err.table = v.table;
         err.owner_column = v.ownerCol;
+        // A scope violation is a developer-fixable 4xx, not a platform bug
+        // (tsk_81271d84). Mark it exposed so the function-bundle catch-all
+        // surfaces a clean 403 SCOPE_VIOLATION with the owner-binding message,
+        // instead of swallowing it into an opaque 500 FUNCTION_ERROR. The
+        // message names the table + owner column the developer must bind —
+        // product/SDK terms only, no infra leak.
+        err.status = 403;
+        err.__sw_expose = true;
         throw err;
       }
 
@@ -763,17 +1205,49 @@ function buildPlatformContext(env, request) {
       // the actual fix is db_migrate. Logs and dashboard Logs tab
       // surface both tags ([SW_SLOW_QUERY] / [SW_SCHEMA_DRIFT]).
       const SW_SLOW_QUERY_MS = 100;
+      // Strip engine/infra labels from a raw database error so the developer
+      // sees the actionable cause ("UNIQUE constraint failed: users.email")
+      // without the provider noise ("D1_ERROR", "SQLITE_CONSTRAINT_UNIQUE").
+      // No D1/SQLite/Cloudflare term survives (rule 8 — product language only).
+      function __sw_productizeDbMessage(msg) {
+        return String(msg)
+          .replace(/D1_ERROR:?/gi, '')
+          .replace(/SQLITE_[A-Z_]+/gi, '')
+          .replace(/\bSQLite\b/gi, 'database')
+          .replace(/\bD1\b/gi, 'database')
+          .replace(/\bCloudflare\b/gi, '')
+          .replace(/\s{2,}/g, ' ')
+          .replace(/^[\s:;.,]+|[\s:;.,]+$/g, '')
+          .trim();
+      }
       function __sw_decorateError(label, sqlPreview, err) {
         const msg = (err && err.message) || String(err);
+        const snippet = String(sqlPreview).replace(/\s+/g, ' ').slice(0, 200);
         const m = msg.match(/no such (?:column|table)[^A-Za-z0-9_]*([A-Za-z0-9_.]*)/i);
         if (m) {
           const ident = m[1] || 'unknown';
-          const snippet = String(sqlPreview).replace(/\s+/g, ' ').slice(0, 200);
           console.warn('[SW_SCHEMA_DRIFT] ' + label + ' — ' + ident + ' missing — ' + snippet);
           const better = new Error('Schema drift: ' + msg + '. Your code references "' + ident + '" but the database schema does not. Did you forget to run db_migrate before deploying?');
           better.code = 'SCHEMA_DRIFT';
           better.original = err;
           return better;
+        }
+        // Any OTHER database error: the native binding / provider passthrough
+        // surfaces raw strings like "D1_ERROR: ... : SQLITE_CONSTRAINT" that
+        // leak the engine and read as noise. Rewrite to product language, but
+        // FAIL LOUD: log the real cause server-side (Logs tab) and keep
+        // .original — never swallow it.
+        if (/D1_ERROR|SQLITE/i.test(msg)) {
+          console.error('[SW_DB_ERROR] ' + label + ' — ' + msg + ' — ' + snippet);
+          const detail = __sw_productizeDbMessage(msg);
+          const wrapped = new Error(
+            (detail ? 'Your database query could not be completed: ' + detail + '.'
+                    : 'Your database query could not be completed.') +
+            ' Check the query and your table and column names against your schema; the full database error is in your project Logs.'
+          );
+          wrapped.code = 'DB_QUERY_ERROR';
+          wrapped.original = err;
+          return wrapped;
         }
         return err;
       }
@@ -1150,6 +1624,57 @@ function buildPlatformContext(env, request) {
         }
       }
 
+      // sw.db.scope(table, opts) — declare a table as user-scoped IN-BAND,
+      // so a deployed function / run_code setup script can arm per-user row
+      // scoping without minting a developer key and curl-ing /v1/db/scopes
+      // out of band (the gooddog gap). Routes through the SAME POST
+      // /v1/db/scopes the dashboard + MCP use, with the same owner authority:
+      // the runtime key is the project owner's, pinned to THIS project by the
+      // auth middleware, so a scope can only ever be declared on this project.
+      //
+      // Declaring a scope TIGHTENS access (it arms owner-column enforcement on
+      // app-user queries); it never widens a query result set. Scopes are
+      // baked into the bundle at DEPLOY time (PROJECT_SCOPES), so a scope
+      // declared at runtime takes effect for app-user queries on the NEXT
+      // deploy — this records the declaration; it does NOT hot-swap the
+      // running bundle's SCOPES map. Unlike sw.db.query, failures throw.
+      //
+      //   await sw.db.scope('bookings', { owner_column: 'user_id' })
+      //   await sw.db.scope('audit', { intent: 'shared' })  // intentionally cross-user
+      //   await sw.db.scope.list()                           // all declared scopes
+      //   await sw.db.scope.get('bookings')                  // one scope, or null
+      async function __sw_scopeDeclare(table, opts) {
+        if (typeof table !== 'string' || !table) {
+          const err = new Error('sw.db.scope(table, opts): table must be a non-empty string.');
+          err.code = 'VALIDATION_ERROR';
+          throw err;
+        }
+        opts = opts || {};
+        const body = { project_id: projectId, table: table };
+        if (opts.owner_column != null) body.owner_column = opts.owner_column;
+        if (opts.sensitive_columns != null) body.sensitive_columns = opts.sensitive_columns;
+        if (opts.intent != null) body.intent = opts.intent;
+        return platformJSON('/v1/db/scopes', { method: 'POST', body: JSON.stringify(body) });
+      }
+      __sw_scopeDeclare.list = async function () {
+        const d = await platformJSON('/v1/db/scopes?project_id=' + encodeURIComponent(projectId));
+        return (d && d.scopes) || [];
+      };
+      __sw_scopeDeclare.get = async function (table) {
+        if (typeof table !== 'string' || !table) {
+          const err = new Error('sw.db.scope.get(table): table must be a non-empty string.');
+          err.code = 'VALIDATION_ERROR';
+          throw err;
+        }
+        const lc = table.toLowerCase();
+        const d = await platformJSON('/v1/db/scopes?project_id=' + encodeURIComponent(projectId));
+        const scopes = (d && d.scopes) || [];
+        for (let i = 0; i < scopes.length; i++) {
+          if (scopes[i] && String(scopes[i].table).toLowerCase() === lc) return scopes[i];
+        }
+        return null;
+      };
+
       return {
         async query(sql, params, options) {
           ensureBinding();
@@ -1190,11 +1715,28 @@ function buildPlatformContext(env, request) {
                     changes: (rr.meta && rr.meta.changes) || 0,
                   };
                 }
+                if (!__sw_scopeInGrace(v.table)) {
+                  __sw_throwViolation(v,
+                    'Pass { user } and we will scope your query automatically, but only for single-table SELECT/UPDATE/DELETE/INSERT. This query has a JOIN, UNION, or subquery — use sw.db.scoped(user.id) to write the scoped form explicitly, or { unscoped: true } if cross-user is intentional.');
+                }
+                __sw_scopeGraceWarn(v, 'sw.db.query');
+              } else if (__sw_scopeInGrace(v.table)) {
+                // Grace window: warn loudly, run the query as written.
+                __sw_scopeGraceWarn(v, 'sw.db.query');
+              } else {
                 __sw_throwViolation(v,
-                  'Pass { user } and we will scope your query automatically, but only for single-table SELECT/UPDATE/DELETE/INSERT. This query has a JOIN, UNION, or subquery — use sw.db.scoped(user.id) to write the scoped form explicitly, or { unscoped: true } if cross-user is intentional.');
+                  'Pass { user } as the third arg — sw.db.query(sql, params, { user: sw.auth.fromRequest(req).user }) — or { unscoped: true } if cross-user is intentional. The verbose form sw.db.scoped(user.id).query(...) still works.');
               }
-              __sw_throwViolation(v,
-                'Pass { user } as the third arg — sw.db.query(sql, params, { user: sw.auth.fromRequest(req).user }) — or { unscoped: true } if cross-user is intentional. The verbose form sw.db.scoped(user.id).query(...) still works.');
+            } else if (userId) {
+              // No scoped-table violation, but { user } was passed. If the
+              // query touches an owner-shaped table with NO declared scope,
+              // { user } would silently no-op (pfb_02e0d66c1275) — warn during
+              // grace, throw SCOPE_NOT_DECLARED after. Never a silent leak.
+              const u = __sw_checkUnscopedOwner(sql);
+              if (u) {
+                if (__sw_unscopedOwnerInGrace(u.table)) __sw_unscopedOwnerWarn(u, 'sw.db.query');
+                else __sw_throwScopeNotDeclared(u, 'sw.db.query');
+              }
             }
           }
           const r = await __sw_timedExec('sw.db.query', sql, function () { return prep(sql, params).all(); });
@@ -1229,8 +1771,13 @@ function buildPlatformContext(env, request) {
             for (const s of statements) {
               const v = __sw_checkScope(s.sql);
               if (v && !userId) {
-                __sw_throwViolation(v,
-                  'Pass { user } as the second arg to sw.db.batch, or { unscoped: true } if cross-user is intentional. The verbose form sw.db.scoped(user.id).batch(...) still works.');
+                if (__sw_scopeInGrace(v.table)) {
+                  // Grace window: warn loudly, let the batch run as written.
+                  __sw_scopeGraceWarn(v, 'sw.db.batch');
+                } else {
+                  __sw_throwViolation(v,
+                    'Pass { user } as the second arg to sw.db.batch, or { unscoped: true } if cross-user is intentional. The verbose form sw.db.scoped(user.id).batch(...) still works.');
+                }
               }
             }
           }
@@ -1243,8 +1790,20 @@ function buildPlatformContext(env, request) {
                   const subst = __sw_substCurrentUser(rewritten, s.params, userId);
                   return prep(subst.sql, subst.params);
                 }
-                __sw_throwViolation(v,
-                  'Auto-scope only handles single-table SELECT/UPDATE/DELETE/INSERT. Use sw.db.scoped(user.id).batch(...) for JOIN/UNION/subquery shapes.');
+                if (!__sw_scopeInGrace(v.table)) {
+                  __sw_throwViolation(v,
+                    'Auto-scope only handles single-table SELECT/UPDATE/DELETE/INSERT. Use sw.db.scoped(user.id).batch(...) for JOIN/UNION/subquery shapes.');
+                }
+                __sw_scopeGraceWarn(v, 'sw.db.batch');
+              } else {
+                // { user } against an owner-shaped table with no declared scope
+                // would silently no-op (pfb_02e0d66c1275) — warn during grace,
+                // throw SCOPE_NOT_DECLARED after.
+                const u = __sw_checkUnscopedOwner(s.sql);
+                if (u) {
+                  if (__sw_unscopedOwnerInGrace(u.table)) __sw_unscopedOwnerWarn(u, 'sw.db.batch');
+                  else __sw_throwScopeNotDeclared(u, 'sw.db.batch');
+                }
               }
             }
             return prep(s.sql, s.params);
@@ -1291,6 +1850,7 @@ function buildPlatformContext(env, request) {
           return (r.results || []).map((row) => row.name);
         },
         scoped: scopedClient,
+        scope: __sw_scopeDeclare,
         async dump() {
           // sw.db.dump is developer-only and is NOT callable from a
           // deployed function. A full-database export must run with
@@ -1373,11 +1933,26 @@ function buildPlatformContext(env, request) {
         // fs_write path worked, the in-function shim silently dropped it).
         const headers = { 'Content-Type': ct };
         if (opts.visibility === 'public' || opts.public === true) headers['X-Visibility'] = 'public';
+        // Opt-in conditional write: { if_match: <version> } pins the version
+        // this writer last read (write/stat/versions all return it). If the
+        // file changed since, the platform refuses with FS_VERSION_CONFLICT
+        // instead of silently last-write-wins. Omit for today's behavior.
+        const ifMatch = opts.ifMatch ?? opts.if_match;
+        if (ifMatch !== undefined && ifMatch !== null) headers['If-Match'] = String(ifMatch);
         const r = await platformFetch('/v1/fs/' + projectId + path, {
           method: 'PUT',
           headers,
           body,
         });
+        if (r.status === 412) {
+          const conflict = await r.json().catch(() => null);
+          const err = new Error('FS_VERSION_CONFLICT: ' + (conflict && conflict.message
+            ? conflict.message
+            : 'the file changed since it was read — re-read it and retry with the current version'));
+          err.code = 'FS_VERSION_CONFLICT';
+          if (conflict && conflict.data) err.current_version = conflict.data.current_version;
+          throw err;
+        }
         if (!r.ok) throw new Error('fs.write failed: ' + r.status);
         return r.json();
       },
@@ -2481,14 +3056,20 @@ function buildPlatformContext(env, request) {
         // The cookies ride out on the Response via the shim, so the handler
         // returns a plain user/Response and does zero header work.
         async loginWithCookie(req, email, password) {
-          const d = await this.login({ email: email, password: password });
+          const creds = __sw_cookieCreds('loginWithCookie', req, email, password);
+          let d;
+          try { d = await this.login(creds); }
+          catch (err) { throw __sw_markExpected(err); }
           const access = d && (d.token || d.access_token);
           const refresh = d && d.refresh_token;
           if (access && refresh) __sw_setAuthCookies(access, refresh);
           return (d && d.user) || null;
         },
         async signupWithCookie(req, email, password) {
-          const d = await this.signup({ email: email, password: password });
+          const creds = __sw_cookieCreds('signupWithCookie', req, email, password);
+          let d;
+          try { d = await this.signup(creds); }
+          catch (err) { throw __sw_markExpected(err); }
           const access = d && (d.token || d.access_token);
           const refresh = d && d.refresh_token;
           if (access && refresh) __sw_setAuthCookies(access, refresh);
@@ -2499,12 +3080,33 @@ function buildPlatformContext(env, request) {
         async googleCallbackWithCookie(req, redirectTo) {
           const u = new URL(req.url);
           const code = u.searchParams.get('code');
-          if (!code) { const e = new Error('Missing ?code on the OAuth callback.'); e.code = 'VALIDATION_ERROR'; throw e; }
-          const d = await this.googleExchange({ code: code, redirect_uri: u.origin + u.pathname });
+          if (!code) { const e = new Error('Missing ?code on the OAuth callback.'); e.code = 'VALIDATION_ERROR'; e.status = 400; e.__sw_expose = true; throw e; }
+          let d;
+          try { d = await this.googleExchange({ code: code, redirect_uri: u.origin + u.pathname }); }
+          catch (err) { throw __sw_markExpected(err); }
           const access = d && (d.token || d.access_token);
           const refresh = d && d.refresh_token;
           if (access && refresh) __sw_setAuthCookies(access, refresh);
           return new Response(null, { status: 302, headers: { Location: redirectTo || '/' } });
+        },
+        // Mint the httpOnly session cookies from an existing token pair —
+        // the primitive the *WithCookie helpers wrap (tsk_1dd4e1b4). For
+        // backends (e.g. @somewhere-tech/auth/server) that already called
+        // login / googleExchange / verifyOtp and want THAT session as
+        // cookies without a second platform call.
+        setSessionCookies(access, refresh) {
+          if (typeof access !== 'string' || !access || typeof refresh !== 'string' || !refresh) {
+            const err = new Error('sw.auth.setSessionCookies: access and refresh must be non-empty strings');
+            err.code = 'VALIDATION_ERROR';
+            throw err;
+          }
+          __sw_setAuthCookies(access, refresh);
+        },
+        // Park the Set-Cookie expirations that end a cookie session (the
+        // clear half of setSessionCookies). logoutWithCookie does this AND
+        // revokes server-side — prefer it when you have the Request.
+        clearSessionCookies() {
+          __sw_clearAuthCookies();
         },
         // Revokes the session server-side and clears the cookies.
         async logoutWithCookie(req) {
@@ -2729,6 +3331,16 @@ function buildPlatformContext(env, request) {
           }
           if (!token) return null;
 
+          // Cross-origin guard (tsk_1dd4e1b4): a cookie-authed request from a
+          // foreign origin is treated as unauthenticated (CSRF on writes,
+          // credentialed cross-origin reads on GET). Loud log so blocked
+          // attempts show in the function logs, never silently.
+          if (fromCookie && __sw_cookieCsrfBlocked(req)) {
+            console.error('[CSRF] blocked cookie-authed ' + req.method + ' ' + (req.url || '') +
+              ' — cross-origin source does not match this app. Browser calls must be same-origin (or use token auth).');
+            return null;
+          }
+
           let refreshToken = null;
           const optOut = req.headers.get('X-No-Auto-Refresh') || req.headers.get('x-no-auto-refresh');
           if (optOut !== '1') {
@@ -2942,6 +3554,39 @@ function buildPlatformContext(env, request) {
       info(msg, data) { return this._send('info', msg, data); },
       warn(msg, data) { return this._send('warn', msg, data); },
       error(msg, data) { return this._send('error', msg, data); },
+      // sw.logs.tail({ limit?, level?, since?, source?, search? }) — read this
+      // project's OWN recent logs back, in one call, so a script can run an
+      // action then read the logs it produced without a second round-trip
+      // through the dashboard. Reads the same owner-scoped app_logs the
+      // GET /v1/logs read path returns; the runtime key is pinned to this
+      // project, so it can only ever see this project's logs. Read-only —
+      // unlike _send (fire-and-forget), failures throw so the caller sees them.
+      //
+      // Read consistency: log writes (sw.logs.* and platform internalLog) are
+      // ingested through a durable queue that batch-inserts, so a line you just
+      // wrote can lag a short window before tail() returns it (pfb
+      // F-LOG-WRITE-READ-GAP). tail() reports only committed rows — it never
+      // invents or waits on an un-ingested write. Poll briefly if you need
+      // read-your-write.
+      //
+      //   since: epoch-ms number OR ISO-8601 string — returns logs at/after it.
+      //   level: 'debug' | 'info' | 'warn' | 'error'.   source: filter by source.
+      //   limit: default 50, capped at 500 by the read path.
+      // Returns an array of { id, level, message, data, source, created_at }
+      // (newest first).
+      async tail(opts) {
+        opts = opts || {};
+        const qs = new URLSearchParams({ project_id: projectId });
+        if (opts.limit != null) qs.set('limit', String(opts.limit));
+        if (opts.level) qs.set('level', String(opts.level));
+        if (opts.source) qs.set('source', String(opts.source));
+        if (opts.search) qs.set('search', String(opts.search));
+        if (opts.since != null) {
+          qs.set('after', typeof opts.since === 'number' ? String(opts.since) : String(opts.since));
+        }
+        const d = await platformJSON('/v1/logs?' + qs.toString());
+        return (d && d.logs) || [];
+      },
     },
 
     realtime: {
