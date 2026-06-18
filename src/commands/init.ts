@@ -36,7 +36,7 @@ export function registerInit(program: Command) {
       }
 
       if (opts.link) {
-        await linkExisting(client, token, dir);
+        await linkExisting(client, dir);
         return;
       }
 
@@ -89,10 +89,10 @@ export function registerInit(program: Command) {
         });
         success('.somewhere.json written');
 
-        saveMcpConfig(dir, token);
+        saveMcpConfig(dir);
 
         if (!hasGlobalMcpConfig()) {
-          saveGlobalMcpConfig(token);
+          saveGlobalMcpConfig();
           success('~/.claude.json updated — Claude Code MCP connected');
         }
 
@@ -108,7 +108,6 @@ export function registerInit(program: Command) {
 
 async function linkExisting(
   client: ApiClient,
-  token: string,
   dir: string,
 ) {
   const spinner = ora('Fetching projects...').start();
@@ -142,10 +141,10 @@ async function linkExisting(
   });
   success(`.somewhere.json linked to ${teal(project.name)}`);
 
-  saveMcpConfig(dir, token);
+  saveMcpConfig(dir);
 
   if (!hasGlobalMcpConfig()) {
-    saveGlobalMcpConfig(token);
+    saveGlobalMcpConfig();
     success('~/.claude.json updated — Claude Code MCP connected');
   }
 

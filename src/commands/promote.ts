@@ -60,6 +60,10 @@ export function registerPromote(program: Command) {
         });
         spinner.stop();
         success(`Promoted v${r.version} (${r.files_promoted} file${r.files_promoted === 1 ? '' : 's'}${r.has_functions ? ' + functions' : ''})`);
+        // Name the preview/draft this version was promoted from, when known —
+        // closes the loop on "what exactly went live" at the highest-trust moment.
+        const fromDraft = draftId ?? r.promoted_draft_id;
+        if (fromDraft) info(dim(`Promoted from preview ${teal(fromDraft)}`));
         // The promote response carries no URL — resolve the live URL from the
         // project's subdomain (best-effort; never fail a successful promote on it).
         try {

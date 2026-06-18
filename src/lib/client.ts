@@ -1,7 +1,11 @@
 import type { ApiResponse } from '../types.js';
 import { Agent, fetch as undiciFetch } from 'undici';
+import { loadConfig, updateTokens } from './config.js';
 
-const BASE_URL = 'https://api.somewhere.tech/v1';
+/** The /v1 API host. Override for staging/tests via SOMEWHERE_API_URL
+ *  (mirrors SOMEWHERE_RUNNER_URL below); the value should include the /v1
+ *  suffix or a host the route paths can hang off of. */
+const BASE_URL = process.env.SOMEWHERE_API_URL?.replace(/\/$/, '') || 'https://api.somewhere.tech/v1';
 
 /** The dedicated run_code runner worker (somewhere-tech-runner). `somewhere run`
  *  MUST hit this host, NOT the /v1 API: the runner is the request ROOT — it
@@ -22,7 +26,13 @@ const DEFAULT_TIMEOUT_MS = 60_000;
 export const LONG_CALL_TIMEOUT_MS = 10 * 60_000;
 
 export class ApiClient {
-  constructor(private readonly token: string) {}
+  /** Mutable: the refresh-on-401 path swaps in a fresh access key in place so
+   *  the retry (and every later call on this instance) uses the new token. */
+  private token: string;
+
+  constructor(token: string) {
+    this.token = token;
+  }
 
   /** Run a one-off script against the project's live DEV bindings via the
    *  dedicated runner worker. Same auth + `{ ok, data }` envelope as call(), but
@@ -36,7 +46,70 @@ export class ApiClient {
     return this.call<T>('POST', '/run', body, undefined, { ...opts, baseUrl: RUNNER_BASE_URL });
   }
 
+  /** Authenticated API call. On a 401 API_KEY_EXPIRED — the short-lived
+   *  cli-pair access key timed out — and with a stored refresh token, this
+   *  swaps in a fresh access key via POST /v1/keys/cli-pair/refresh and
+   *  retries ONCE, so a long-lived agent session never logs itself out
+   *  (tsk_3642f3c4). Without a refresh token (older login flows) the original
+   *  401 propagates unchanged. */
   async call<T = unknown>(
+    method: string,
+    path: string,
+    body?: unknown,
+    query?: Record<string, string | number | undefined>,
+    opts?: { timeoutMs?: number; baseUrl?: string },
+  ): Promise<T> {
+    try {
+      return await this.request<T>(method, path, body, query, opts);
+    } catch (err) {
+      if (!(err instanceof CliApiError) || err.code !== 'API_KEY_EXPIRED') throw err;
+      const refreshed = await this.refreshAccessKey();
+      if (!refreshed) throw err; // no refresh token, or refresh failed loudly
+      // Retry exactly once with the new key. A second API_KEY_EXPIRED here is
+      // genuine — let it propagate rather than loop.
+      return await this.request<T>(method, path, body, query, opts);
+    }
+  }
+
+  /** Exchange the stored cli-pair refresh token for a fresh access key and
+   *  persist both. Returns true if the access key was swapped in. Returns
+   *  false (without throwing) when there is no refresh token to use — the
+   *  caller then surfaces the original API_KEY_EXPIRED. Throws a clear
+   *  CliApiError when the refresh token itself is expired/revoked, so the user
+   *  is told to re-login rather than seeing a bare "expired key" loop. */
+  private async refreshAccessKey(): Promise<boolean> {
+    const config = loadConfig();
+    const refreshToken = config?.refresh_token;
+    if (!refreshToken) return false;
+
+    let pair: { key?: string; refresh_token?: string };
+    try {
+      pair = await this.request<{ key?: string; refresh_token?: string }>(
+        'POST',
+        '/keys/cli-pair/refresh',
+        { refresh_token: refreshToken },
+      );
+    } catch (err) {
+      if (err instanceof CliApiError && err.code === 'INVALID_REFRESH_TOKEN') {
+        throw new CliApiError(
+          'SESSION_EXPIRED',
+          'Your CLI session has expired (refresh token is no longer valid). Run `somewhere login` to sign in again.',
+          401,
+        );
+      }
+      throw err;
+    }
+
+    if (!pair.key || !pair.refresh_token) {
+      // Malformed refresh response — don't half-update the stored creds.
+      return false;
+    }
+    updateTokens(pair.key, pair.refresh_token);
+    this.token = pair.key;
+    return true;
+  }
+
+  private async request<T = unknown>(
     method: string,
     path: string,
     body?: unknown,

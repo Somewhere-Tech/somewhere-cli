@@ -14,6 +14,19 @@ export function resolveTargetDir(dir?: string, cwd = process.cwd()): string {
   return dir ? resolve(cwd, dir) : cwd;
 }
 
+// `--prebuilt` (alias `--allow-bundled`) opts the deploy out of the
+// raw-source contract: the worker's bundled-deploy guard keeps pre-built /
+// bundled output as-is instead of rejecting it. We surface it as
+// `allow_bundled: true` in the deploy body (the field the worker already
+// reads). Returns true only when a flag was passed, so a normal deploy never
+// sends the field — raw source stays the default.
+export function prebuiltOptIn(opts: {
+  prebuilt?: boolean;
+  allowBundled?: boolean;
+}): boolean {
+  return Boolean(opts.prebuilt || opts.allowBundled);
+}
+
 export function registerDeploy(program: Command) {
   program
     .command('deploy [dir]')
@@ -33,6 +46,18 @@ export function registerDeploy(program: Command) {
     .option(
       '--replace-functions',
       'Delete deployed functions that are not in this directory (repo-as-truth). Default keeps them.',
+    )
+    .option(
+      '--prebuilt',
+      'Deploy pre-built / bundled output (e.g. a dist/ folder) instead of raw source. ' +
+        'Raw source is the default and recommended path: the platform compiles your TSX/JSX/TS ' +
+        'on deploy, which keeps the app editable end-to-end. Choosing --prebuilt trades that away — ' +
+        'pull/export round-trips, find/replace patches, and visual (source-map) editing are disabled ' +
+        'for the bundled files. Use it only when you need full control of your own build.',
+    )
+    .option(
+      '--allow-bundled',
+      'Alias for --prebuilt.',
     )
     .action(async (dir: string | undefined, opts) => {
       const token = getToken();
@@ -96,6 +121,12 @@ export function registerDeploy(program: Command) {
         if (scope) body.scope = scope;
         if (opts.replaceFunctions) body.replace_functions = true;
         if (opts.dryRun) body.dry_run = true;
+        // --prebuilt (alias --allow-bundled) opts out of the raw-source
+        // contract: the deploy keeps pre-built / bundled output as-is instead
+        // of being rejected by the bundled-deploy guard. Omitted entirely when
+        // not set so a normal deploy stays the raw-source default.
+        const prebuilt = prebuiltOptIn(opts);
+        if (prebuilt) body.allow_bundled = true;
 
         if (opts.dryRun) {
           const plan = await client.call<DryRunResult>('POST', '/deploy', body, undefined, {
@@ -157,6 +188,16 @@ export function registerDeploy(program: Command) {
           success(`Site live at ${teal(result.url)} (functions left untouched)`);
         } else {
           success(`Live at ${teal(result.url)}`);
+        }
+
+        // Remind the dev of the round-trip trade-off they opted into. Raw
+        // source stays editable end-to-end; bundled files do not — pull/export
+        // round-trips, find/replace patches, and visual editing are disabled
+        // for them.
+        if (prebuilt) {
+          warn(
+            'Prebuilt deploy — source round-trip (pull / export / patch / visual edit) is disabled for the bundled files.',
+          );
         }
 
         // Exit non-zero if any function failed to deploy — a CI step that

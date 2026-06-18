@@ -108,7 +108,7 @@ export function registerAuth(program: Command) {
         process.exit(1);
       }
       saveConfig({ token, user: { email, username } });
-      saveGlobalMcpConfig(token);
+      saveGlobalMcpConfig();
       success(`Token saved.${email ? ` Logged in as ${teal(email)}.` : ''}`);
       info('Run `somewhere projects` to verify.');
     });
@@ -175,7 +175,7 @@ async function runDeviceLogin(): Promise<void> {
     });
     (spinner as Ora | null)?.stop();
     saveConfig(config);
-    saveGlobalMcpConfig(config.token);
+    saveGlobalMcpConfig();
     success(`Logged in as ${teal(config.user.email || '(unknown)')}`);
     success(`Device: ${getDeviceKeyName()}`);
     success('Claude Code MCP configured');
@@ -202,7 +202,7 @@ async function runLegacyLogin(): Promise<void> {
   try {
     const config = await browserLogin();
     saveConfig(config);
-    saveGlobalMcpConfig(config.token);
+    saveGlobalMcpConfig();
     spinner.stop();
     success(`Logged in as ${teal(config.user.email)}`);
     success('Claude Code MCP configured');

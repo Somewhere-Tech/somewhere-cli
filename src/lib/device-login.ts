@@ -41,7 +41,11 @@ interface StatusPending {
 }
 interface StatusApproved {
   ok: true;
-  data: { status: 'approved'; token: string; email: string };
+  // refresh_token is optional: the device-code approve flow returns it only
+  // once the server mints a cli-pair (refreshable) key for device login.
+  // When present, the CLI persists it so it can refresh on a 401 instead of
+  // forcing a manual re-login (tsk_3642f3c4).
+  data: { status: 'approved'; token: string; email: string; refresh_token?: string };
 }
 interface StatusExpired {
   ok: true;
@@ -105,10 +109,12 @@ export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<CliC
       throw new DeviceLoginTimeout();
     }
     if (status.data.status === 'approved') {
-      return {
+      const config: CliConfig = {
         token: status.data.token,
         user: { email: status.data.email, username: '' },
       };
+      if (status.data.refresh_token) config.refresh_token = status.data.refresh_token;
+      return config;
     }
   }
   throw new DeviceLoginTimeout();
