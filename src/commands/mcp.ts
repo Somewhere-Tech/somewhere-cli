@@ -183,14 +183,14 @@ function installCodex(loggedIn: boolean): void {
 }
 
 function installClaudeCode(): void {
-  const config = loadConfig();
-  if (!config?.token) {
-    error('Not logged in. Run: somewhere login');
-    info(dim('`somewhere login` configures Claude Code automatically — no separate install step needed.'));
-    process.exit(1);
-  }
-  saveGlobalMcpConfig(config.token);
-  success(`Claude Code configured (~/.claude.json): ${teal('somewhere')} → ${UPSTREAM_URL}`);
+  const loggedIn = !!loadConfig()?.token;
+  // Write the stdio bridge, NOT a baked token. The bridge reads
+  // ~/.somewhere/config.json at every launch, so a re-login never leaves a
+  // stale token behind in Claude Code's config (tsk_104fe2d0). This matches
+  // Cursor (saveCursorMcpConfig) and Codex (installCodex).
+  saveGlobalMcpConfig();
+  success(`Claude Code configured (~/.claude.json): ${teal('somewhere')} → somewhere mcp (stdio bridge)`);
+  if (!loggedIn) info(`Not logged in yet — run: ${teal('somewhere login')}`);
   printVerify('claude-code');
 }
 

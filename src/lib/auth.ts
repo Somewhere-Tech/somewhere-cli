@@ -25,6 +25,10 @@ export async function browserLogin(): Promise<CliConfig> {
         const token = url.searchParams.get('token');
         const email = url.searchParams.get('email') ?? '';
         const username = url.searchParams.get('username') ?? '';
+        // Optional: present only once the callback returns a refreshable
+        // cli-pair key. Persisted so the client can refresh on a 401 instead
+        // of forcing a manual re-login (tsk_3642f3c4).
+        const refreshToken = url.searchParams.get('refresh_token') ?? undefined;
 
         if (!token) {
           res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -128,6 +132,7 @@ export async function browserLogin(): Promise<CliConfig> {
 
         resolve({
           token,
+          ...(refreshToken ? { refresh_token: refreshToken } : {}),
           user: { email, username },
         });
 

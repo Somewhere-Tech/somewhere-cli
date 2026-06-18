@@ -30,6 +30,15 @@ export function clearConfig(): void {
   if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
 }
 
+/** Swap in a freshly-refreshed access key + rotated refresh token, preserving
+ *  the rest of the stored config (user, etc.). Used by the API client's
+ *  refresh-on-401 path (tsk_3642f3c4). No-op if there's no config to update. */
+export function updateTokens(token: string, refreshToken: string): void {
+  const config = loadConfig();
+  if (!config) return;
+  saveConfig({ ...config, token, refresh_token: refreshToken });
+}
+
 export function getToken(): string {
   const config = loadConfig();
   if (!config?.token) {
@@ -53,22 +62,35 @@ export function saveProjectConfig(dir: string, config: ProjectConfig): void {
   writeFileSync(join(dir, PROJECT_FILE), JSON.stringify(config, null, 2) + '\n');
 }
 
-export function saveMcpConfig(dir: string, token: string): void {
-  const mcp = {
-    mcpServers: {
-      somewhere: {
-        type: 'http',
-        url: 'https://mcp.somewhere.tech/mcp',
-        headers: {
-          Authorization: `Bearer ${token}`,
-        },
-      },
-    },
-  };
-  writeFileSync(join(dir, '.mcp.json'), JSON.stringify(mcp, null, 2) + '\n');
+/** The self-healing MCP entry every host gets: the stdio bridge reads
+ *  ~/.somewhere/config.json at every launch, so a re-login (which rotates the
+ *  CLI key) never leaves a stale baked token behind. The OLD shape baked a
+ *  `Bearer smt_...` into the config file at install time and never re-read it,
+ *  so the next `somewhere login` silently 401'd MCP until the user hand-edited
+ *  the file. Never reintroduce the http+headers shape (tsk_104fe2d0). */
+const SOMEWHERE_STDIO_ENTRY = { command: 'somewhere', args: ['mcp'] } as const;
+
+/** Project-local `.mcp.json` (read by Claude Code in the project dir). Uses the
+ *  stdio bridge, not a baked token — see SOMEWHERE_STDIO_ENTRY. */
+export function saveMcpConfig(dir: string): void {
+  const path = join(dir, '.mcp.json');
+  let config: Record<string, unknown> = {};
+  if (existsSync(path)) {
+    try {
+      config = JSON.parse(readFileSync(path, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      // Malformed — preserve nothing, write fresh
+    }
+  }
+  const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
+  servers.somewhere = { ...SOMEWHERE_STDIO_ENTRY };
+  config.mcpServers = servers;
+  writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 }
 
-export function saveGlobalMcpConfig(token: string): void {
+/** Global Claude Code config (~/.claude.json). Uses the stdio bridge, not a
+ *  baked token — see SOMEWHERE_STDIO_ENTRY. */
+export function saveGlobalMcpConfig(): void {
   let config: Record<string, unknown> = {};
   if (existsSync(CLAUDE_CONFIG_PATH)) {
     try {
@@ -79,11 +101,7 @@ export function saveGlobalMcpConfig(token: string): void {
   }
 
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  servers.somewhere = {
-    type: 'http',
-    url: 'https://mcp.somewhere.tech/mcp',
-    headers: { Authorization: `Bearer ${token}` },
-  };
+  servers.somewhere = { ...SOMEWHERE_STDIO_ENTRY };
   config.mcpServers = servers;
 
   writeFileSync(CLAUDE_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');

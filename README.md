@@ -73,12 +73,14 @@ Short alias: `sw` works everywhere `somewhere` does.
 
 `somewhere login` opens your browser, you sign in with Google, the platform redirects back to a local server with your API key. The key is stored in `~/.somewhere/config.json` (mode 600).
 
+The CLI configures every MCP host (Claude Code, Cursor, Codex) to use the **stdio bridge** (`somewhere mcp`), not a baked-in token. The bridge re-reads `~/.somewhere/config.json` on every launch, so a later `somewhere login` (which rotates your key) never leaves a stale token behind — no manual config editing, ever. If your stored key is a refreshable cli-pair key, the CLI also swaps in a fresh access key automatically on expiry, so a long-running agent session never logs itself out.
+
 ## Init flow
 
 `somewhere init` creates a project on the platform and writes two files:
 
 - **`.somewhere.json`** — project ID, name, subdomain. The CLI reads this to know which project you're working on.
-- **`.mcp.json`** — MCP server config with your API key. Claude Code and Codex auto-discover this and connect to the platform. No manual config.
+- **`.mcp.json`** — MCP server config pointing at the `somewhere mcp` stdio bridge. Claude Code and Codex auto-discover this and connect to the platform using your live login. No token baked into the file, no manual config.
 
 After init, `claude "build me a booking app"` works immediately.
 
