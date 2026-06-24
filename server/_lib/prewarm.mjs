@@ -39,6 +39,8 @@ export async function prewarmSlice(sw, opts = {}) {
     popular = [],
     fetchImpl = fetch,
     enrich = false,
+    llmProvider,
+    llmModel,
     concurrency = 5,
     freshDays = 7,
     now = Date.now(),
@@ -75,12 +77,16 @@ export async function prewarmSlice(sw, opts = {}) {
             now: new Date(now).toISOString(),
           });
           if (enrich) {
-            const m = await descriptionMatch(sw, {
-              name,
-              description: row.description,
-              capabilities: row.capabilities,
-              installScriptTypes: row.install_script_types,
-            });
+            const m = await descriptionMatch(
+              sw,
+              {
+                name,
+                description: row.description,
+                capabilities: row.capabilities,
+                installScriptTypes: row.install_script_types,
+              },
+              { provider: llmProvider, model: llmModel },
+            );
             if (m) {
               row.description_match = m.description_match;
               row.description_match_reason = m.description_match_reason;

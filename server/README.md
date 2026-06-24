@@ -20,7 +20,7 @@ combine them with a stop-logic engine, and check live MAL advisories on top.
 ```
 GET /api/verdict/:pkg/:version   → cache hit, or compute+cache, then LIVE MAL → verdict
 POST /api/verdict/batch          → same for a resolved tree (swpm install)
-POST /api/admin/prewarm          → compute+cache a slice of the top-N list (guarded)
+POST /api/prewarm                → compute+cache a slice of the top-N list (Bearer-guarded)
 ```
 
 MAL advisories are **never cached** (a version can be retroactively flagged), so
@@ -40,7 +40,7 @@ verdict (→ blocked / suspicious).
 | `_lib/llm.mjs` | Description-match backfill (prompts + parser pure; `sw.ai` call flagged). |
 | `_lib/prewarm.mjs` | Resumable pre-warm slice. |
 | `api/verdict/[pkg]/[version].js` `api/verdict/batch.js` | The routes. |
-| `api/admin/prewarm.js` | Guarded pre-warm trigger. |
+| `api/prewarm.js` | Bearer-guarded pre-warm trigger. |
 | `migrations/0001_verdicts.sql` | The `verdicts` table. |
 
 Every `_lib` module has a `*.test.mjs`. Run them: `cd server && npm test`
@@ -48,26 +48,34 @@ Every `_lib` module has a `*.test.mjs`. Run them: `cd server && npm test`
 
 ## Morning deploy checklist
 
-1. **Confirm the `sw.ai` call shape.** `_lib/llm.mjs` `callModel()` is a best
-   guess — verify against `docs({ topic: 'sw.ai' })` before any `enrich=1` run.
-   (Mechanical verdicts don't need it; the LLM is async backfill only.)
+1. **LLM model.** Enrich uses `sw.ai.chat` (verified shape) with
+   `response_schema`, default `provider:'deepseek', model:'deepseek-v4-flash'`
+   (≈$0.60 across 20K; under $1). `gpt-4o-mini` from the original runbook is NOT
+   in the catalog. Override via `PREWARM_PROVIDER`/`PREWARM_MODEL` env; a
+   no-spend/no-activation option is `workers-ai` + `@cf/meta/llama-4-scout-17b-16e-instruct`.
+   Paid models need one-time activation in the dashboard (else enrich degrades to
+   null — mechanical verdicts are unaffected).
 2. **Apply the migration** to the `npm` project's database (`migrations/0001_verdicts.sql`).
 3. **Set env / secrets** on the project:
    - `GITHUB_TOKEN` — for the tag-exists checks at 5,000 req/hr (the local
      `gh` CLI is authed as `uzihaq` with `repo`+`read:org`; `gh auth token`
      gives a usable token). Without it tag checks return `null` (degrade, not break).
-   - `PREWARM_KEY` — secret for `POST /api/admin/prewarm`.
+   - `PREWARM_KEY` — secret for `POST /api/prewarm`.
    - `TOP_PACKAGES_URL` *(optional)* — JSON list of names (or `{name,downloads}`)
-     for the real top-10k; absent → a 16-package seed validates the pipeline.
+     for the real top-N; absent → a 16-package seed validates the pipeline.
    - npm read-only token *(optional)* — only speeds the crawl; the registry API
      works unauthenticated.
-4. **Deploy** `server/` as the project root (`somewhere deploy` from `server/`).
-   Smoke: `curl https://npm.somewhere.tech/api/verdict/left-pad/1.3.0`.
+4. **Deploy FUNCTIONS ONLY** — the `npm` project already serves the landing page
+   (`index.html`). Deploy from `server/` with `somewhere deploy --scope functions
+   --project npm` so the API routes are ADDED without replacing the site. A full
+   deploy would wipe the landing page. Smoke:
+   `curl https://npm.somewhere.tech/api/verdict/left-pad/1.3.0`.
 5. **Point the CLI at it** — the CLI already defaults to `https://npm.somewhere.tech`;
    no change needed. (Staging: `SWPX_VERDICT_URL`.)
-6. **Pre-warm** — call `POST /api/admin/prewarm?offset=0&limit=50` repeatedly
-   (bump `offset`) or wire a cron. Add `&enrich=1` only when you want the paid
-   description-match backfill (~$1 across 10k per the spec budget).
+6. **Pre-warm** — `POST /api/prewarm?offset=0&limit=50` with
+   `Authorization: Bearer <PREWARM_KEY>`, repeatedly (bump `offset`) or via cron.
+   Add `&enrich=1` for the paid description-match backfill. Set `TOP_PACKAGES_URL`
+   first for the real list; otherwise it runs the 16-package seed.
 
 ## Known gaps (intentional, for the morning)
 

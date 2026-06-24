@@ -11,7 +11,7 @@
 import { createServer } from 'node:http';
 import singleHandler from '../api/verdict/[pkg]/[version].js';
 import batchHandler from '../api/verdict/batch.js';
-import prewarmHandler from '../api/admin/prewarm.js';
+import prewarmHandler from '../api/prewarm.js';
 
 const PORT = Number(process.env.PORT) || 8787;
 
@@ -55,7 +55,7 @@ const sw = {
 function route(pathname, method) {
   if (method === 'GET' && /^\/api\/verdict\/[^/]+\/[^/]+$/.test(pathname)) return singleHandler;
   if (method === 'POST' && pathname === '/api/verdict/batch') return batchHandler;
-  if (method === 'POST' && pathname === '/api/admin/prewarm') return prewarmHandler;
+  if (method === 'POST' && pathname === '/api/prewarm') return prewarmHandler;
   return null;
 }
 

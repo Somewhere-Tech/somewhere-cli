@@ -45,12 +45,29 @@ test('parseMatchResponse — garbage / missing match → null', () => {
 });
 
 test('descriptionMatch — model failure degrades to null (never throws)', async () => {
-  const sw = { ai: { complete: async () => { throw new Error('no ai'); } } };
+  const sw = { ai: { chat: async () => { throw new Error('PAID_API_NOT_ACTIVATED'); } } };
   assert.equal(await descriptionMatch(sw, { name: 'x', description: 'y', capabilities: [] }), null);
 });
 
-test('descriptionMatch — parses a string completion', async () => {
-  const sw = { ai: { complete: async () => '{"match": true, "reason": "ok"}' } };
+test('descriptionMatch — reads validated response_schema output (.parsed)', async () => {
+  const sw = { ai: { chat: async () => ({ parsed: { match: true, reason: 'fits' } }) } };
   const r = await descriptionMatch(sw, { name: 'x', description: 'y', capabilities: [] });
   assert.equal(r.description_match, 'match');
+  assert.equal(r.description_match_reason, 'fits');
+});
+
+test('descriptionMatch — falls back to parsing .text when response_schema not honoured', async () => {
+  const sw = { ai: { chat: async () => ({ text: '{"match": false, "reason": "exfiltrates"}' }) } };
+  const r = await descriptionMatch(sw, { name: 'x', description: 'y', capabilities: [] });
+  assert.equal(r.description_match, 'mismatch');
+});
+
+test('descriptionMatch — passes provider + model + response_schema to sw.ai.chat', async () => {
+  let seen;
+  const sw = { ai: { chat: async (args) => { seen = args; return { parsed: { match: true, reason: 'ok' } }; } } };
+  await descriptionMatch(sw, { name: 'x', description: 'y', capabilities: ['fs'] }, { provider: 'deepseek', model: 'deepseek-v4-flash' });
+  assert.equal(seen.provider, 'deepseek');
+  assert.equal(seen.model, 'deepseek-v4-flash');
+  assert.ok(seen.response_schema, 'must force structured output');
+  assert.equal(seen.messages[0].role, 'user');
 });

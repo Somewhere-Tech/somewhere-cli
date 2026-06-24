@@ -3,13 +3,27 @@
  *  purpose?) and diff-review (is the version-to-version change suspicious?).
  *  Both are cached forever once computed.
  *
- *  The PROMPT builders and RESPONSE parsers are pure and unit-tested. The single
- *  platform-specific call (sw.ai) is isolated in callModel() and wrapped so any
- *  failure degrades to null (the engine treats a null LLM signal as "unknown",
- *  never as a stop). The exact sw.ai invocation shape MUST be confirmed against
- *  docs({topic:'sw.ai'}) before the paid backfill runs — see callModel(). */
+ *  The PROMPT builders and RESPONSE parsers are pure and unit-tested. The
+ *  platform call uses the verified sw.ai.chat shape (provider + model +
+ *  response_schema for validated JSON) and is wrapped so any failure degrades to
+ *  null (the engine treats a null LLM signal as "unknown", never as a stop). */
 
-export const DESCRIPTION_MATCH_MODEL = 'claude-haiku-4-5-20251001';
+// Defaults for the paid description-match backfill. Chosen for "under $1 across
+// 20K" (deepseek-v4-flash ≈ $0.15 in / $0.29 out per 1M tokens — the cheapest
+// frontier-class model in the platform catalog). Override per-call or via the
+// prewarm endpoint's PREWARM_PROVIDER / PREWARM_MODEL env. (gpt-4o-mini, named in
+// the original runbook, is NOT in the catalog — would 400.) A no-spend,
+// no-activation alternative is provider:'workers-ai', model:'@cf/meta/llama-4-scout-17b-16e-instruct'.
+export const DEFAULT_PROVIDER = 'deepseek';
+export const DEFAULT_MODEL = 'deepseek-v4-flash';
+
+/** Forces a validated JSON object out of the model (sw.ai response_schema). */
+const MATCH_SCHEMA = {
+  type: 'object',
+  properties: { match: { type: 'boolean' }, reason: { type: 'string' } },
+  required: ['match', 'reason'],
+  additionalProperties: false,
+};
 
 const DESCRIPTION_MATCH_SYSTEM =
   "Compare an npm package's description against its detected capabilities.\n" +
@@ -52,30 +66,33 @@ export function parseMatchResponse(text) {
   };
 }
 
-/** Isolated platform call. IMPORTANT: the sw.ai method/argument shape below is a
- *  best guess and MUST be verified against docs({topic:'sw.ai'}) before running
- *  the paid backfill. Any error → null (caller treats as "unknown"). */
-async function callModel(sw, { system, user, model }) {
+/** Run the description-match check for one package via sw.ai.chat with a forced
+ *  response_schema (verified shape per docs{topic:'sw.ai'}). Returns the two
+ *  fields to patch onto a cached row, or null if the model was
+ *  unavailable/unparseable (a missing LLM signal is "unknown", never a stop). */
+export async function descriptionMatch(sw, pkg, { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL } = {}) {
+  const { system, user } = buildDescriptionMatchPrompt(pkg);
   try {
-    // TODO(morning): confirm this is the real sw.ai signature.
-    const res = await sw.ai.complete({
+    const r = await sw.ai.chat({
+      provider,
       model,
       system,
       messages: [{ role: 'user', content: user }],
+      response_schema: MATCH_SCHEMA,
       max_tokens: 200,
     });
-    // Accept a few plausible result shapes.
-    if (typeof res === 'string') return res;
-    return res?.text ?? res?.content ?? res?.completion ?? res?.choices?.[0]?.message?.content ?? null;
+    // Preferred path: validated structured output.
+    if (r?.parsed && typeof r.parsed.match === 'boolean') {
+      return {
+        description_match: r.parsed.match ? 'match' : 'mismatch',
+        description_match_reason: typeof r.parsed.reason === 'string' ? r.parsed.reason : null,
+      };
+    }
+    // Fallback: a model/provider that didn't honour response_schema still
+    // returns text we can parse.
+    const text = typeof r === 'string' ? r : r?.text ?? null;
+    return text ? parseMatchResponse(text) : null;
   } catch {
-    return null;
+    return null; // PAID_API_NOT_ACTIVATED, rate limit, outage — degrade, never block
   }
-}
-
-/** Run the description-match check for one package. Returns the two fields to
- *  patch onto a cached row, or null if the model was unavailable/unparseable. */
-export async function descriptionMatch(sw, pkg, { model = DESCRIPTION_MATCH_MODEL } = {}) {
-  const { system, user } = buildDescriptionMatchPrompt(pkg);
-  const text = await callModel(sw, { system, user, model });
-  return text ? parseMatchResponse(text) : null;
 }
