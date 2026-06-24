@@ -52,8 +52,15 @@ export function evidenceLines(v: Verdict): string[] {
     const d = v.typosquat_distance != null ? ` (distance ${v.typosquat_distance})` : '';
     lines.push(`Possible typosquat of ${v.typosquat_of}${d}`);
   }
-  if (v.description_match === 'mismatch' && v.description) {
-    lines.push(`Capabilities don't match description: "${v.description}"`);
+  if (v.description_match === 'mismatch') {
+    // Always surface the mismatch (the engine counts it toward the verdict, and
+    // shortReasons shows it unconditionally) — fall back to a generic line when
+    // the package shipped no description text.
+    lines.push(
+      v.description
+        ? `Capabilities don't match description: "${v.description}"`
+        : "Capabilities don't match the package's stated description",
+    );
   }
   if ((v.diff_review === 'suspicious' || v.diff_review === 'unexplained') && v.diff_review_reason) {
     lines.push(v.diff_review_reason);

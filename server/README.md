@@ -73,11 +73,29 @@ Every `_lib` module has a `*.test.mjs`. Run them: `cd server && npm test`
 
 - **`sw.ai` shape** unverified (item 1 above). Pure prompt/parser are tested.
 - **Live response shapes** (OSV vuln fields, npm manifest `dist.attestations`,
-  GitHub refs) are coded to the documented shapes and unit-tested with fixtures,
-  but the first live deploy should spot-check a real malware case
-  (`@ctrl/tinycolor@4.1.1`) and a clean one (`create-next-app`).
+  GitHub refs) are coded to the documented shapes and unit-tested with fixtures.
+  Spot-checked live against `@ctrl/tinycolor@4.1.1` (blocks via real advisory
+  `MAL-2025-47141`) and `left-pad`/`create-next-app` (verified) — see the e2e
+  harness. Re-confirm on the first real deploy.
 - **Typosquat** runs only when a `popular` list is supplied (item 9 in the spec
   is post-MVP); the admin endpoint doesn't build one yet. Easy follow-up: derive
   it from `TOP_PACKAGES_URL` when it carries download counts.
 - **Diff-review LLM** (spec item 8) is not built yet — engine already accepts a
   `diff_review` signal; the backfill that produces it is a follow-up.
+- **Capability detection is a static over-approximation** (review finding, low):
+  `network`/`fs`/`child_process` can match inside comments or string literals,
+  so a doc that says `require('child_process')` reads as using it. It never
+  drives a stop by itself; it's display + an LLM input. A comment/string-stripping
+  pass is the follow-up.
+- **Readability after the review fix:** `long-lines` alone no longer flags
+  minified (a readable bundle/data file has long lines but normal whitespace) —
+  only `low-whitespace` or a `single-huge-line` does. And `is_minified` only
+  contributes to a stop when paired with an ACTIVE signal (install script /
+  description mismatch), so a minified-but-clean popular package stays verified
+  (rule 9).
+- **Degraded entry-source caching** (review finding, medium): if the manifest
+  loads but the CDN entry-file fetch fails, capabilities/`is_minified` are
+  computed from empty source (treated as "no system access", not minified) and
+  cached. Self-heals on the `freshDays` recompute; a stricter fix would mark the
+  row "source-unavailable" and re-fetch sooner. The *manifest* failing (the real
+  outage) already fails closed-to-open correctly (see resolve.mjs).

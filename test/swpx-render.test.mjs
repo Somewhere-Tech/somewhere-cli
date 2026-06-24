@@ -75,6 +75,18 @@ test('renderEvidence — unverified block (landing page)', () => {
   );
 });
 
+test('renderEvidence — generic mismatch line when description text is absent', () => {
+  const v = {
+    package: 'mystery',
+    version: '1.0.0',
+    verdict: 'unverified',
+    description_match: 'mismatch',
+    has_provenance: false,
+  };
+  const out = lines(renderEvidence(v));
+  assert.match(out, /Capabilities don't match the package's stated description/);
+});
+
 test('renderBlocked — confirmed malware (landing page)', () => {
   const v = {
     package: '@ctrl/tinycolor',

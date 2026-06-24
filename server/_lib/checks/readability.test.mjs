@@ -65,15 +65,16 @@ test('source with no newlines is treated as one line', () => {
   assert.deepEqual(r.reasons, []);
 });
 
-test('long-lines fires when average line length > 500', () => {
+test('long average lines with NORMAL whitespace are NOT minified (readable bundle)', () => {
   // Two lines, each ~700 chars of mostly non-whitespace but with spaces so
-  // low-whitespace does NOT fire (ratio kept >= 0.10).
+  // low-whitespace does NOT fire (ratio kept >= 0.10). This is the readable-
+  // bundle / data-file false-positive guard: long-lines alone must not flag.
   const line = ('ab cd '.repeat(120)).trim(); // ~700 chars, ratio ~0.17
   const src = line + '\n' + line;
   const r = analyzeReadability(src);
-  assert.ok(r.reasons.includes('long-lines'));
+  assert.ok(r.reasons.includes('long-lines'), 'long-lines is still an informational reason');
   assert.ok(!r.reasons.includes('low-whitespace'), 'whitespace ratio kept above threshold');
-  assert.equal(r.minified, true);
+  assert.equal(r.minified, false, 'long-lines alone does NOT flag minified');
 });
 
 test('avg line length boundary: exactly 500 does NOT fire long-lines', () => {
@@ -86,13 +87,13 @@ test('avg line length boundary: exactly 500 does NOT fire long-lines', () => {
   assert.equal(r.minified, false);
 });
 
-test('avg line length boundary: 501 DOES fire long-lines', () => {
+test('avg line length boundary: 501 fires the long-lines reason (but not minified alone)', () => {
   // 501-char single line with lots of spaces so whitespace ratio stays high.
   const exact = ('z '.repeat(250)) + 'z'; // 250*2 + 1 = 501 chars
   assert.equal(exact.length, 501);
   const r = analyzeReadability(exact);
   assert.ok(r.reasons.includes('long-lines'), 'avg 501 is > 500');
-  assert.equal(r.minified, true);
+  assert.equal(r.minified, false, 'long-lines alone is informational, not a minified verdict');
 });
 
 test('whitespace-ratio heuristic is skipped for tiny files (< 500 chars)', () => {

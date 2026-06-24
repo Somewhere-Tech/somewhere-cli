@@ -19,10 +19,23 @@ test('verified — a lone soft signal is not enough (is-odd, no provenance only)
   assert.equal(r.verdict, 'verified');
 });
 
-test('unverified — two soft signals cross the threshold', () => {
+test('verified — RULE 9: no_provenance + minified alone do NOT stop (both passive)', () => {
+  // The single most common combo on npm — must stay verified, or we warn on a
+  // huge slice of normal popular packages.
   const r = computeVerdict({ has_provenance: false, is_minified: true });
+  assert.equal(r.verdict, 'verified');
+});
+
+test('unverified — a passive signal PLUS an active one crosses the threshold', () => {
+  const r = computeVerdict({ has_provenance: false, has_install_scripts: true });
   assert.equal(r.verdict, 'unverified');
-  assert.deepEqual(r.verdict_signals, ['no_provenance', 'minified']);
+  assert.deepEqual(r.verdict_signals, ['no_provenance', 'install_scripts']);
+});
+
+test('verified — a lone active signal is not enough (install scripts alone)', () => {
+  // A package with an install script but otherwise clean (e.g. has provenance)
+  // stays verified — one signal never stops.
+  assert.equal(computeVerdict({ has_install_scripts: true }).verdict, 'verified');
 });
 
 test('unverified — the some-analytics-tool case (4 soft signals)', () => {

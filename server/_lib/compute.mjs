@@ -35,7 +35,16 @@ export async function computeMechanical(name, version, opts = {}) {
     weeklyDownloads(name, { fetchImpl }),
   ]);
 
-  const source = manifest ? await fetchEntrySource(name, version, manifest, { fetchImpl }) : '';
+  if (!manifest) {
+    // No manifest for THIS exact version — a 404 (version doesn't exist) or a
+    // registry outage. Either way we cannot inspect it, and "could not inspect"
+    // must NEVER become "verified" (invariant #4). Throw so the route returns
+    // 502 and the CLI fails OPEN to plain npx, rather than vouching for a version
+    // we never saw.
+    throw new Error(`could not fetch manifest for ${name}@${version}`);
+  }
+
+  const source = await fetchEntrySource(name, version, manifest, { fetchImpl });
   const capabilities = detectCapabilities(source);
   // Only judge readability when we actually fetched source — a missing entry
   // file must not read as "minified" (that would be a false soft signal).
@@ -87,25 +96,64 @@ export async function computeMechanical(name, version, opts = {}) {
   };
 }
 
+/** A placeholder row for a version we could NOT inspect mechanically (manifest
+ *  404 / registry outage) but which we still need to render — used only when a
+ *  live MAL advisory exists, so finalize() escalates it to blocked/suspicious.
+ *  All mechanical signals are unknown/safe defaults; never cached. */
+export function minimalRow(name, version, now) {
+  return {
+    package: name,
+    version,
+    verdict: 'verified',
+    verdict_signals: [],
+    capabilities: [],
+    has_provenance: false,
+    provenance_repo: null,
+    provenance_commit: null,
+    is_minified: false,
+    has_install_scripts: false,
+    install_script_types: [],
+    typosquat_of: null,
+    typosquat_distance: null,
+    has_github_tag: null,
+    github_repo: null,
+    publish_time: null,
+    publisher: null,
+    description: null,
+    description_match: null,
+    description_match_reason: null,
+    diff_review: null,
+    diff_review_reason: null,
+    diff_from_version: null,
+    weekly_downloads: null,
+    computed_at: now ?? new Date().toISOString(),
+  };
+}
+
 /** Merge a live MAL check onto a (cached or fresh) mechanical row. MAL only
  *  escalates: confirmed → blocked, unconfirmed → at least suspicious. The
  *  mechanical verdict stands when there's no MAL. */
 export function finalize(row, mal) {
   const advisories = Array.isArray(mal) ? mal : [];
+  // The engine needs each advisory's internal `sources` array (Amazon-only
+  // confirmation rule), but that field is NOT part of the public advisory shape
+  // ({ id, summary, disclosed, source, safe_versions }). Strip it before putting
+  // advisories on the wire.
+  const pub = advisories.map(({ sources, ...rest }) => rest);
   if (advisories.length === 0) return { ...row, mal: [] };
 
   const malOnly = computeVerdict({ mal: advisories });
   if (malOnly.verdict === 'blocked') {
-    return { ...row, mal: advisories, verdict: 'blocked', verdict_signals: malOnly.verdict_signals };
+    return { ...row, mal: pub, verdict: 'blocked', verdict_signals: malOnly.verdict_signals };
   }
   if (malOnly.verdict === 'suspicious') {
     const escalate = row.verdict === 'verified' || row.verdict === 'unverified';
     return {
       ...row,
-      mal: advisories,
+      mal: pub,
       verdict: escalate ? 'suspicious' : row.verdict,
       verdict_signals: [...(row.verdict_signals ?? []), ...malOnly.verdict_signals],
     };
   }
-  return { ...row, mal: advisories };
+  return { ...row, mal: pub };
 }

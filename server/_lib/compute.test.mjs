@@ -99,10 +99,35 @@ test('finalize — confirmed MAL escalates a verified row to blocked', () => {
 });
 
 test('finalize — no MAL keeps the mechanical verdict', () => {
-  const row = { package: 'p', version: '1', verdict: 'unverified', verdict_signals: ['no_provenance', 'minified'] };
+  const row = { package: 'p', version: '1', verdict: 'unverified', verdict_signals: ['no_provenance', 'install_scripts'] };
   const out = finalize(row, []);
   assert.equal(out.verdict, 'unverified');
   assert.deepEqual(out.mal, []);
+});
+
+test('finalize — strips the internal `sources` field from advisories on the wire', () => {
+  const out = finalize(
+    { package: 'p', version: '1', verdict: 'verified', verdict_signals: [] },
+    [{ id: 'MAL-1', summary: 'x', source: 'OpenSSF / OSV', sources: ['OpenSSF', 'OSV'], safe_versions: [] }],
+  );
+  assert.equal(out.verdict, 'blocked');
+  assert.equal(out.mal[0].source, 'OpenSSF / OSV'); // public string kept
+  assert.equal('sources' in out.mal[0], false); // internal array stripped
+});
+
+test('computeMechanical — throws when the version manifest is unavailable (fail-open, never a clean pass)', async () => {
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    if (u.host.includes('registry.npmjs.org')) {
+      const segs = u.pathname.split('/').filter(Boolean);
+      const isManifest = segs.length >= 2 && /^\d/.test(decodeURIComponent(segs[segs.length - 1]));
+      if (isManifest) return { ok: false, status: 404, json: async () => ({}), text: async () => '' };
+      return json({});
+    }
+    if (u.host.includes('api.npmjs.org')) return json({ downloads: 0 });
+    return json({}, 404);
+  };
+  await assert.rejects(() => computeMechanical('ghost', '9.9.9', { fetchImpl, now: 'NOW' }), /could not fetch manifest/);
 });
 
 // ---- resolveVerdict (cache miss + hit) ----
@@ -169,4 +194,45 @@ test('resolveVerdict — cache hit skips compute, still does live MAL', async ()
   const out = await resolveVerdict(sw, 'cached', '1.0.0', { fetchImpl });
   assert.equal(out.verdict, 'blocked');
   assert.equal(sw.writes.length, 0, 'cache hit should not recompute/rewrite');
+});
+
+test('resolveVerdict — an UNPUBLISHED version still BLOCKS from a live MAL advisory', async () => {
+  // Malware versions are frequently pulled from npm: manifest 404s, but OSV
+  // still has the advisory. We must block from MAL alone, not fall open.
+  const sw = fakeSw(null);
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    if (u.host.includes('api.osv.dev')) {
+      return json({ vulns: [{ id: 'MAL-2025-47141', references: [{ url: 'https://github.com/ossf/x' }] }] });
+    }
+    if (u.host.includes('registry.npmjs.org')) {
+      const segs = u.pathname.split('/').filter(Boolean);
+      const isManifest = segs.length >= 2 && /^\d/.test(decodeURIComponent(segs[segs.length - 1]));
+      if (isManifest) return { ok: false, status: 404, json: async () => ({}), text: async () => '' };
+      return json({});
+    }
+    if (u.host.includes('api.npmjs.org')) return json({ downloads: 0 });
+    return json({}, 404);
+  };
+  const out = await resolveVerdict(sw, '@ctrl/tinycolor', '4.1.1', { fetchImpl });
+  assert.equal(out.verdict, 'blocked');
+  assert.deepEqual(out.verdict_signals, ['MAL-2025-47141']);
+  assert.equal(sw.writes.length, 0, 'the placeholder row must not be cached');
+});
+
+test('resolveVerdict — uninspectable AND no MAL throws (route 502 → CLI fails open)', async () => {
+  const sw = fakeSw(null);
+  const fetchImpl = async (url) => {
+    const u = new URL(url);
+    if (u.host.includes('api.osv.dev')) return json({ vulns: [] });
+    if (u.host.includes('registry.npmjs.org')) {
+      const segs = u.pathname.split('/').filter(Boolean);
+      const isManifest = segs.length >= 2 && /^\d/.test(decodeURIComponent(segs[segs.length - 1]));
+      if (isManifest) return { ok: false, status: 404, json: async () => ({}), text: async () => '' };
+      return json({});
+    }
+    if (u.host.includes('api.npmjs.org')) return json({ downloads: 0 });
+    return json({}, 404);
+  };
+  await assert.rejects(() => resolveVerdict(sw, 'ghost', '9.9.9', { fetchImpl }));
 });

@@ -56,15 +56,27 @@ export function computeVerdict(s = {}) {
   if (s.diff_review === 'suspicious' || s.diff_review === 'unexplained') strong.push(`diff_${s.diff_review}`);
   if (strong.length) return { verdict: 'suspicious', verdict_signals: strong };
 
-  // 3) UNVERIFIED — two or more soft evidence signals, OR a popular package with
-  //    no GitHub release tag. (description_mismatch is LLM-derived; absent until
-  //    the backfill runs, so mechanical-only verdicts lean on the other three.)
+  // 3) UNVERIFIED — soft evidence, OR a popular package with no GitHub release
+  //    tag. (description_mismatch is LLM-derived; absent until the backfill runs.)
+  //
+  //    RULE 9 (no guardrail blocks legitimate code): `no_provenance` and
+  //    `minified` are both ubiquitous — most of npm has no provenance, and many
+  //    perfectly good packages ship a bundled/minified entry. Those two PASSIVE
+  //    signals together must NOT stop a package, or we'd warn on a huge slice of
+  //    normal popular installs. So we require BOTH: two-or-more evidence signals
+  //    AND at least one ACTIVE signal (an install script, or an LLM-confirmed
+  //    description mismatch) — something the package is actually DOING, not just
+  //    something it lacks.
   const evidence = [];
   if (s.has_provenance === false) evidence.push('no_provenance');
   if (s.is_minified) evidence.push('minified');
   if (s.has_install_scripts) evidence.push('install_scripts');
   if (s.description_match === 'mismatch') evidence.push('description_mismatch');
-  if (evidence.length >= 2) return { verdict: 'unverified', verdict_signals: evidence };
+  const ACTIVE = new Set(['install_scripts', 'description_mismatch']);
+  const hasActive = evidence.some((e) => ACTIVE.has(e));
+  if (evidence.length >= 2 && hasActive) {
+    return { verdict: 'unverified', verdict_signals: evidence };
+  }
 
   if (s.has_github_tag === 0 && (s.weekly_downloads || 0) > 10000) {
     return { verdict: 'unverified', verdict_signals: ['no_github_tag'] };

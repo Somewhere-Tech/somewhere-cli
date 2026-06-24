@@ -22,11 +22,17 @@ const SINGLE_HUGE_LINE_THRESHOLD = 50000;
 /**
  * Analyze a source string for signs of minification/obfuscation.
  *
- * Heuristics (any one firing => minified). Each firing heuristic pushes a
- * short reason string:
+ * Each heuristic that fires pushes a short reason string:
  *  - average line length > 500            => "long-lines"
  *  - whitespace ratio < 0.10 (len >= 500) => "low-whitespace"
  *  - any single line longer than 50000    => "single-huge-line"
+ *
+ * `minified` is true only on GENUINE density: "low-whitespace" or
+ * "single-huge-line". "long-lines" ALONE does not flag — a readable bundle or a
+ * data/JSON entry legitimately has long average lines but normal whitespace, and
+ * flagging it would be a false positive (rule 9). Real minification strips
+ * whitespace, so "low-whitespace" catches it; packed single-line builds trip
+ * "single-huge-line". "long-lines" remains an informational reason.
  *
  * Robust to empty/undefined/garbage input: returns the safe default
  * { minified: false, reasons: [] } without throwing.
@@ -76,7 +82,10 @@ export function analyzeReadability(source) {
     reasons.push('single-huge-line');
   }
 
-  return { minified: reasons.length > 0, reasons };
+  // long-lines alone is NOT minified (readable bundles / data files); only
+  // genuine density flags.
+  const minified = reasons.includes('low-whitespace') || reasons.includes('single-huge-line');
+  return { minified, reasons };
 }
 
 /**

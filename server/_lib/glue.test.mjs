@@ -116,3 +116,26 @@ test('fetchEntrySource — returns text, or "" when missing (never throws)', asy
   );
   assert.equal(await fetchEntrySource('x', '1.0.0', {}, { fetchImpl: resp('', false, 404, 'text') }), '');
 });
+
+test('fetchEntrySource — refuses a path-traversal entry file (SSRF guard)', async () => {
+  let called = false;
+  const out = await fetchEntrySource(
+    'x',
+    '1.0.0',
+    { main: '../../../../etc/passwd' },
+    { fetchImpl: async () => { called = true; return { ok: true, status: 200, json: async () => ({}), text: async () => 'SECRET' }; } },
+  );
+  assert.equal(out, '');
+  assert.equal(called, false, 'must not issue a fetch for a traversal path');
+});
+
+test('fetchEntrySource — encodes scoped name + version into the CDN url', async () => {
+  let seen = '';
+  await fetchEntrySource(
+    '@scope/pkg',
+    '1.2.3',
+    { main: 'dist/i.js' },
+    { fetchImpl: async (url) => { seen = url; return { ok: true, status: 200, json: async () => ({}), text: async () => 'ok' }; } },
+  );
+  assert.match(seen, /cdn\.jsdelivr\.net\/npm\/@scope\/pkg@1\.2\.3\/dist\/i\.js/);
+});

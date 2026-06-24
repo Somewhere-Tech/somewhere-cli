@@ -11,13 +11,45 @@ const REGISTRY = 'https://registry.npmjs.org';
 const DOWNLOADS = 'https://api.npmjs.org/downloads/point/last-week';
 const CDN = 'https://cdn.jsdelivr.net/npm';
 
-function encodeName(name) {
-  return name.startsWith('@') ? name.replace('/', '%2f') : name;
+/** Package name as ONE registry.npmjs.org path segment: non-scoped names are
+ *  percent-encoded; scoped names become `@scope%2Fname` (both parts encoded).
+ *  Encoding non-scoped names too is the SSRF guard — a name with stray slashes
+ *  or `..` can't escape the intended path. */
+function encodeRegistryName(name) {
+  if (name.startsWith('@')) {
+    const slash = name.indexOf('/');
+    const scope = name.slice(1, slash === -1 ? undefined : slash);
+    const rest = slash === -1 ? '' : name.slice(slash + 1);
+    return '@' + encodeURIComponent(scope) + (rest ? '%2f' + encodeURIComponent(rest) : '');
+  }
+  return encodeURIComponent(name);
+}
+
+/** Package name for a jsDelivr path, where the scope slash IS a real separator:
+ *  `@scope/name` with each part encoded (so traversal/odd chars can't escape). */
+function cdnName(name) {
+  if (name.startsWith('@')) {
+    const slash = name.indexOf('/');
+    const scope = name.slice(1, slash === -1 ? undefined : slash);
+    const rest = slash === -1 ? '' : name.slice(slash + 1);
+    return '@' + encodeURIComponent(scope) + (rest ? '/' + encodeURIComponent(rest) : '');
+  }
+  return encodeURIComponent(name);
+}
+
+/** Encode an entry-file path segment-by-segment, REJECTING any `..` (traversal).
+ *  Returns null if the path is unsafe. */
+function safeEntryPath(file) {
+  const parts = String(file)
+    .split('/')
+    .filter((p) => p && p !== '.');
+  if (parts.some((p) => p === '..')) return null;
+  return parts.map(encodeURIComponent).join('/');
 }
 
 /** Full version manifest: { name, version, dist, scripts, repository, description, ... }. */
 export async function fetchManifest(name, version, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(`${REGISTRY}/${encodeName(name)}/${encodeURIComponent(version)}`, {
+  const res = await fetchImpl(`${REGISTRY}/${encodeRegistryName(name)}/${encodeURIComponent(version)}`, {
     headers: { accept: 'application/json' },
   });
   if (!res.ok) throw new Error(`registry manifest ${res.status} for ${name}@${version}`);
@@ -26,7 +58,7 @@ export async function fetchManifest(name, version, { fetchImpl = fetch } = {}) {
 
 /** Abbreviated packument (dist-tags + versions + time). */
 export async function fetchPackument(name, { fetchImpl = fetch } = {}) {
-  const res = await fetchImpl(`${REGISTRY}/${encodeName(name)}`, {
+  const res = await fetchImpl(`${REGISTRY}/${encodeRegistryName(name)}`, {
     headers: { accept: 'application/json' },
   });
   if (!res.ok) throw new Error(`registry packument ${res.status} for ${name}`);
@@ -43,9 +75,12 @@ export function entryFile(manifest) {
 /** Fetch ONLY the package's entry file from the per-file CDN (not the tarball).
  *  Returns '' if the file can't be fetched — analysis degrades, never throws. */
 export async function fetchEntrySource(name, version, manifest, { fetchImpl = fetch } = {}) {
-  const file = entryFile(manifest);
+  const rel = safeEntryPath(entryFile(manifest));
+  if (!rel) return ''; // traversal attempt — refuse to fetch
   try {
-    const res = await fetchImpl(`${CDN}/${name}@${version}/${file}`, { headers: { accept: 'text/plain' } });
+    const res = await fetchImpl(`${CDN}/${cdnName(name)}@${encodeURIComponent(version)}/${rel}`, {
+      headers: { accept: 'text/plain' },
+    });
     if (!res.ok) return '';
     return await res.text();
   } catch {
@@ -56,7 +91,7 @@ export async function fetchEntrySource(name, version, manifest, { fetchImpl = fe
 /** Weekly download count for popularity-gated checks (typosquat, no-tag). 0 on failure. */
 export async function weeklyDownloads(name, { fetchImpl = fetch } = {}) {
   try {
-    const res = await fetchImpl(`${DOWNLOADS}/${encodeName(name)}`, { headers: { accept: 'application/json' } });
+    const res = await fetchImpl(`${DOWNLOADS}/${encodeRegistryName(name)}`, { headers: { accept: 'application/json' } });
     if (!res.ok) return 0;
     const data = await res.json();
     return typeof data?.downloads === 'number' ? data.downloads : 0;
