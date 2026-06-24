@@ -97,14 +97,22 @@ test('buildSummaryPrompt — includes author reputation + every signal', () => {
     install_script_types: [],
     is_minified: false,
     capabilities: [],
+    dependencies: ['escape-string-regexp', 'bad-dep'],
+    known_cves: 3,
+    compromised_history: [{ id: 'MAL-2025-99', published: '2025-09-15' }],
+    dependency_flags: [{ name: 'bad-dep', version: '2.0.0', verdict: 'blocked' }],
     mal: [],
   });
   assert.match(system, /SYNTHESIZE/);
+  assert.match(system, /EVER compromised/);
   assert.match(user, /Package: tiny-thing@0\.1\.0/);
   assert.match(user, /sindresorhus — maintains 150 package\(s\), 2000000 combined/);
   assert.match(user, /publishing since 2013-01-01/);
   assert.match(user, /Weekly downloads: 47/);
   assert.match(user, /Provenance attestation: no/);
+  assert.match(user, /Past advisories: MAL-2025-99 \(2025-09\)/);
+  assert.match(user, /Known CVEs: 3/);
+  assert.match(user, /Dependencies: 2 checked, 1 flagged: bad-dep \(blocked\)/);
 });
 
 test('summarize — returns narrative + match from parsed structured output', async () => {

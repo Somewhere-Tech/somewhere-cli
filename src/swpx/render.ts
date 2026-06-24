@@ -81,7 +81,23 @@ export function buildChecks(v: Verdict): Check[] {
 
   if (Array.isArray(v.dependencies)) {
     const deps = v.dependencies;
-    if (deps.length === 0) {
+    const flags = Array.isArray(v.dependency_flags) ? v.dependency_flags : null;
+    if (flags) {
+      const checked = Math.min(deps.length, 50);
+      if (deps.length === 0) {
+        checks.push({ level: 'ok', text: 'No dependencies' });
+      } else if (flags.length) {
+        checks.push({
+          level: 'bad',
+          text: `${flags.length} of ${checked} flagged: ${flags.map((d) => `${d.name} (${d.verdict})`).join(', ')}`,
+        });
+      } else {
+        checks.push({
+          level: 'ok',
+          text: `${checked} dependenc${checked === 1 ? 'y' : 'ies'}, all verified`,
+        });
+      }
+    } else if (deps.length === 0) {
       checks.push({ level: 'ok', text: 'No dependencies' });
     } else if (deps.length <= 5) {
       checks.push({ level: 'ok', text: `${deps.length} dependenc${deps.length === 1 ? 'y' : 'ies'}: ${deps.join(', ')}` });
@@ -91,6 +107,23 @@ export function buildChecks(v: Verdict): Check[] {
   }
 
   const mals = v.mal ?? [];
+  const compromised = v.compromised_history ?? [];
+  if (compromised.length) {
+    const date = compromised[0]?.published ? compromised[0].published.slice(0, 7) : 'unknown date';
+    checks.push({
+      level: 'warn',
+      text: `Compromised ${date}${mals.length ? '' : ' (current version clean)'}`,
+    });
+  }
+
+  if (typeof v.known_cves === 'number') {
+    checks.push(
+      v.known_cves > 0
+        ? { level: 'warn', text: `${v.known_cves} known CVE${v.known_cves === 1 ? '' : 's'}` }
+        : { level: 'ok', text: 'No known CVEs' },
+    );
+  }
+
   if (mals.length) {
     const m = mals[0];
     checks.push({ level: 'bad', text: m.summary ? `${m.id}: ${m.summary}` : `${m.id} advisory` });

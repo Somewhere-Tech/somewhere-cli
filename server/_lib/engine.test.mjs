@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { computeVerdict } from './engine.mjs';
+import { computeVerdict, cascadeVerdict } from './engine.mjs';
 
 test('verified — clean package with capabilities + provenance (create-next-app)', () => {
   const r = computeVerdict({
@@ -108,4 +108,28 @@ test('empty / garbage input is verified, never throws', () => {
   assert.equal(computeVerdict().verdict, 'verified');
   assert.equal(computeVerdict({}).verdict, 'verified');
   assert.equal(computeVerdict({ mal: null, capabilities: null }).verdict, 'verified');
+});
+
+test('cascadeVerdict — blocked dependency blocks the parent', () => {
+  const deps = [
+    ...Array.from({ length: 12 }, () => 'verified'),
+    'unverified',
+    'unverified',
+    'blocked',
+  ];
+  assert.equal(cascadeVerdict('verified', deps), 'blocked');
+});
+
+test('cascadeVerdict — unverified dependencies make a clean parent suspicious', () => {
+  const deps = [
+    ...Array.from({ length: 13 }, () => 'verified'),
+    'unverified',
+    'unverified',
+  ];
+  assert.equal(cascadeVerdict('verified', deps), 'suspicious');
+});
+
+test('cascadeVerdict — all verified keeps the parent verdict unchanged', () => {
+  assert.equal(cascadeVerdict('verified', ['verified', 'verified']), 'verified');
+  assert.equal(cascadeVerdict('unverified', ['verified']), 'unverified');
 });

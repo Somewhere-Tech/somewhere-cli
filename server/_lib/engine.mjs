@@ -85,3 +85,16 @@ export function computeVerdict(s = {}) {
   // 4) VERIFIED — nothing tripped the threshold.
   return { verdict: 'verified', verdict_signals: [] };
 }
+
+/** Apply dependency cascade: a parent inherits the worst cached dependency
+ *  verdict found during ENRICH. Dependency "unverified" is treated as at least
+ *  suspicious for the parent because installing the parent also installs the
+ *  flagged child. */
+export function cascadeVerdict(parentVerdict, depVerdicts = []) {
+  const verdicts = Array.isArray(depVerdicts) ? depVerdicts : [];
+  if (verdicts.includes('blocked')) return 'blocked';
+  if (verdicts.includes('suspicious') || verdicts.includes('unverified')) {
+    return parentVerdict === 'blocked' ? 'blocked' : 'suspicious';
+  }
+  return parentVerdict;
+}

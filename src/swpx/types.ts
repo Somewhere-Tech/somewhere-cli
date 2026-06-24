@@ -27,6 +27,20 @@ export interface MalAdvisory {
   safe_versions?: string[];
 }
 
+/** Past package compromise across any version (cached enrich signal). */
+export interface CompromisedHistory {
+  id: string;
+  /** Published date, normalized by the backend as YYYY-MM-DD when known. */
+  published?: string;
+}
+
+/** Cached dependency verdict that cascaded into the parent package. */
+export interface DependencyFlag {
+  name: string;
+  version: string;
+  verdict: VerdictLevel;
+}
+
 /** Full verdict for one package@version as returned by the verdict API. Every
  *  signal field is optional so the renderers degrade gracefully on a partial
  *  payload (e.g. a cache row written before the LLM backfill ran). */
@@ -62,6 +76,12 @@ export interface Verdict {
   mal?: MalAdvisory[];
   /** Direct runtime dependency names (from the manifest). */
   dependencies?: string[];
+  /** Count of historical CVE/GHSA advisories across all versions. */
+  known_cves?: number | null;
+  /** Historical MAL advisories across all versions. */
+  compromised_history?: CompromisedHistory[];
+  /** Direct dependencies with cached non-verified verdicts. */
+  dependency_flags?: DependencyFlag[];
   /** The LLM's human-readable judgment (enrich backfill). */
   summary?: string | null;
   /** Author reputation ingredients (enrich backfill) — feed the narrative. */

@@ -12,6 +12,9 @@ import { computeMechanical } from './compute.mjs';
 import { readVerdict, writeVerdict } from './db.mjs';
 import { summarize } from './llm.mjs';
 import { authorProfile } from './author.mjs';
+import { queryAdvisoryHistory } from './history.mjs';
+import { checkDependencies, resolveVersion as resolveDependencyVersion } from './dep-tree.mjs';
+import { cascadeVerdict } from './engine.mjs';
 
 const DAY_MS = 86_400_000;
 
@@ -78,6 +81,27 @@ export async function prewarmSlice(sw, opts = {}) {
             now: new Date(now).toISOString(),
           });
           if (enrich) {
+            const history = await queryAdvisoryHistory(name, { fetchImpl });
+            row.known_cves = history.filter((h) => h.kind === 'CVE').length;
+            row.compromised_history = history
+              .filter((h) => h.kind === 'MAL')
+              .map(({ id, published }) => ({ id, published }));
+
+            const deps = await checkDependencies(row.dependencies, {
+              resolveVersion: resolveDependencyVersion,
+              readVerdict,
+              sw,
+              fetchImpl,
+            });
+            row.dependency_flags = deps.flagged;
+            const cascaded = cascadeVerdict(row.verdict, deps.flagged.map((d) => d.verdict));
+            if (cascaded !== row.verdict) {
+              row.verdict = cascaded;
+              const signal = deps.flagged.some((d) => d.verdict === 'blocked')
+                ? 'dependency_blocked'
+                : 'dependency_flagged';
+              row.verdict_signals = [...new Set([...(row.verdict_signals ?? []), signal])];
+            }
             // Author reputation is a key ingredient for the narrative (a low-
             // download package from a prolific author reads very differently).
             const author = row.publisher ? await authorProfile(row.publisher, { fetchImpl }) : null;

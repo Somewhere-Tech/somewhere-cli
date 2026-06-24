@@ -8,6 +8,8 @@ const COLUMNS = [
   'typosquat_distance', 'has_github_tag', 'github_repo', 'publish_time', 'publisher', 'description',
   'description_match', 'description_match_reason', 'diff_review', 'diff_review_reason',
   'diff_from_version', 'weekly_downloads', 'verdict', 'verdict_signals',
+  'summary', 'author_package_count', 'author_total_downloads', 'author_first_publish', 'dependencies',
+  'known_cves', 'compromised_history', 'dependency_flags',
 ];
 
 const zipRow = (params) => Object.fromEntries(COLUMNS.map((c, i) => [c, params[i]]));
@@ -38,6 +40,14 @@ test('verdictToParams → row → rowToVerdict round-trips a full verdict', () =
     diff_review_reason: null,
     diff_from_version: null,
     weekly_downloads: 123456,
+    summary: 'Sketchy because a dependency is blocked.',
+    author_package_count: 1,
+    author_total_downloads: 42,
+    author_first_publish: '2025-01-01T00:00:00Z',
+    dependencies: ['a', 'b'],
+    known_cves: 3,
+    compromised_history: [{ id: 'MAL-2025-99', published: '2025-09-15' }],
+    dependency_flags: [{ name: 'b', version: '2.0.0', verdict: 'blocked' }],
     computed_at: '2026-06-24T00:00:00Z',
   };
   const back = rowToVerdict(zipRow(verdictToParams(v)));
@@ -51,6 +61,9 @@ test('verdictToParams → row → rowToVerdict round-trips a full verdict', () =
   assert.equal(back.has_github_tag, 0);
   assert.equal(back.weekly_downloads, 123456);
   assert.equal(back.github_repo, 'https://github.com/ctrl/tinycolor');
+  assert.equal(back.known_cves, 3);
+  assert.deepEqual(back.compromised_history, [{ id: 'MAL-2025-99', published: '2025-09-15' }]);
+  assert.deepEqual(back.dependency_flags, [{ name: 'b', version: '2.0.0', verdict: 'blocked' }]);
 });
 
 test('rowToVerdict — booleans from 0/1, null github tag stays null', () => {
@@ -76,4 +89,7 @@ test('rowToVerdict — booleans from 0/1, null github tag stays null', () => {
   assert.equal(r.is_minified, false);
   assert.equal(r.has_github_tag, null);
   assert.equal(r.weekly_downloads, null);
+  assert.equal(r.known_cves, 0);
+  assert.deepEqual(r.compromised_history, []);
+  assert.deepEqual(r.dependency_flags, []);
 });

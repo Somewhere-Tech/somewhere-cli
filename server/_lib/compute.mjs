@@ -100,6 +100,9 @@ export async function computeMechanical(name, version, opts = {}) {
     diff_review_reason: null,
     diff_from_version: null,
     weekly_downloads: downloads,
+    known_cves: 0,
+    compromised_history: [],
+    dependency_flags: [],
     computed_at: now ?? new Date().toISOString(),
   };
 }
@@ -135,6 +138,9 @@ export function minimalRow(name, version, now) {
     diff_review_reason: null,
     diff_from_version: null,
     weekly_downloads: null,
+    known_cves: 0,
+    compromised_history: [],
+    dependency_flags: [],
     computed_at: now ?? new Date().toISOString(),
   };
 }

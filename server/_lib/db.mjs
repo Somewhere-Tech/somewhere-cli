@@ -44,19 +44,27 @@ export function rowToVerdict(row) {
     author_total_downloads: intOrNull(row.author_total_downloads),
     author_first_publish: row.author_first_publish ?? null,
     dependencies: json(row.dependencies) ?? [],
+    known_cves: intOrNull(row.known_cves) ?? 0,
+    compromised_history: json(row.compromised_history) ?? [],
+    dependency_flags: json(row.dependency_flags) ?? [],
     computed_at: row.computed_at,
   };
 }
 
 /** The INSERT column order (also the VALUES order). */
+const INSERT_COLUMNS = [
+  'package', 'version', 'computed_at', 'has_provenance', 'provenance_commit', 'provenance_repo',
+  'has_install_scripts', 'install_script_types', 'is_minified', 'capabilities', 'typosquat_of',
+  'typosquat_distance', 'has_github_tag', 'github_repo', 'publish_time', 'publisher', 'description',
+  'description_match', 'description_match_reason', 'diff_review', 'diff_review_reason',
+  'diff_from_version', 'weekly_downloads', 'verdict', 'verdict_signals',
+  'summary', 'author_package_count', 'author_total_downloads', 'author_first_publish', 'dependencies',
+  'known_cves', 'compromised_history', 'dependency_flags',
+];
+
 const INSERT_SQL = `INSERT OR REPLACE INTO verdicts
-  (package, version, computed_at, has_provenance, provenance_commit, provenance_repo,
-   has_install_scripts, install_script_types, is_minified, capabilities, typosquat_of,
-   typosquat_distance, has_github_tag, github_repo, publish_time, publisher, description,
-   description_match, description_match_reason, diff_review, diff_review_reason,
-   diff_from_version, weekly_downloads, verdict, verdict_signals,
-   summary, author_package_count, author_total_downloads, author_first_publish, dependencies)
-  VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`;
+  (${INSERT_COLUMNS.join(', ')})
+  VALUES (${INSERT_COLUMNS.map(() => '?').join(',')})`;
 
 /** Build the positional params for INSERT from a verdict row (pure, testable). */
 export function verdictToParams(v) {
@@ -93,6 +101,9 @@ export function verdictToParams(v) {
     v.author_total_downloads ?? null,
     v.author_first_publish ?? null,
     jb(v.dependencies),
+    v.known_cves ?? 0,
+    jb(v.compromised_history),
+    jb(v.dependency_flags),
   ];
 }
 

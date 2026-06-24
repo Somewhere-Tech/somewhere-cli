@@ -117,6 +117,7 @@ const SUMMARY_SYSTEM =
   'Given the facts, write a 1-3 sentence plain-English judgment that SYNTHESIZES them — explain WHY the package is fine or concerning, the way a knowledgeable colleague would. Do NOT just restate the signals as a list. ' +
   'Weigh author reputation against weak signals: a low-download package from a prolific, reputable author is usually fine ("no provenance — common for their older packages"); a low-download package from a brand-new single-package account that is minified and reaches for the network is a red flag. ' +
   'Also weigh DEPENDENCY risk — a clean-looking package can pull in a sketchy or known-compromised dependency; if any dependency is notable (obscure, known-bad history, or oddly out of place for the package\'s purpose), name it. ' +
+  'If the package was EVER compromised, say so AND whether the current version is clean; never call a previously-hacked package\'s author "strong track record" without that caveat. ' +
   'Respond with exactly one JSON object: {"summary": "<the assessment>", "match": true|false} where match is whether the package\'s behavior matches its stated description.';
 
 const SUMMARY_SCHEMA = {
@@ -135,6 +136,16 @@ export function buildSummaryPrompt(s) {
       (a.oldest_package_date ? `, publishing since ${String(a.oldest_package_date).slice(0, 10)}` : '')
     : s.publisher || 'unknown';
   const list = (arr) => (arr && arr.length ? arr.join(', ') : 'none');
+  const compromised = Array.isArray(s.compromised_history) ? s.compromised_history : [];
+  const past = compromised.length
+    ? compromised.map((m) => `${m.id} (${String(m.published || '').slice(0, 7) || 'unknown'})`).join(', ')
+    : 'none';
+  const depFlags = Array.isArray(s.dependency_flags) ? s.dependency_flags : [];
+  const depChecked = Math.min((s.dependencies || []).length, 50);
+  const depLine = `${depChecked} checked, ${depFlags.length} flagged` +
+    (depFlags.length
+      ? `: ${depFlags.map((d) => `${d.name} (${d.verdict})`).join(', ')}`
+      : '');
   const user = [
     `Package: ${s.package}@${s.version}`,
     `Description: "${s.description ?? ''}"`,
@@ -147,11 +158,9 @@ export function buildSummaryPrompt(s) {
     `Install scripts: ${list(s.install_script_types)}`,
     `Source: ${s.is_minified ? 'minified / unreadable' : 'readable'}`,
     `Capabilities accessed: ${list(s.capabilities)}`,
-    `Dependencies (${(s.dependencies || []).length}): ${
-      s.dependencies && s.dependencies.length
-        ? s.dependencies.slice(0, 20).join(', ') + (s.dependencies.length > 20 ? ', …' : '')
-        : 'none'
-    }`,
+    `Past advisories: ${past}`,
+    `Known CVEs: ${s.known_cves ?? 0}`,
+    `Dependencies: ${depLine}`,
     `Known malware advisories: ${s.mal && s.mal.length ? s.mal.map((m) => m.id).join(', ') : 'none'}`,
   ].join('\n');
   return { system: SUMMARY_SYSTEM, user };
