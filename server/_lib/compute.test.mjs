@@ -1,0 +1,172 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { computeMechanical, finalize } from './compute.mjs';
+import { resolveVerdict } from './resolve.mjs';
+import { verdictToParams } from './db.mjs';
+
+const json = (body, status = 200) => ({
+  ok: status < 400,
+  status,
+  json: async () => body,
+  text: async () => JSON.stringify(body),
+});
+const text = (body, status = 200) => ({ ok: status < 400, status, json: async () => ({}), text: async () => body });
+
+/** Route a fake fetch to fixtures by host/path. */
+function routeFetch(fx) {
+  return async (url) => {
+    const u = new URL(url);
+    if (u.host.includes('api.npmjs.org')) return json(fx.downloads ?? { downloads: 0 });
+    if (u.host.includes('cdn.jsdelivr.net')) return text(fx.source ?? '', fx.sourceStatus ?? 200);
+    if (u.host.includes('api.github.com')) return json({}, fx.tagStatus ?? 404);
+    if (u.host.includes('api.osv.dev')) return json(fx.osv ?? { vulns: [] });
+    if (u.host.includes('registry.npmjs.org')) {
+      const segs = u.pathname.split('/').filter(Boolean);
+      const isManifest = segs.length >= 2 && /^\d/.test(decodeURIComponent(segs[segs.length - 1]));
+      return json(isManifest ? (fx.manifest ?? {}) : (fx.packument ?? {}));
+    }
+    return json({}, 404);
+  };
+}
+
+test('computeMechanical — clean package with provenance + github tag is verified', async () => {
+  const fetchImpl = routeFetch({
+    manifest: {
+      name: 'left-pad',
+      version: '1.3.0',
+      description: 'pad a string',
+      main: 'index.js',
+      dist: { attestations: { url: 'https://x', provenance: { predicateType: 'slsa' } } },
+      repository: { url: 'git+https://github.com/stevemao/left-pad.git' },
+    },
+    packument: { time: { '1.3.0': '2024-01-01T00:00:00Z' } },
+    source: 'module.exports = function leftPad(s,n){ return s }',
+    downloads: { downloads: 2_000_000 },
+    tagStatus: 200,
+  });
+  const row = await computeMechanical('left-pad', '1.3.0', { fetchImpl, now: 'NOW' });
+  assert.equal(row.verdict, 'verified');
+  assert.equal(row.has_provenance, true);
+  assert.equal(row.has_github_tag, 1);
+  assert.equal(row.is_minified, false);
+  assert.deepEqual(row.capabilities, []);
+  assert.equal(row.publish_time, '2024-01-01T00:00:00Z');
+  assert.equal(row.weekly_downloads, 2_000_000);
+});
+
+test('computeMechanical — no provenance + minified + install script → unverified', async () => {
+  const minified = 'a'.repeat(60000) + ';return 1'; // single huge line
+  const fetchImpl = routeFetch({
+    manifest: {
+      name: 'sketchy',
+      version: '2.1.0',
+      description: 'date formatter',
+      main: 'index.js',
+      scripts: { postinstall: 'node steal.js' },
+      // no dist.attestations → no provenance; no repository → tag null
+    },
+    packument: {},
+    source: minified,
+    downloads: { downloads: 5000 },
+  });
+  const row = await computeMechanical('sketchy', '2.1.0', { fetchImpl, now: 'NOW' });
+  assert.equal(row.verdict, 'unverified');
+  assert.equal(row.has_provenance, false);
+  assert.equal(row.is_minified, true);
+  assert.deepEqual(row.install_script_types, ['postinstall']);
+  assert.ok(row.verdict_signals.includes('no_provenance'));
+  assert.ok(row.verdict_signals.includes('install_scripts'));
+});
+
+test('computeMechanical — missing entry source does not flag minified', async () => {
+  const fetchImpl = routeFetch({
+    manifest: { name: 'x', version: '1.0.0', main: 'index.js' },
+    packument: {},
+    source: '',
+    sourceStatus: 404,
+    downloads: { downloads: 10 },
+  });
+  const row = await computeMechanical('x', '1.0.0', { fetchImpl, now: 'NOW' });
+  assert.equal(row.is_minified, false);
+});
+
+test('finalize — confirmed MAL escalates a verified row to blocked', () => {
+  const row = { package: 'p', version: '1', verdict: 'verified', verdict_signals: [] };
+  const out = finalize(row, [{ id: 'MAL-1', sources: ['OpenSSF', 'OSV'] }]);
+  assert.equal(out.verdict, 'blocked');
+  assert.deepEqual(out.verdict_signals, ['MAL-1']);
+  assert.equal(out.mal.length, 1);
+});
+
+test('finalize — no MAL keeps the mechanical verdict', () => {
+  const row = { package: 'p', version: '1', verdict: 'unverified', verdict_signals: ['no_provenance', 'minified'] };
+  const out = finalize(row, []);
+  assert.equal(out.verdict, 'unverified');
+  assert.deepEqual(out.mal, []);
+});
+
+// ---- resolveVerdict (cache miss + hit) ----
+
+function fakeSw(storedRow) {
+  const writes = [];
+  return {
+    env: {},
+    writes,
+    db: {
+      query: async (sql, params) => {
+        if (sql.startsWith('SELECT')) return { data: storedRow ? [storedRow] : [] };
+        if (sql.startsWith('INSERT')) {
+          writes.push(params);
+          return { changes: 1 };
+        }
+        return { data: [] };
+      },
+    },
+  };
+}
+
+test('resolveVerdict — cache miss computes, writes, and returns', async () => {
+  const sw = fakeSw(null);
+  const fetchImpl = routeFetch({
+    manifest: { name: 'fresh', version: '1.0.0', main: 'index.js', dist: { attestations: { url: 'x' } }, repository: { url: 'https://github.com/a/b' } },
+    packument: { time: { '1.0.0': '2024-01-01T00:00:00Z' } },
+    source: 'export const x = 1',
+    downloads: { downloads: 1000 },
+    tagStatus: 200,
+  });
+  const out = await resolveVerdict(sw, 'fresh', '1.0.0', { fetchImpl });
+  assert.equal(out.verdict, 'verified');
+  assert.equal(sw.writes.length, 1, 'should cache the computed row');
+});
+
+test('resolveVerdict — cache hit skips compute, still does live MAL', async () => {
+  // A stored mechanical row that says verified...
+  const storedParams = verdictToParams({
+    package: 'cached',
+    version: '1.0.0',
+    verdict: 'verified',
+    verdict_signals: [],
+    capabilities: [],
+    has_provenance: true,
+    is_minified: false,
+    has_install_scripts: false,
+    install_script_types: [],
+    has_github_tag: 1,
+    weekly_downloads: 1000,
+    computed_at: 'OLD',
+  });
+  const COLUMNS = [
+    'package', 'version', 'computed_at', 'has_provenance', 'provenance_commit', 'provenance_repo',
+    'has_install_scripts', 'install_script_types', 'is_minified', 'capabilities', 'typosquat_of',
+    'typosquat_distance', 'has_github_tag', 'github_repo', 'publish_time', 'publisher', 'description',
+    'description_match', 'description_match_reason', 'diff_review', 'diff_review_reason',
+    'diff_from_version', 'weekly_downloads', 'verdict', 'verdict_signals',
+  ];
+  const storedRow = Object.fromEntries(COLUMNS.map((c, i) => [c, storedParams[i]]));
+  const sw = fakeSw(storedRow);
+  // ...but a live MAL advisory now exists → must escalate to blocked.
+  const fetchImpl = routeFetch({ osv: { vulns: [{ id: 'MAL-NEW', references: [{ url: 'https://github.com/ossf/x' }] }] } });
+  const out = await resolveVerdict(sw, 'cached', '1.0.0', { fetchImpl });
+  assert.equal(out.verdict, 'blocked');
+  assert.equal(sw.writes.length, 0, 'cache hit should not recompute/rewrite');
+});
