@@ -92,9 +92,12 @@ export function buildChecks(v: Verdict): Check[] {
           text: `${flags.length} of ${checked} flagged: ${flags.map((d) => `${d.name} (${d.verdict})`).join(', ')}`,
         });
       } else {
+        // "none flagged" not "all verified": uncached deps are unknown, not
+        // verified — we surface the bad ones, so absence of flags ≠ all-clean.
+        // (Post-prewarm, when the tree is cached, this becomes a true all-clear.)
         checks.push({
           level: 'ok',
-          text: `${checked} dependenc${checked === 1 ? 'y' : 'ies'}, all verified`,
+          text: `${checked} dependenc${checked === 1 ? 'y' : 'ies'}, none flagged`,
         });
       }
     } else if (deps.length === 0) {
