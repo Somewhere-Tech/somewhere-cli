@@ -66,8 +66,64 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 | `somewhere mcp install <host>` | Configure an MCP host (`codex`, `claude-code`, `cursor`) |
 | `somewhere mcp doctor` | Check MCP setup: login, token, server reachability, host configs |
+| `swpx <package>` | Run a package with `npx` after a verdict check (also `somewhere npx`) |
+| `swpm install` | Run `npm install` after checking the resolved tree (also `somewhere npm`) |
+| `somewhere check <pkg>` | Inspect a package's verdict without running it (`--json` for agents) |
 
 Short alias: `sw` works everywhere `somewhere` does.
+
+## Verify npm packages before you run them: `swpx` / `swpm`
+
+`swpx` and `swpm` are thin gates in front of `npx` and `npm`. Before anything
+executes or installs, they check the package against the verdict database at
+[npm.somewhere.tech](https://npm.somewhere.tech) and show you what's known.
+**They are never in the byte path** — npm's own CDN serves the package, same
+bytes, same speed. We only serve the verdict.
+
+```bash
+swpx create-next-app my-app     # verified → passes through to npx
+swpx some-sketchy-tool          # flagged → stops, shows evidence, you decide
+swpm install                    # checks the whole tree, blocks confirmed malware
+somewhere check left-pad        # just the verdict, nothing runs
+somewhere check left-pad --json # raw verdict object, for agents / CI
+```
+
+What you see:
+
+```
+$ swpx create-next-app my-app
+✓ create-next-app@15.2.0 — network, fs, child_process ✓ matches "Create Next.js apps"
+
+$ swpx some-analytics-tool
+⚠ some-analytics-tool@2.1.0 — could not verify
+  ⚠ No provenance (source unverifiable)
+  ⚠ Has install scripts (postinstall)
+  ⚠ Capabilities don't match description: "lightweight date formatter"
+  Run npx some-analytics-tool to proceed unverified.
+
+$ swpx @ctrl/tinycolor@4.1.1
+✖ BLOCKED — @ctrl/tinycolor@4.1.1
+  MAL-2025-09-384: credential-harvesting via preinstall hook
+  This version is confirmed malware. Do not install.
+```
+
+**How it behaves**
+
+- **Verified** packages pass straight through to the real `npx` / `npm`.
+- **Flagged** (unverified / suspicious) packages stop with evidence. The override
+  is exactly what the message says — run plain `npx` yourself. We don't nag.
+- **Confirmed malware** is hard-blocked (`swpx` exits 1; `swpm install` refuses
+  the whole install). For `swpm`, unverified *transitive* deps are surfaced as
+  warnings but don't block the install — only confirmed malware does.
+- **A gate, not a wall.** If the verdict service is unreachable, you get normal
+  npm behaviour (a dim note, then the real tool runs). Our outage never stops you.
+- **No account, no login.** The verdict service is public and free.
+
+`somewhere check` exit codes (for scripting / agents): `0` verified, `1`
+unverified/suspicious, `2` blocked, `3` couldn't determine (bad name or service
+down). `SWPX_DRY_RUN=1` prints the decision and the command that *would* run
+without executing it. Point the CLI at a staging verdict service with
+`SWPX_VERDICT_URL`.
 
 ## Auth flow
 
