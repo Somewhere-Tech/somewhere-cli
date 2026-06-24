@@ -81,7 +81,8 @@ test('swpx — blocked refuses, never runs npx', async () => {
   assert.equal(r.action, 'blocked');
   assert.equal(r.exitCode, 1);
   assert.equal(runReal.calls.length, 0);
-  assert.match(cap.errText(), /✖ BLOCKED — @ctrl\/tinycolor@4\.1\.1/);
+  assert.match(cap.errText(), /✖ @ctrl\/tinycolor@4\.1\.1/);
+  assert.match(cap.errText(), /Confirmed malware\. Do not install\./);
 });
 
 test('swpx — unverified stops with evidence, never runs npx', async () => {
@@ -96,7 +97,8 @@ test('swpx — unverified stops with evidence, never runs npx', async () => {
   assert.equal(r.action, 'stopped');
   assert.equal(r.exitCode, 1);
   assert.equal(runReal.calls.length, 0);
-  assert.match(cap.errText(), /could not verify/);
+  assert.match(cap.errText(), /⚠ foo@2\.1\.0/);
+  assert.match(cap.errText(), /✖ Minified \(unreadable\)/);
   assert.match(cap.errText(), /Run npx foo to proceed unverified\./);
 });
 
@@ -269,7 +271,8 @@ test('check — blocked exits 2', async () => {
     getVerdict: async () => BLOCKED,
   });
   assert.equal(code, 2);
-  assert.match(cap.outText(), /✖ BLOCKED/);
+  assert.match(cap.outText(), /✖ @ctrl\/tinycolor@4\.1\.1/);
+  assert.match(cap.outText(), /Confirmed malware\. Do not install\./);
 });
 
 test('check — unverified exits 1', async () => {

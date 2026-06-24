@@ -20,93 +20,114 @@ export function decide(v: Verdict): Action {
   return 'run';
 }
 
-function capString(v: Verdict): string {
-  const caps = (v.capabilities ?? []).filter(Boolean);
-  return caps.length ? caps.join(', ') : '(no system access)';
+type CheckLevel = 'ok' | 'warn' | 'bad';
+interface Check {
+  level: CheckLevel;
+  text: string;
 }
 
-/** Green one-liner for a clean package.
- *  e.g. `✓ create-next-app@15.2.0 — network, fs, child_process ✓ matches "Create Next.js apps"`
- *  e.g. `✓ is-odd@1.0.0 — (no system access)` */
-export function renderVerified(v: Verdict): string {
-  let line = `${green('✓')} ${v.package}@${v.version} — ${capString(v)}`;
-  if (v.description_match === 'match' && v.description) {
-    line += ` ${green('✓')} matches ${dim(`"${v.description}"`)}`;
+function checkMark(level: CheckLevel): string {
+  if (level === 'ok') return green('✓');
+  if (level === 'bad') return red('✖');
+  return yellow('⚠');
+}
+
+/** 1400622 → "1.4M", 11000 → "11k", 11 → "11". */
+function humanizeDownloads(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
+  if (n >= 10_000) return `${Math.round(n / 1000)}k`;
+  if (n >= 1_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
+  return String(n);
+}
+
+/** The per-dimension evidence rows — "show the work, evidence not a grade".
+ *  Every check the verdict layer ran becomes a row: ok (green ✓), warn
+ *  (yellow ⚠), or bad (red ✖). A clean package reads as a wall of green with the
+ *  one honest ⚠; a sketchy one's red/yellow stands out immediately. Rows are
+ *  omitted only when the signal genuinely wasn't checked (e.g. GitHub tag with
+ *  no repo, description match before the LLM backfill ran). */
+export function buildChecks(v: Verdict): Check[] {
+  const checks: Check[] = [];
+
+  const dl = v.weekly_downloads;
+  if (typeof dl === 'number' && dl > 0) {
+    checks.push({ level: dl >= 1000 ? 'ok' : 'warn', text: `${humanizeDownloads(dl)} weekly downloads` });
   }
-  return line;
-}
 
-/** The bullet lines under a "could not verify" header — one per negative
- *  signal present, in the landing-page order. */
-export function evidenceLines(v: Verdict): string[] {
-  const lines: string[] = [];
-  if (v.has_provenance === false) lines.push('No provenance (source unverifiable)');
-  if (v.is_minified) lines.push('Minified source (unreadable)');
   if (v.has_install_scripts) {
-    const types = (v.install_script_types ?? []).filter(Boolean).join(', ');
-    lines.push(types ? `Has install scripts (${types})` : 'Has install scripts');
+    const t = (v.install_script_types ?? []).filter(Boolean)[0];
+    checks.push({ level: 'bad', text: t ? `Has ${t} script` : 'Has install scripts' });
+  } else {
+    checks.push({ level: 'ok', text: 'No install scripts' });
   }
+
+  checks.push(
+    v.is_minified ? { level: 'bad', text: 'Minified (unreadable)' } : { level: 'ok', text: 'Readable source' },
+  );
+
   const caps = (v.capabilities ?? []).filter(Boolean);
-  if (caps.length) lines.push(caps.join(', '));
+  checks.push(caps.length ? { level: 'warn', text: caps.join(', ') } : { level: 'ok', text: 'No system access' });
+
+  const mals = v.mal ?? [];
+  if (mals.length) {
+    const m = mals[0];
+    checks.push({ level: 'bad', text: m.summary ? `${m.id}: ${m.summary}` : `${m.id} advisory` });
+  } else {
+    checks.push({ level: 'ok', text: 'No advisories' });
+  }
+
   if (v.typosquat_of) {
     const d = v.typosquat_distance != null ? ` (distance ${v.typosquat_distance})` : '';
-    lines.push(`Possible typosquat of ${v.typosquat_of}${d}`);
+    checks.push({ level: 'bad', text: `Possible typosquat of ${v.typosquat_of}${d}` });
   }
-  if (v.description_match === 'mismatch') {
-    // Always surface the mismatch (the engine counts it toward the verdict, and
-    // shortReasons shows it unconditionally) — fall back to a generic line when
-    // the package shipped no description text.
-    lines.push(
-      v.description
-        ? `Capabilities don't match description: "${v.description}"`
-        : "Capabilities don't match the package's stated description",
-    );
+
+  if (v.has_github_tag === 1) checks.push({ level: 'ok', text: 'GitHub tag exists' });
+  else if (v.has_github_tag === 0) checks.push({ level: 'warn', text: 'No GitHub tag' });
+
+  checks.push(
+    v.has_provenance
+      ? { level: 'ok', text: 'Provenance verified' }
+      : { level: 'warn', text: 'No provenance' },
+  );
+
+  if (v.description_match === 'match') {
+    checks.push({ level: 'ok', text: 'Matches description' });
+  } else if (v.description_match === 'mismatch') {
+    checks.push({ level: 'bad', text: v.description ? `Doesn't match: "${v.description}"` : "Doesn't match its description" });
   }
-  if ((v.diff_review === 'suspicious' || v.diff_review === 'unexplained') && v.diff_review_reason) {
-    lines.push(v.diff_review_reason);
-  }
-  if (v.has_github_tag === 0) lines.push('No GitHub release tag for this version');
-  return lines;
+
+  return checks;
 }
 
-/** Yellow evidence block for an unverified / suspicious package (swpx stops). */
-export function renderEvidence(v: Verdict): string[] {
-  const out = [`${yellow('⚠')} ${v.package}@${v.version} — could not verify`];
-  for (const l of evidenceLines(v)) out.push(`  ${yellow('⚠')} ${l}`);
-  out.push(`  Run npx ${v.package} to proceed unverified.`);
+/** The verbose, color-coded checklist for one package — header marked by the
+ *  overall verdict (✓/⚠/✖), then every check as its own row. */
+export function renderChecklist(v: Verdict): string[] {
+  const out = [`${mark(v.verdict)} ${v.package}@${v.version}`];
+  for (const c of buildChecks(v)) out.push(`  ${checkMark(c.level)} ${c.text}`);
   return out;
 }
 
-/** Red hard-block for confirmed malware. */
-export function renderBlocked(v: Verdict): string[] {
-  const out = [`${red('✖')} ${red('BLOCKED')} — ${v.package}@${v.version}`];
-  const mals = v.mal ?? [];
-  for (const m of mals) out.push(`  ${m.id}${m.summary ? `: ${m.summary}` : ''}`);
-  const first = mals[0];
-  if (first) {
-    const meta: string[] = [];
-    if (first.disclosed) meta.push(`Disclosed: ${first.disclosed}`);
-    if (first.source) meta.push(`Source: ${first.source}`);
-    if (meta.length) out.push(`  ${meta.join(' · ')}`);
-    const safe = first.safe_versions ?? [];
+/** Full single-package output: the checklist plus a state-specific footer
+ *  (how to override on a stop; the malware warning + safe versions on a block). */
+export function renderVerdict(v: Verdict): string[] {
+  const out = renderChecklist(v);
+  const action = decide(v);
+  if (action === 'block') {
+    const first = (v.mal ?? [])[0];
+    const safe = first?.safe_versions ?? [];
     if (safe.length) {
-      out.push(`  Safe versions: ${safe.map((s) => `${v.package}@${s}`).join(', ')}`);
+      out.push(`  ${dim('Safe versions:')} ${safe.map((s) => green(`${v.package}@${s}`)).join(', ')}`);
     }
+    out.push(`  ${red('Confirmed malware. Do not install.')}`);
+  } else if (action === 'stop') {
+    out.push(`  ${dim(`Run npx ${v.package} to proceed unverified.`)}`);
   }
-  out.push('  This version is confirmed malware. Do not install.');
   return out;
 }
 
-/** Whichever block a single-package check should print, with its leading mark. */
+/** Back-compat name used by the check command + bin. */
 export function renderSingle(v: Verdict): string[] {
-  switch (decide(v)) {
-    case 'run':
-      return [renderVerified(v)];
-    case 'block':
-      return renderBlocked(v);
-    default:
-      return renderEvidence(v);
-  }
+  return renderVerdict(v);
 }
 
 /** Compact reason string for a row in the tree summary.

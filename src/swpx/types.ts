@@ -51,6 +51,7 @@ export interface Verdict {
   github_repo?: string | null;
   publish_time?: string | null;
   publisher?: string | null;
+  weekly_downloads?: number | null;
   description?: string | null;
   description_match?: 'match' | 'mismatch' | 'unclear' | null;
   description_match_reason?: string | null;

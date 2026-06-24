@@ -15,7 +15,7 @@
  *  executed program owns stdout. */
 
 import { parseSpec } from './registry.js';
-import { decide, renderBlocked, renderEvidence, renderVerified } from './render.js';
+import { decide, renderVerdict } from './render.js';
 import { bindDeps, msg, type RunDeps } from './run-common.js';
 import { dim } from '../lib/output.js';
 
@@ -51,15 +51,11 @@ export async function runSwpx(args: string[], deps: RunDeps = {}): Promise<SwpxO
     return { exitCode: await d.runReal('npx', args), action: 'fallback' };
   }
 
-  switch (decide(verdict)) {
-    case 'run':
-      d.errLog(renderVerified(verdict));
-      return { exitCode: await d.runReal('npx', args), action: 'ran' };
-    case 'block':
-      for (const l of renderBlocked(verdict)) d.errLog(l);
-      return { exitCode: 1, action: 'blocked' };
-    default:
-      for (const l of renderEvidence(verdict)) d.errLog(l);
-      return { exitCode: 1, action: 'stopped' };
+  const action = decide(verdict);
+  for (const l of renderVerdict(verdict)) d.errLog(l);
+  if (action === 'run') {
+    return { exitCode: await d.runReal('npx', args), action: 'ran' };
   }
+  // unverified/suspicious and blocked both stop swpx; only the exit reason differs.
+  return { exitCode: 1, action: action === 'block' ? 'blocked' : 'stopped' };
 }
