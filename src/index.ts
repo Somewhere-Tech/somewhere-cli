@@ -21,6 +21,7 @@ import { registerDev } from './commands/dev.js';
 import { registerExec } from './commands/exec.js';
 import { registerApi } from './commands/api.js';
 import { registerMcp } from './commands/mcp.js';
+import { registerSwpx } from './commands/swpx.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -30,6 +31,11 @@ const program = new Command()
   .name('somewhere')
   .description('CLI for somewhere.tech')
   .version(pkg.version);
+
+// Required so the npx/npm pass-through commands can forward unknown flags to the
+// wrapped tool (passThroughOptions). Only affects program-level option ordering
+// (global -V/--version/--help still work); each subcommand parses as before.
+program.enablePositionalOptions();
 
 registerAuth(program);
 registerInit(program);
@@ -50,5 +56,6 @@ registerDev(program);
 registerExec(program);
 registerApi(program);
 registerMcp(program);
+registerSwpx(program);
 
 program.parse();

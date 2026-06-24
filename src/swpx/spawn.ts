@@ -9,6 +9,12 @@ import { spawn } from 'node:child_process';
 import { dim } from '../lib/output.js';
 
 export function runReal(cmd: 'npx' | 'npm', args: string[]): Promise<number> {
+  // SWPX_DRY_RUN: show the decision + what WOULD run, without executing. Useful
+  // for "what would swpx do?" and for testing the gate end-to-end offline.
+  if (process.env.SWPX_DRY_RUN) {
+    console.error(dim(`swpx: [dry-run] would run: ${cmd} ${args.join(' ')}`));
+    return Promise.resolve(0);
+  }
   return new Promise((resolve) => {
     const child = spawn(cmd, args, {
       stdio: 'inherit',

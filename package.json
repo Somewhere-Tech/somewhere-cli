@@ -22,7 +22,9 @@
   "type": "module",
   "bin": {
     "somewhere": "bin/somewhere.js",
-    "sw": "bin/somewhere.js"
+    "sw": "bin/somewhere.js",
+    "swpx": "bin/swpx.js",
+    "swpm": "bin/swpm.js"
   },
   "files": [
     "bin",
