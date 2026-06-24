@@ -1,11 +1,19 @@
-import chalk from 'chalk';
+type Style = (value: string) => string;
 
-export const teal = chalk.hex('#2dd4bf');
-export const dim = chalk.dim;
-export const bold = chalk.bold;
-export const red = chalk.red;
-export const green = chalk.green;
-export const yellow = chalk.yellow;
+const useColor = (): boolean =>
+  Boolean(process.stdout.isTTY && !process.env.NO_COLOR);
+
+function ansi(open: string, close: string): Style {
+  return (value: string) => (useColor() ? `${open}${value}${close}` : value);
+}
+
+export const teal = ansi('\x1b[38;2;45;212;191m', '\x1b[39m');
+export const dim = ansi('\x1b[2m', '\x1b[22m');
+export const bold = ansi('\x1b[1m', '\x1b[22m');
+export const red = ansi('\x1b[31m', '\x1b[39m');
+export const green = ansi('\x1b[32m', '\x1b[39m');
+export const yellow = ansi('\x1b[33m', '\x1b[39m');
+export const cyan = ansi('\x1b[36m', '\x1b[39m');
 
 export function success(msg: string) {
   console.log(`${green('✓')} ${msg}`);

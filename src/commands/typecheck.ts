@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import ora from 'ora';
+import ora from '../lib/spinner.js';
 import { bold, dim, error, info, red, success, teal, warn } from '../lib/output.js';
 import { runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
 

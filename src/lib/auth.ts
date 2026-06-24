@@ -1,8 +1,8 @@
 import http from 'node:http';
-import open from 'open';
-import chalk from 'chalk';
 import type { CliConfig } from '../types.js';
 import { getDeviceKeyName } from './device.js';
+import open from './open.js';
+import { cyan } from './output.js';
 
 const AUTH_URL = 'https://api.somewhere.tech/v1/auth/cli';
 
@@ -157,7 +157,7 @@ export async function browserLogin(): Promise<CliConfig> {
 
       console.log('');
       console.log(`  If the browser doesn't open, visit this URL:`);
-      console.log(`  ${chalk.cyan(loginUrl)}`);
+      console.log(`  ${cyan(loginUrl)}`);
       console.log('');
 
       open(loginUrl).catch(() => {

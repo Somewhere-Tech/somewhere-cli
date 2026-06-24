@@ -1,6 +1,6 @@
 import { writeFileSync } from 'node:fs';
 import { Command } from 'commander';
-import ora from 'ora';
+import ora from '../lib/spinner.js';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, success, table, teal, warn } from '../lib/output.js';

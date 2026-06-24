@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import ora from 'ora';
+import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';

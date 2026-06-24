@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import _open from 'open';
+import _open from '../lib/open.js';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info } from '../lib/output.js';

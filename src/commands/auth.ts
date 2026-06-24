@@ -1,6 +1,6 @@
 import { Command } from 'commander';
-import open from 'open';
-import ora, { type Ora } from 'ora';
+import open from '../lib/open.js';
+import ora, { type Ora } from '../lib/spinner.js';
 import { browserLogin } from '../lib/auth.js';
 import {
   deviceLogin,

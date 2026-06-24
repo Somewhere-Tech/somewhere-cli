@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import prompts from 'prompts';
-import ora from 'ora';
+import ora from '../lib/spinner.js';
 import { ApiClient } from '../lib/client.js';
 import {
   getToken,

@@ -1,6 +1,6 @@
 import { Command } from 'commander';
 import { resolve } from 'node:path';
-import ora from 'ora';
+import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
