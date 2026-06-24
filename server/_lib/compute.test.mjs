@@ -236,3 +236,22 @@ test('resolveVerdict — uninspectable AND no MAL throws (route 502 → CLI fail
   };
   await assert.rejects(() => resolveVerdict(sw, 'ghost', '9.9.9', { fetchImpl }));
 });
+
+test('finalize — a freshly published version is penalized to caution (read-time)', () => {
+  const fresh = new Date(Date.now() - 3 * 3600 * 1000).toISOString(); // 3h ago
+  const out = finalize({ package: 'p', version: '1', verdict: 'verified', verdict_signals: [], publish_time: fresh }, []);
+  assert.equal(out.verdict, 'unverified');
+  assert.ok(out.verdict_signals.includes('freshly_published'));
+});
+
+test('finalize — an old version is not penalized', () => {
+  const old = new Date(Date.now() - 30 * 24 * 3600 * 1000).toISOString();
+  const out = finalize({ package: 'p', version: '1', verdict: 'verified', verdict_signals: [], publish_time: old }, []);
+  assert.equal(out.verdict, 'verified');
+});
+
+test('finalize — freshness never downgrades a confirmed block', () => {
+  const fresh = new Date(Date.now() - 1 * 3600 * 1000).toISOString();
+  const out = finalize({ package: 'p', version: '1', verdict: 'verified', publish_time: fresh }, [{ id: 'MAL-1', sources: ['OSV', 'GitHub'] }]);
+  assert.equal(out.verdict, 'blocked');
+});

@@ -145,30 +145,60 @@ export function minimalRow(name, version, now) {
   };
 }
 
-/** Merge a live MAL check onto a (cached or fresh) mechanical row. MAL only
- *  escalates: confirmed → blocked, unconfirmed → at least suspicious. The
- *  mechanical verdict stands when there's no MAL. */
-export function finalize(row, mal) {
-  const advisories = Array.isArray(mal) ? mal : [];
-  // The engine needs each advisory's internal `sources` array (Amazon-only
-  // confirmation rule), but that field is NOT part of the public advisory shape
-  // ({ id, summary, disclosed, source, safe_versions }). Strip it before putting
-  // advisories on the wire.
-  const pub = advisories.map(({ sources, ...rest }) => rest);
-  if (advisories.length === 0) return { ...row, mal: [] };
+/** A version newer than this is "too fresh to trust yet" — advisory feeds
+ *  (OSV/GitHub/Socket) lag a malicious publish by minutes-to-hours, so there is
+ *  no reason to run the very latest before that window has passed. Tunable. */
+export const FRESH_HOURS = 24;
 
-  const malOnly = computeVerdict({ mal: advisories });
-  if (malOnly.verdict === 'blocked') {
-    return { ...row, mal: pub, verdict: 'blocked', verdict_signals: malOnly.verdict_signals };
+function ageHours(publishTime, now) {
+  if (!publishTime) return null;
+  const t = Date.parse(publishTime);
+  if (Number.isNaN(t)) return null;
+  return (now - t) / 3_600_000;
+}
+
+/** Penalise a too-new version. Applied at READ time (never cached) because
+ *  "how old" changes every hour. A fresh version becomes at least CAUTION
+ *  (unverified) — but never downgrades a block/suspicious. */
+function applyFreshness(result, now) {
+  if (result.verdict === 'blocked') return result;
+  const ageH = ageHours(result.publish_time, now);
+  if (ageH == null || ageH >= FRESH_HOURS) return result;
+  const signals = [...(result.verdict_signals ?? [])];
+  if (!signals.includes('freshly_published')) signals.push('freshly_published');
+  return {
+    ...result,
+    verdict: result.verdict === 'verified' ? 'unverified' : result.verdict,
+    verdict_signals: signals,
+  };
+}
+
+/** Merge a live MAL check onto a (cached or fresh) mechanical row, then apply the
+ *  read-time freshness penalty. MAL only escalates: confirmed → blocked,
+ *  unconfirmed → at least suspicious; the mechanical verdict stands otherwise. */
+export function finalize(row, mal, now = Date.now()) {
+  const advisories = Array.isArray(mal) ? mal : [];
+  // Strip each advisory's internal `sources` array (engine-only) before the wire.
+  const pub = advisories.map(({ sources, ...rest }) => rest);
+
+  let result;
+  if (advisories.length === 0) {
+    result = { ...row, mal: [] };
+  } else {
+    const malOnly = computeVerdict({ mal: advisories });
+    if (malOnly.verdict === 'blocked') {
+      result = { ...row, mal: pub, verdict: 'blocked', verdict_signals: malOnly.verdict_signals };
+    } else if (malOnly.verdict === 'suspicious') {
+      const escalate = row.verdict === 'verified' || row.verdict === 'unverified';
+      result = {
+        ...row,
+        mal: pub,
+        verdict: escalate ? 'suspicious' : row.verdict,
+        verdict_signals: [...(row.verdict_signals ?? []), ...malOnly.verdict_signals],
+      };
+    } else {
+      result = { ...row, mal: pub };
+    }
   }
-  if (malOnly.verdict === 'suspicious') {
-    const escalate = row.verdict === 'verified' || row.verdict === 'unverified';
-    return {
-      ...row,
-      mal: pub,
-      verdict: escalate ? 'suspicious' : row.verdict,
-      verdict_signals: [...(row.verdict_signals ?? []), ...malOnly.verdict_signals],
-    };
-  }
-  return { ...row, mal: pub };
+  return applyFreshness(result, now);
 }

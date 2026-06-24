@@ -1,0 +1,40 @@
+# Publish @somewhere-tech/cli to npm WITH PROVENANCE.
+#
+# Provenance (the signed attestation that links the published tarball to this
+# exact repo + commit + CI run) can ONLY be produced from CI with OIDC — a local
+# `npm publish` produces none. That's why the first attested release goes through
+# here. After this, `swpx check @somewhere-tech/cli` passes its own provenance bar.
+#
+# Setup (one time):
+#   1. Repo → Settings → Secrets → Actions → add NPM_TOKEN (an npm automation
+#      token for the @somewhere-tech org, publish scope).
+#   2. The repo must be public for the provenance attestation to be public.
+# Release:
+#   bump version in package.json, commit, then:
+#   git tag v0.14.0 && git push origin v0.14.0   (or run this workflow manually)
+name: Publish to npm
+
+on:
+  push:
+    tags: ['v*.*.*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  id-token: write # OIDC token — REQUIRED for npm provenance
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

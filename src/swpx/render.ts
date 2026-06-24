@@ -40,6 +40,15 @@ function humanizeDownloads(n: number): string {
   return String(n);
 }
 
+/** 0.3 → "18m", 5 → "5h", 50 → "2d", 1500 → "2mo". (Uses the existing
+ *  ageHours() helper defined below for the hours value.) */
+function humanizeAge(h: number): string {
+  if (h < 1) return `${Math.max(1, Math.round(h * 60))}m`;
+  if (h < 48) return `${Math.round(h)}h`;
+  const d = h / 24;
+  return d < 60 ? `${Math.round(d)}d` : `${Math.round(d / 30)}mo`;
+}
+
 /** The per-dimension evidence rows — "show the work, evidence not a grade".
  *  Every check the verdict layer ran becomes a row: ok (green ✓), warn
  *  (yellow ⚠), or bad (red ✖). A clean package reads as a wall of green with the
@@ -63,6 +72,15 @@ export function buildChecks(v: Verdict): Check[] {
     const detail = bits.length ? ` (${bits.join(', ')})` : '';
     // A single-package (or brand-new) author is a caution; an established one reassures.
     checks.push({ level: typeof pc === 'number' && pc <= 1 ? 'warn' : 'ok', text: `Author: ${v.publisher}${detail}` });
+  }
+
+  const ageH = ageHours(v.publish_time);
+  if (ageH != null) {
+    checks.push(
+      ageH < 24
+        ? { level: 'warn', text: `Published ${humanizeAge(ageH)} ago (too new to be vetted)` }
+        : { level: 'ok', text: `Published ${humanizeAge(ageH)} ago` },
+    );
   }
 
   if (v.has_install_scripts) {
