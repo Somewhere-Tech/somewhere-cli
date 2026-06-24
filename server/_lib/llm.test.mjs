@@ -62,12 +62,18 @@ test('descriptionMatch — falls back to parsing .text when response_schema not 
   assert.equal(r.description_match, 'mismatch');
 });
 
-test('descriptionMatch — passes provider + model + response_schema to sw.ai.chat', async () => {
+test('descriptionMatch — deepseek omits response_schema (unsupported) + generous tokens; openai keeps it', async () => {
   let seen;
-  const sw = { ai: { chat: async (args) => { seen = args; return { parsed: { match: true, reason: 'ok' } }; } } };
+  const sw = { ai: { chat: async (args) => { seen = args; return { text: '{"match":true,"reason":"ok"}' }; } } };
   await descriptionMatch(sw, { name: 'x', description: 'y', capabilities: ['fs'] }, { provider: 'deepseek', model: 'deepseek-v4-flash' });
   assert.equal(seen.provider, 'deepseek');
   assert.equal(seen.model, 'deepseek-v4-flash');
-  assert.ok(seen.response_schema, 'must force structured output');
+  assert.equal(seen.response_schema, undefined, 'deepseek must NOT get response_schema (it 400s)');
+  assert.ok(seen.max_tokens >= 1000, 'generous token budget for a reasoning model');
   assert.equal(seen.messages[0].role, 'user');
+
+  let seen2;
+  const sw2 = { ai: { chat: async (args) => { seen2 = args; return { parsed: { match: true, reason: 'ok' } }; } } };
+  await descriptionMatch(sw2, { name: 'x', description: 'y', capabilities: ['fs'] }, { provider: 'openai', model: 'gpt-5.4-nano' });
+  assert.ok(seen2.response_schema, 'openai gets response_schema');
 });

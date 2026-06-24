@@ -25,6 +25,10 @@ const MATCH_SCHEMA = {
   additionalProperties: false,
 };
 
+/** response_schema is only honoured on anthropic/openai; deepseek + workers-ai
+ *  400 on it, so for those we use the JSON-instructed prompt + text parse. */
+const SCHEMA_PROVIDERS = new Set(['anthropic', 'openai']);
+
 const DESCRIPTION_MATCH_SYSTEM =
   "Compare an npm package's description against its detected capabilities.\n" +
   'Respond with exactly one JSON object: {"match": true/false, "reason": "one sentence"}';
@@ -70,17 +74,20 @@ export function parseMatchResponse(text) {
  *  response_schema (verified shape per docs{topic:'sw.ai'}). Returns the two
  *  fields to patch onto a cached row, or null if the model was
  *  unavailable/unparseable (a missing LLM signal is "unknown", never a stop). */
-export async function descriptionMatch(sw, pkg, { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL } = {}) {
+export async function descriptionMatch(sw, pkg, { provider = DEFAULT_PROVIDER, model = DEFAULT_MODEL, maxTokens = 1500 } = {}) {
   const { system, user } = buildDescriptionMatchPrompt(pkg);
+  // max_tokens is generous because deepseek (a reasoning model) burns budget on
+  // chain-of-thought before the JSON; 200 returned empty text.
+  const req = {
+    provider,
+    model,
+    system,
+    messages: [{ role: 'user', content: user }],
+    max_tokens: maxTokens,
+  };
+  if (SCHEMA_PROVIDERS.has(provider)) req.response_schema = MATCH_SCHEMA;
   try {
-    const r = await sw.ai.chat({
-      provider,
-      model,
-      system,
-      messages: [{ role: 'user', content: user }],
-      response_schema: MATCH_SCHEMA,
-      max_tokens: 200,
-    });
+    const r = await sw.ai.chat(req);
     // Preferred path: validated structured output.
     if (r?.parsed && typeof r.parsed.match === 'boolean') {
       return {
