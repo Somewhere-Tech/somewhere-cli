@@ -54,6 +54,17 @@ export function buildChecks(v: Verdict): Check[] {
     checks.push({ level: dl >= 1000 ? 'ok' : 'warn', text: `${humanizeDownloads(dl)} weekly downloads` });
   }
 
+  if (v.publisher) {
+    const pc = v.author_package_count;
+    const adl = v.author_total_downloads;
+    const bits: string[] = [];
+    if (typeof pc === 'number' && pc > 0) bits.push(`${pc} package${pc === 1 ? '' : 's'}`);
+    if (typeof adl === 'number' && adl > 0) bits.push(`${humanizeDownloads(adl)} combined`);
+    const detail = bits.length ? ` (${bits.join(', ')})` : '';
+    // A single-package (or brand-new) author is a caution; an established one reassures.
+    checks.push({ level: typeof pc === 'number' && pc <= 1 ? 'warn' : 'ok', text: `Author: ${v.publisher}${detail}` });
+  }
+
   if (v.has_install_scripts) {
     const t = (v.install_script_types ?? []).filter(Boolean)[0];
     checks.push({ level: 'bad', text: t ? `Has ${t} script` : 'Has install scripts' });
@@ -67,6 +78,17 @@ export function buildChecks(v: Verdict): Check[] {
 
   const caps = (v.capabilities ?? []).filter(Boolean);
   checks.push(caps.length ? { level: 'warn', text: caps.join(', ') } : { level: 'ok', text: 'No system access' });
+
+  if (Array.isArray(v.dependencies)) {
+    const deps = v.dependencies;
+    if (deps.length === 0) {
+      checks.push({ level: 'ok', text: 'No dependencies' });
+    } else if (deps.length <= 5) {
+      checks.push({ level: 'ok', text: `${deps.length} dependenc${deps.length === 1 ? 'y' : 'ies'}: ${deps.join(', ')}` });
+    } else {
+      checks.push({ level: 'ok', text: `${deps.length} dependencies` });
+    }
+  }
 
   const mals = v.mal ?? [];
   if (mals.length) {
@@ -107,10 +129,39 @@ export function renderChecklist(v: Verdict): string[] {
   return out;
 }
 
-/** Full single-package output: the checklist plus a state-specific footer
+/** Word-wrap a paragraph to `width` columns (the narrative reads as prose). */
+function wrap(text: string, width = 76): string[] {
+  const lines: string[] = [];
+  let cur = '';
+  for (const word of text.split(/\s+/).filter(Boolean)) {
+    if (cur && cur.length + 1 + word.length > width) {
+      lines.push(cur);
+      cur = word;
+    } else {
+      cur = cur ? `${cur} ${word}` : word;
+    }
+  }
+  if (cur) lines.push(cur);
+  return lines;
+}
+
+/** Full single-package output: the LLM narrative as the headline (when present),
+ *  the checklist as the receipts, the GitHub link, and a state-specific footer
  *  (how to override on a stop; the malware warning + safe versions on a block). */
 export function renderVerdict(v: Verdict): string[] {
-  const out = renderChecklist(v);
+  const out = [`${mark(v.verdict)} ${v.package}@${v.version}`];
+
+  // The narrative is the judgment — show it first, in prose, so a glance decides.
+  if (v.summary) {
+    out.push('');
+    for (const l of wrap(v.summary)) out.push(`  ${l}`);
+    out.push('');
+  }
+
+  for (const c of buildChecks(v)) out.push(`  ${checkMark(c.level)} ${c.text}`);
+
+  if (v.github_repo) out.push(`  ${dim(`→ ${v.github_repo}`)}`);
+
   const action = decide(v);
   if (action === 'block') {
     const first = (v.mal ?? [])[0];

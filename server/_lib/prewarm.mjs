@@ -10,7 +10,8 @@
 import { fetchPackument } from './registry.mjs';
 import { computeMechanical } from './compute.mjs';
 import { readVerdict, writeVerdict } from './db.mjs';
-import { descriptionMatch } from './llm.mjs';
+import { summarize } from './llm.mjs';
+import { authorProfile } from './author.mjs';
 
 const DAY_MS = 86_400_000;
 
@@ -77,19 +78,19 @@ export async function prewarmSlice(sw, opts = {}) {
             now: new Date(now).toISOString(),
           });
           if (enrich) {
-            const m = await descriptionMatch(
-              sw,
-              {
-                name,
-                description: row.description,
-                capabilities: row.capabilities,
-                installScriptTypes: row.install_script_types,
-              },
-              { provider: llmProvider, model: llmModel },
-            );
-            if (m) {
-              row.description_match = m.description_match;
-              row.description_match_reason = m.description_match_reason;
+            // Author reputation is a key ingredient for the narrative (a low-
+            // download package from a prolific author reads very differently).
+            const author = row.publisher ? await authorProfile(row.publisher, { fetchImpl }) : null;
+            if (author) {
+              row.author_package_count = author.package_count;
+              row.author_total_downloads = author.combined_downloads;
+              row.author_first_publish = author.oldest_package_date;
+            }
+            // One LLM call → the human-readable narrative AND the match boolean.
+            const s = await summarize(sw, { ...row, author }, { provider: llmProvider, model: llmModel });
+            if (s) {
+              row.summary = s.summary;
+              if (s.description_match) row.description_match = s.description_match;
             }
           }
           await writeVerdict(sw, row);

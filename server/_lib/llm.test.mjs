@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildDescriptionMatchPrompt, parseMatchResponse, descriptionMatch } from './llm.mjs';
+import {
+  buildDescriptionMatchPrompt,
+  parseMatchResponse,
+  descriptionMatch,
+  buildSummaryPrompt,
+  summarize,
+} from './llm.mjs';
 
 test('buildDescriptionMatchPrompt — fills the spec template', () => {
   const { system, user } = buildDescriptionMatchPrompt({
@@ -76,4 +82,50 @@ test('descriptionMatch — deepseek omits response_schema (unsupported) + genero
   const sw2 = { ai: { chat: async (args) => { seen2 = args; return { parsed: { match: true, reason: 'ok' } }; } } };
   await descriptionMatch(sw2, { name: 'x', description: 'y', capabilities: ['fs'] }, { provider: 'openai', model: 'gpt-5.4-nano' });
   assert.ok(seen2.response_schema, 'openai gets response_schema');
+});
+
+test('buildSummaryPrompt — includes author reputation + every signal', () => {
+  const { system, user } = buildSummaryPrompt({
+    package: 'tiny-thing',
+    version: '0.1.0',
+    description: 'string utility',
+    weekly_downloads: 47,
+    author: { name: 'sindresorhus', package_count: 150, combined_downloads: 2_000_000, oldest_package_date: '2013-01-01' },
+    has_provenance: false,
+    github_repo: 'https://github.com/sindresorhus/tiny-thing',
+    has_github_tag: 1,
+    install_script_types: [],
+    is_minified: false,
+    capabilities: [],
+    mal: [],
+  });
+  assert.match(system, /SYNTHESIZE/);
+  assert.match(user, /Package: tiny-thing@0\.1\.0/);
+  assert.match(user, /sindresorhus — maintains 150 package\(s\), 2000000 combined/);
+  assert.match(user, /publishing since 2013-01-01/);
+  assert.match(user, /Weekly downloads: 47/);
+  assert.match(user, /Provenance attestation: no/);
+});
+
+test('summarize — returns narrative + match from parsed structured output', async () => {
+  let seen;
+  const sw = { ai: { chat: async (args) => { seen = args; return { parsed: { summary: 'Looks fine — reputable author.', match: true } }; } } };
+  const r = await summarize(sw, { package: 'p', version: '1', capabilities: [], mal: [] }, { provider: 'openai', model: 'gpt-5.4-mini' });
+  assert.equal(r.summary, 'Looks fine — reputable author.');
+  assert.equal(r.description_match, 'match');
+  assert.equal(seen.provider, 'openai');
+  assert.equal(seen.service_tier, 'flex', 'openai uses the flex tier');
+  assert.ok(seen.response_schema, 'openai gets response_schema');
+});
+
+test('summarize — falls back to parsing text JSON', async () => {
+  const sw = { ai: { chat: async () => ({ text: 'Here: {"summary":"Sketchy — new account, minified.","match":false}' }) } };
+  const r = await summarize(sw, { package: 'p', version: '1', capabilities: [], mal: [] });
+  assert.equal(r.summary, 'Sketchy — new account, minified.');
+  assert.equal(r.description_match, 'mismatch');
+});
+
+test('summarize — degrades to null on failure (never blocks)', async () => {
+  const sw = { ai: { chat: async () => { throw new Error('rate limited'); } } };
+  assert.equal(await summarize(sw, { package: 'p', version: '1', capabilities: [], mal: [] }), null);
 });

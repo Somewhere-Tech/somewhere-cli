@@ -54,6 +54,13 @@ export async function computeMechanical(name, version, opts = {}) {
   const repo = provenanceRepo(manifest || {});
   const tag = await hasGithubTag(repo, version, { fetchImpl, token: githubToken });
   const typo = nearestTyposquat(name, downloads, popular);
+  // Direct runtime dependencies — the attack surface a clean-looking package can
+  // still pull in (a bad actor's own malicious dep). Names only here; the full
+  // transitive verdict check is what `swpm install` does. Fed to the narrative.
+  const dependencies =
+    manifest.dependencies && typeof manifest.dependencies === 'object'
+      ? Object.keys(manifest.dependencies)
+      : [];
 
   const { verdict, verdict_signals } = computeVerdict({
     mal: [],
@@ -86,6 +93,7 @@ export async function computeMechanical(name, version, opts = {}) {
     publish_time: packument ? publishTime(packument, version) : null,
     publisher: manifest?._npmUser?.name ?? null,
     description: manifest?.description ?? null,
+    dependencies,
     description_match: null,
     description_match_reason: null,
     diff_review: null,
@@ -120,6 +128,7 @@ export function minimalRow(name, version, now) {
     publish_time: null,
     publisher: null,
     description: null,
+    dependencies: [],
     description_match: null,
     description_match_reason: null,
     diff_review: null,

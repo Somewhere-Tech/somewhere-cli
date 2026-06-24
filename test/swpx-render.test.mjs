@@ -207,3 +207,35 @@ test('renderTree — full tree summary (swpm install)', () => {
     ].join('\n'),
   );
 });
+
+test('renderVerdict — rich: narrative headline + author + dependencies + github link', () => {
+  const v = {
+    package: 'tiny-thing', version: '0.1.0', verdict: 'verified',
+    weekly_downloads: 47,
+    publisher: 'sindresorhus', author_package_count: 150, author_total_downloads: 2000000,
+    has_install_scripts: false, is_minified: false, capabilities: [], mal: [],
+    dependencies: ['escape-string-regexp'],
+    has_github_tag: 1, has_provenance: false,
+    github_repo: 'https://github.com/sindresorhus/tiny-thing',
+    summary: 'Small package (47 weekly downloads) but authored by sindresorhus who maintains 150 packages. No provenance here — common for their older packages. Readable, no system access.',
+    description_match: 'match',
+  };
+  const out = lines(renderVerdict(v));
+  assert.match(out, /authored by sindresorhus/); // narrative paragraph present
+  assert.match(out, /✓ Author: sindresorhus \(150 packages, 2M combined\)/);
+  assert.match(out, /✓ 1 dependency: escape-string-regexp/);
+  assert.match(out, /→ https:\/\/github\.com\/sindresorhus\/tiny-thing/);
+});
+
+test('buildChecks — single-package author is a caution (⚠), established is ok (✓)', () => {
+  const newbie = buildChecks({ package: 'x', version: '1', verdict: 'verified', publisher: 'newbie', author_package_count: 1 });
+  assert.ok(newbie.some((c) => c.level === 'warn' && /Author: newbie/.test(c.text)));
+  const estab = buildChecks({ package: 'x', version: '1', verdict: 'verified', publisher: 'sindresorhus', author_package_count: 150, author_total_downloads: 2000000 });
+  assert.ok(estab.some((c) => c.level === 'ok' && /Author: sindresorhus \(150 packages, 2M combined\)/.test(c.text)));
+});
+
+test('buildChecks — dependency row: none / few (named) / many (count)', () => {
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: [] }).some((c) => c.text === 'No dependencies'));
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: ['a', 'b'] }).some((c) => c.text === '2 dependencies: a, b'));
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: Array.from({ length: 9 }, (_, i) => 'd' + i) }).some((c) => c.text === '9 dependencies'));
+});

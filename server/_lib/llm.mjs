@@ -103,3 +103,89 @@ export async function descriptionMatch(sw, pkg, { provider = DEFAULT_PROVIDER, m
     return null; // PAID_API_NOT_ACTIVATED, rate limit, outage — degrade, never block
   }
 }
+
+// ---------------------------------------------------------------------------
+// Narrative summary (the human-readable judgment) — the primary enrich output.
+// One call returns BOTH the prose assessment AND the description-match boolean.
+// ---------------------------------------------------------------------------
+
+export const SUMMARY_PROVIDER = 'openai';
+export const SUMMARY_MODEL = 'gpt-5.4-mini';
+
+const SUMMARY_SYSTEM =
+  'You are a security-savvy engineer assessing an npm package for a developer about to install it. ' +
+  'Given the facts, write a 1-3 sentence plain-English judgment that SYNTHESIZES them — explain WHY the package is fine or concerning, the way a knowledgeable colleague would. Do NOT just restate the signals as a list. ' +
+  'Weigh author reputation against weak signals: a low-download package from a prolific, reputable author is usually fine ("no provenance — common for their older packages"); a low-download package from a brand-new single-package account that is minified and reaches for the network is a red flag. ' +
+  'Also weigh DEPENDENCY risk — a clean-looking package can pull in a sketchy or known-compromised dependency; if any dependency is notable (obscure, known-bad history, or oddly out of place for the package\'s purpose), name it. ' +
+  'Respond with exactly one JSON object: {"summary": "<the assessment>", "match": true|false} where match is whether the package\'s behavior matches its stated description.';
+
+const SUMMARY_SCHEMA = {
+  type: 'object',
+  properties: { summary: { type: 'string' }, match: { type: 'boolean' } },
+  required: ['summary', 'match'],
+  additionalProperties: false,
+};
+
+/** Build the {system, user} prompt for the narrative, feeding it every signal
+ *  (including author reputation) so it can reason like a colleague. */
+export function buildSummaryPrompt(s) {
+  const a = s.author;
+  const authorLine = a
+    ? `${a.name} — maintains ${a.package_count} package(s), ${a.combined_downloads} combined weekly downloads` +
+      (a.oldest_package_date ? `, publishing since ${String(a.oldest_package_date).slice(0, 10)}` : '')
+    : s.publisher || 'unknown';
+  const list = (arr) => (arr && arr.length ? arr.join(', ') : 'none');
+  const user = [
+    `Package: ${s.package}@${s.version}`,
+    `Description: "${s.description ?? ''}"`,
+    `Weekly downloads: ${s.weekly_downloads ?? 'unknown'}`,
+    `Author: ${authorLine}`,
+    `Provenance attestation: ${s.has_provenance ? 'yes' : 'no'}`,
+    `GitHub repo: ${s.github_repo || 'none'}${
+      s.has_github_tag === 1 ? ' (release tag present)' : s.has_github_tag === 0 ? ' (no release tag for this version)' : ''
+    }`,
+    `Install scripts: ${list(s.install_script_types)}`,
+    `Source: ${s.is_minified ? 'minified / unreadable' : 'readable'}`,
+    `Capabilities accessed: ${list(s.capabilities)}`,
+    `Dependencies (${(s.dependencies || []).length}): ${
+      s.dependencies && s.dependencies.length
+        ? s.dependencies.slice(0, 20).join(', ') + (s.dependencies.length > 20 ? ', …' : '')
+        : 'none'
+    }`,
+    `Known malware advisories: ${s.mal && s.mal.length ? s.mal.map((m) => m.id).join(', ') : 'none'}`,
+  ].join('\n');
+  return { system: SUMMARY_SYSTEM, user };
+}
+
+/** Generate the narrative + match for one package. Returns
+ *  { summary, description_match } or null on failure (degrade, never block).
+ *  Uses gpt-5.4-mini on the flex tier (~half price, fine for batch backfill). */
+export async function summarize(sw, signals, { provider = SUMMARY_PROVIDER, model = SUMMARY_MODEL, maxTokens = 600 } = {}) {
+  const { system, user } = buildSummaryPrompt(signals);
+  const req = { provider, model, system, messages: [{ role: 'user', content: user }], max_tokens: maxTokens };
+  if (SCHEMA_PROVIDERS.has(provider)) req.response_schema = SUMMARY_SCHEMA;
+  if (provider === 'openai') req.service_tier = 'flex';
+  try {
+    const r = await sw.ai.chat(req);
+    let obj = r?.parsed;
+    if (!obj || typeof obj.summary !== 'string') {
+      const text = typeof r === 'string' ? r : r?.text ?? '';
+      const start = text.indexOf('{');
+      const end = text.lastIndexOf('}');
+      if (start !== -1 && end > start) {
+        try {
+          obj = JSON.parse(text.slice(start, end + 1));
+        } catch {
+          obj = null;
+        }
+      }
+    }
+    if (!obj || typeof obj.summary !== 'string') return null;
+    return {
+      summary: obj.summary.trim(),
+      description_match: typeof obj.match === 'boolean' ? (obj.match ? 'match' : 'mismatch') : null,
+    };
+  } catch {
+    return null;
+  }
+}

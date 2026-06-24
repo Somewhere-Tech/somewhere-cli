@@ -60,6 +60,14 @@ export interface Verdict {
   diff_from_version?: string | null;
   /** Live MAL advisories for this version (uncached). Empty/absent = none. */
   mal?: MalAdvisory[];
+  /** Direct runtime dependency names (from the manifest). */
+  dependencies?: string[];
+  /** The LLM's human-readable judgment (enrich backfill). */
+  summary?: string | null;
+  /** Author reputation ingredients (enrich backfill) — feed the narrative. */
+  author_package_count?: number | null;
+  author_total_downloads?: number | null;
+  author_first_publish?: string | null;
   computed_at?: string;
 }
 
