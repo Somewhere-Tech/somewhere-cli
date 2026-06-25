@@ -8,6 +8,7 @@
  *  rather than an error, because a verdict outage must never block an install. */
 
 import { resolveVerdict } from '../../../_lib/resolve.mjs';
+import { checkRateLimit, clientIp } from '../../../_lib/ratelimit.mjs';
 
 export default async function (req, sw) {
   const segments = new URL(req.url).pathname.split('/').filter(Boolean); // [api, verdict, pkg, version]
@@ -17,6 +18,14 @@ export default async function (req, sw) {
     return Response.json(
       { ok: false, error: 'BAD_REQUEST', message: 'package and version are required' },
       { status: 400 },
+    );
+  }
+
+  const rl = await checkRateLimit(sw, `v:${clientIp(req)}`);
+  if (!rl.ok) {
+    return Response.json(
+      { ok: false, error: 'RATE_LIMITED', message: 'Too many requests — try again shortly.' },
+      { status: 429, headers: { 'retry-after': String(Math.ceil(rl.retryAfterMs / 1000)) } },
     );
   }
 

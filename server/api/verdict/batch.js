@@ -8,11 +8,20 @@
  *  for a post-prewarm cache is mostly hits. */
 
 import { resolveVerdict } from '../../_lib/resolve.mjs';
+import { checkRateLimit, clientIp } from '../../_lib/ratelimit.mjs';
 
 const MAX_PACKAGES = 200;
 const CONCURRENCY = 8;
 
 export default async function (req, sw) {
+  const rl = await checkRateLimit(sw, `v:${clientIp(req)}`);
+  if (!rl.ok) {
+    return Response.json(
+      { ok: false, error: 'RATE_LIMITED', message: 'Too many requests — try again shortly.' },
+      { status: 429, headers: { 'retry-after': String(Math.ceil(rl.retryAfterMs / 1000)) } },
+    );
+  }
+
   let body;
   try {
     body = await req.json();
