@@ -81,41 +81,7 @@ export async function prewarmSlice(sw, opts = {}) {
             now: new Date(now).toISOString(),
           });
           if (enrich) {
-            const history = await queryAdvisoryHistory(name, { fetchImpl });
-            row.known_cves = history.filter((h) => h.kind === 'CVE').length;
-            row.compromised_history = history
-              .filter((h) => h.kind === 'MAL')
-              .map(({ id, published }) => ({ id, published }));
-
-            const deps = await checkDependencies(row.dependencies, {
-              resolveVersion: resolveDependencyVersion,
-              readVerdict,
-              sw,
-              fetchImpl,
-            });
-            row.dependency_flags = deps.flagged;
-            const cascaded = cascadeVerdict(row.verdict, deps.flagged.map((d) => d.verdict));
-            if (cascaded !== row.verdict) {
-              row.verdict = cascaded;
-              const signal = deps.flagged.some((d) => d.verdict === 'blocked')
-                ? 'dependency_blocked'
-                : 'dependency_flagged';
-              row.verdict_signals = [...new Set([...(row.verdict_signals ?? []), signal])];
-            }
-            // Author reputation is a key ingredient for the narrative (a low-
-            // download package from a prolific author reads very differently).
-            const author = row.publisher ? await authorProfile(row.publisher, { fetchImpl }) : null;
-            if (author) {
-              row.author_package_count = author.package_count;
-              row.author_total_downloads = author.combined_downloads;
-              row.author_first_publish = author.oldest_package_date;
-            }
-            // One LLM call → the human-readable narrative AND the match boolean.
-            const s = await summarize(sw, { ...row, author }, { provider: llmProvider, model: llmModel });
-            if (s) {
-              row.summary = s.summary;
-              if (s.description_match) row.description_match = s.description_match;
-            }
+            await enrichRow(sw, row, { fetchImpl, llmProvider, llmModel });
           }
           await writeVerdict(sw, row);
           written++;
@@ -136,4 +102,72 @@ export async function prewarmSlice(sw, opts = {}) {
     nextOffset: offset + limit,
     remaining: Math.max(0, names.length - (offset + limit)),
   };
+}
+
+/** The enrich pass for one already-computed row: advisory history + CVE count,
+ *  dependency-tree check + verdict cascade, author reputation, and the LLM
+ *  narrative. Mutates and returns `row`. Shared by the bulk pre-warm and the
+ *  lazy on-demand fill (enrichPending). */
+export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmModel } = {}) {
+  const history = await queryAdvisoryHistory(row.package, { fetchImpl });
+  row.known_cves = history.filter((h) => h.kind === 'CVE').length;
+  row.compromised_history = history.filter((h) => h.kind === 'MAL').map(({ id, published }) => ({ id, published }));
+
+  const deps = await checkDependencies(row.dependencies, {
+    resolveVersion: resolveDependencyVersion,
+    readVerdict,
+    sw,
+    fetchImpl,
+  });
+  row.dependency_flags = deps.flagged;
+  const cascaded = cascadeVerdict(row.verdict, deps.flagged.map((d) => d.verdict));
+  if (cascaded !== row.verdict) {
+    row.verdict = cascaded;
+    const signal = deps.flagged.some((d) => d.verdict === 'blocked') ? 'dependency_blocked' : 'dependency_flagged';
+    row.verdict_signals = [...new Set([...(row.verdict_signals ?? []), signal])];
+  }
+
+  const author = row.publisher ? await authorProfile(row.publisher, { fetchImpl }) : null;
+  if (author) {
+    row.author_package_count = author.package_count;
+    row.author_total_downloads = author.combined_downloads;
+    row.author_first_publish = author.oldest_package_date;
+  }
+
+  const s = await summarize(sw, { ...row, author }, { provider: llmProvider, model: llmModel });
+  if (s) {
+    row.summary = s.summary;
+    if (s.description_match) row.description_match = s.description_match;
+  }
+  return row;
+}
+
+/** Lazy "do the ones we don't have": enrich cache rows that were computed on a
+ *  miss but have no narrative yet (summary IS NULL), newest first. Demand-driven
+ *  — it fills exactly what users actually checked. Bounded (limit) to fit one
+ *  request's budget; a cron calls it repeatedly. */
+export async function enrichPending(sw, { limit = 3, llmProvider, llmModel, fetchImpl = fetch } = {}) {
+  const capped = Math.min(Math.max(1, limit), 10);
+  const r = await sw.db.query(
+    'SELECT package, version FROM verdicts WHERE summary IS NULL ORDER BY computed_at DESC LIMIT ?',
+    [capped],
+  );
+  const rows = Array.isArray(r?.data) ? r.data : [];
+  let enriched = 0;
+  let errors = 0;
+  for (const pv of rows) {
+    try {
+      const row = await readVerdict(sw, pv.package, pv.version);
+      if (!row) {
+        errors++;
+        continue;
+      }
+      await enrichRow(sw, row, { fetchImpl, llmProvider, llmModel });
+      await writeVerdict(sw, row);
+      enriched++;
+    } catch {
+      errors++;
+    }
+  }
+  return { pending: rows.length, enriched, errors };
 }

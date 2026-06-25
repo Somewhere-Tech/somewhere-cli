@@ -7,7 +7,7 @@
  *  list comes from sw.env.TOP_PACKAGES_URL (JSON list of names or
  *  {name,downloads}); a small built-in seed validates the pipeline first. */
 
-import { prewarmSlice, normalizeNames } from '../_lib/prewarm.mjs';
+import { prewarmSlice, enrichPending, normalizeNames } from '../_lib/prewarm.mjs';
 
 const SEED = [
   'react', 'react-dom', 'lodash', 'axios', 'express', 'chalk', 'commander', 'semver',
@@ -28,6 +28,18 @@ export default async function (req, sw) {
   }
 
   const url = new URL(req.url);
+
+  // Lazy "do the ones we don't have": enrich cache-miss rows that have no
+  // narrative yet. Demand-driven; a cron drives it. (POST /api/prewarm?pending=1)
+  if (url.searchParams.get('pending') === '1') {
+    const summary = await enrichPending(sw, {
+      limit: parseInt(url.searchParams.get('limit') ?? '3', 10) || 3,
+      llmProvider: sw.env?.PREWARM_PROVIDER,
+      llmModel: sw.env?.PREWARM_MODEL,
+    });
+    return Response.json({ ok: true, data: { mode: 'pending', ...summary } });
+  }
+
   const offset = Math.max(0, parseInt(url.searchParams.get('offset') ?? '0', 10) || 0);
   const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50));
   const enrich = url.searchParams.get('enrich') === '1';
