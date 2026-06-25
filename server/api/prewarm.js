@@ -21,8 +21,15 @@ function bearer(req) {
 }
 
 export default async function (req, sw) {
-  // Accept the documented Bearer header; also tolerate X-Prewarm-Key for convenience.
-  const presented = bearer(req) || req.headers.get('x-prewarm-key');
+  // The body carries the key for the cron path (cron_create can't set headers).
+  let body = {};
+  try {
+    body = await req.json();
+  } catch {
+    body = {};
+  }
+  // Accept Bearer header, X-Prewarm-Key header, or body.key (cron).
+  const presented = bearer(req) || req.headers.get('x-prewarm-key') || body?.key;
   if (!sw.env?.PREWARM_KEY || presented !== sw.env.PREWARM_KEY) {
     return Response.json({ ok: false, error: 'FORBIDDEN' }, { status: 403 });
   }
