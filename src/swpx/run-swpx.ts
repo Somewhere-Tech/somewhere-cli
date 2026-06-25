@@ -16,8 +16,9 @@
 
 import { parseSpec } from './registry.js';
 import { decide, renderVerdict } from './render.js';
-import { bindDeps, msg, type RunDeps } from './run-common.js';
-import { dim } from '../lib/output.js';
+import { bindDeps, type RunDeps } from './run-common.js';
+import { resolveEnforce, stripEnforceFlags, loudUnavailable, refused } from './enforce.js';
+import { VerdictUnavailable } from './verdict-client.js';
 
 export interface SwpxOutcome {
   exitCode: number;
@@ -26,35 +27,46 @@ export interface SwpxOutcome {
 
 export async function runSwpx(args: string[], deps: RunDeps = {}): Promise<SwpxOutcome> {
   const d = bindDeps(deps);
+  const enforce = deps.enforce ?? resolveEnforce(args);
+  const passthrough = stripEnforceFlags(args);
 
   // The package is the first non-flag arg, so `swpx -y create-next-app` works.
-  const pkgArg = args.find((a) => !a.startsWith('-'));
+  const pkgArg = passthrough.find((a) => !a.startsWith('-'));
   if (!pkgArg) {
     d.errLog('Usage: swpx <package> [args...]');
     return { exitCode: 1, action: 'stopped' };
   }
   const spec = parseSpec(pkgArg);
 
+  // Couldn't verify → LOUD warning (never silent), then fall back (default) OR
+  // refuse (enforce / fail-closed).
+  const failOpen = async (rateLimited: boolean): Promise<SwpxOutcome> => {
+    loudUnavailable(d.errLog, spec.name, rateLimited);
+    if (enforce) {
+      refused(d.errLog, spec.name, 'npx');
+      return { exitCode: 1, action: 'blocked' };
+    }
+    return { exitCode: await d.runReal('npx', passthrough), action: 'fallback' };
+  };
+
   let version: string;
   try {
     version = await d.resolveVersion(spec.name, spec.version);
-  } catch (err) {
-    d.errLog(dim(`swpx: couldn't resolve ${spec.name} (${msg(err)}) — running npx unchecked`));
-    return { exitCode: await d.runReal('npx', args), action: 'fallback' };
+  } catch {
+    return failOpen(false);
   }
 
   let verdict;
   try {
     verdict = await d.getVerdict(spec.name, version);
-  } catch {
-    d.errLog(dim('swpx: verdict service unavailable — running npx unchecked'));
-    return { exitCode: await d.runReal('npx', args), action: 'fallback' };
+  } catch (err) {
+    return failOpen(err instanceof VerdictUnavailable && err.rateLimited);
   }
 
   const action = decide(verdict);
   for (const l of renderVerdict(verdict)) d.errLog(l);
   if (action === 'run') {
-    return { exitCode: await d.runReal('npx', args), action: 'ran' };
+    return { exitCode: await d.runReal('npx', passthrough), action: 'ran' };
   }
   // unverified/suspicious and blocked both stop swpx; only the exit reason differs.
   return { exitCode: 1, action: action === 'block' ? 'blocked' : 'stopped' };

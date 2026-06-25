@@ -9,6 +9,10 @@ export interface CliConfig {
     email: string;
     username: string;
   };
+  /** When true, swpx/swpm fail CLOSED — refuse to run/install if the verdict
+   *  can't be obtained, instead of falling back to the real tool. Overridable
+   *  per-invocation by --enforce / --no-enforce / SWPX_ENFORCE. */
+  enforce?: boolean;
 }
 
 export interface ProjectConfig {

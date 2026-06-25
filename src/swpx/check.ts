@@ -10,8 +10,9 @@
 import { parseSpec } from './registry.js';
 import { renderSingle, toJsonVerdict } from './render.js';
 import { bindDeps, msg, type RunDeps } from './run-common.js';
+import { VerdictUnavailable } from './verdict-client.js';
 import type { VerdictLevel } from './types.js';
-import { dim } from '../lib/output.js';
+import { yellow } from '../lib/output.js';
 
 function exitForLevel(level: VerdictLevel): number {
   if (level === 'verified') return 0;
@@ -42,8 +43,13 @@ export async function runCheck(
   let verdict;
   try {
     verdict = await d.getVerdict(spec.name, version);
-  } catch {
-    d.errLog(dim(`Verdict service unavailable for ${spec.name}@${version}.`));
+  } catch (err) {
+    const rl = err instanceof VerdictUnavailable && err.rateLimited;
+    d.errLog(
+      rl
+        ? `${yellow('⚠')} Rate limited — couldn't check ${spec.name}. Wait a moment and retry.`
+        : `${yellow('⚠')} Could not verify ${spec.name}@${version} — the verdict service was unreachable.`,
+    );
     return 3;
   }
 

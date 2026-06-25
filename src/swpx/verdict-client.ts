@@ -27,9 +27,12 @@ const defaultFetch: FetchLike = (url, init) =>
  *  non-2xx, or unparseable body. The command layer treats it as "fall back to
  *  the real tool", never as "block". */
 export class VerdictUnavailable extends Error {
-  constructor(message: string) {
+  /** True when the service answered 429 — a throttle, not an outage/tampering. */
+  readonly rateLimited: boolean;
+  constructor(message: string, rateLimited = false) {
     super(message);
     this.name = 'VerdictUnavailable';
+    this.rateLimited = rateLimited;
   }
 }
 
@@ -64,7 +67,7 @@ export async function getVerdict(
   } catch (err) {
     throw new VerdictUnavailable(err instanceof Error ? err.message : String(err));
   }
-  if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`);
+  if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`, res.status === 429);
   let body: unknown;
   try {
     body = await res.json();
@@ -100,7 +103,7 @@ export async function getVerdictBatch(
   } catch (err) {
     throw new VerdictUnavailable(err instanceof Error ? err.message : String(err));
   }
-  if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`);
+  if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`, res.status === 429);
   let body: unknown;
   try {
     body = await res.json();

@@ -322,3 +322,62 @@ test('check — no arg exits 3 with usage', async () => {
   assert.equal(code, 3);
   assert.match(cap.errText(), /Usage: somewhere check/);
 });
+
+// ---------------- enforce / loud fail-open ----------------
+
+test('swpx — enforce + unavailable REFUSES (no run, exit 1, loud)', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpx(['foo'], {
+    ...cap, enforce: true,
+    resolveVersion: async () => '1.0.0',
+    getVerdict: async () => { throw new Error('down'); },
+    runReal,
+  });
+  assert.equal(r.action, 'blocked');
+  assert.equal(r.exitCode, 1);
+  assert.equal(runReal.calls.length, 0);
+  assert.match(cap.errText(), /COULD NOT VERIFY foo/);
+  assert.match(cap.errText(), /Refusing/);
+});
+
+test('swpx — default + unavailable falls back with a LOUD warning', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpx(['foo'], {
+    ...cap, enforce: false,
+    resolveVersion: async () => '1.0.0',
+    getVerdict: async () => { throw new Error('down'); },
+    runReal,
+  });
+  assert.equal(r.action, 'fallback');
+  assert.equal(runReal.calls.length, 1);
+  assert.match(cap.errText(), /COULD NOT VERIFY foo/);
+});
+
+test('swpx — --enforce is stripped from the npx passthrough', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpx(['--enforce', 'create-next-app', 'my-app'], {
+    ...cap,
+    resolveVersion: async () => '1',
+    getVerdict: async () => ({ package: 'create-next-app', version: '1', verdict: 'verified' }),
+    runReal,
+  });
+  assert.equal(r.action, 'ran');
+  assert.deepEqual(runReal.calls, [{ cmd: 'npx', args: ['create-next-app', 'my-app'] }]);
+});
+
+test('swpm — enforce + tree-unavailable refuses (no npm)', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpm(['install'], {
+    ...cap, enforce: true,
+    readTree: () => ({ directNames: ['x'], ranges: {}, locked: [{ package: 'x', version: '1' }] }),
+    getVerdictBatch: async () => { throw new Error('down'); },
+    runReal,
+  });
+  assert.equal(r.action, 'blocked');
+  assert.equal(r.exitCode, 1);
+  assert.equal(runReal.calls.length, 0);
+});

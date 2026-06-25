@@ -21,6 +21,9 @@ export interface RunDeps {
   log?: (s: string) => void;
   /** stderr — verdict messaging + warnings, so wrapper noise stays off stdout. */
   errLog?: (s: string) => void;
+  /** Test override for the fail-closed policy (production resolves it from
+   *  flags/env/config via enforce.ts). */
+  enforce?: boolean;
 }
 
 export interface BoundDeps {
