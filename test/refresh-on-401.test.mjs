@@ -81,17 +81,27 @@ test('401 API_KEY_EXPIRED refreshes the key, persists it, and retries once', asy
   assert.equal(cfg.refresh_token, 'smtr_new');
 });
 
-test('no refresh token → original API_KEY_EXPIRED propagates (no refresh attempt)', async () => {
+test('expired key + no refresh token (old-format config) → clear re-login error, not a bare 401', async () => {
   mode = 'happy';
   requests.length = 0;
-  seedConfig('smt_old'); // no refresh_token
+  seedConfig('smt_old'); // old-format config: { token, user }, no refresh_token
 
   const client = new ApiClient('smt_old');
   await assert.rejects(
     () => client.call('GET', '/whoami'),
-    (err) => err instanceof CliApiError && err.code === 'API_KEY_EXPIRED',
+    (err) => {
+      assert.ok(err instanceof CliApiError, 'should be a CliApiError');
+      // The bare API_KEY_EXPIRED 401 must NOT leak through — that's the bug: it
+      // reaches the agent down the stdio-MCP path with no hint how to fix it.
+      assert.notEqual(err.code, 'API_KEY_EXPIRED');
+      // A clear, actionable re-login message must reach the caller (and thus any
+      // surface that serializes err.message), naming the cause + the one-line fix.
+      assert.match(err.message, /somewhere login/);
+      assert.match(err.message, /refresh token|old login/i);
+      return true;
+    },
   );
-  // Never hit the refresh endpoint.
+  // No refresh token to send → never hit the refresh endpoint.
   assert.deepEqual(requests.map((r) => r.url), ['/whoami']);
 });
 

@@ -50,8 +50,9 @@ export class ApiClient {
    *  cli-pair access key timed out — and with a stored refresh token, this
    *  swaps in a fresh access key via POST /v1/keys/cli-pair/refresh and
    *  retries ONCE, so a long-lived agent session never logs itself out
-   *  (tsk_3642f3c4). Without a refresh token (older login flows) the original
-   *  401 propagates unchanged. */
+   *  (tsk_3642f3c4). Without a refresh token (older login flows) refreshAccessKey
+   *  throws a clear SESSION_EXPIRED "run `somewhere login`" error rather than
+   *  letting the opaque 401 propagate (tsk_8ba2113d). */
   async call<T = unknown>(
     method: string,
     path: string,
@@ -64,7 +65,11 @@ export class ApiClient {
     } catch (err) {
       if (!(err instanceof CliApiError) || err.code !== 'API_KEY_EXPIRED') throw err;
       const refreshed = await this.refreshAccessKey();
-      if (!refreshed) throw err; // no refresh token, or refresh failed loudly
+      // refreshAccessKey now THROWS a clear re-login error when it can't refresh
+      // (no refresh token, or a dead one); a false return is only the rare
+      // malformed-refresh-response case, where the original expired-key error is
+      // the most honest thing to surface.
+      if (!refreshed) throw err;
       // Retry exactly once with the new key. A second API_KEY_EXPIRED here is
       // genuine — let it propagate rather than loop.
       return await this.request<T>(method, path, body, query, opts);
@@ -72,15 +77,34 @@ export class ApiClient {
   }
 
   /** Exchange the stored cli-pair refresh token for a fresh access key and
-   *  persist both. Returns true if the access key was swapped in. Returns
-   *  false (without throwing) when there is no refresh token to use — the
-   *  caller then surfaces the original API_KEY_EXPIRED. Throws a clear
-   *  CliApiError when the refresh token itself is expired/revoked, so the user
-   *  is told to re-login rather than seeing a bare "expired key" loop. */
+   *  persist both. Returns true if the access key was swapped in. Throws a
+   *  clear SESSION_EXPIRED CliApiError ("run `somewhere login`") when it can't
+   *  refresh — either there's no refresh token (old-format config) or the
+   *  refresh token itself is expired/revoked — so the user is told the cause +
+   *  the fix instead of seeing a bare expired-key 401. Returns false only for a
+   *  malformed refresh response, where the caller surfaces the original
+   *  API_KEY_EXPIRED. */
   private async refreshAccessKey(): Promise<boolean> {
     const config = loadConfig();
     const refreshToken = config?.refresh_token;
-    if (!refreshToken) return false;
+    if (!refreshToken) {
+      // We only get here AFTER an API_KEY_EXPIRED — so the access key is dead and
+      // there's no refresh token to renew it (an old-format config written before
+      // the refresh flow: { token, user }, no refresh_token). Returning false here
+      // used to let the bare API_KEY_EXPIRED 401 propagate, which down the
+      // stdio-MCP path reached the agent as an opaque "(HTTP 401)" with no hint
+      // that `somewhere login` fixes it for good — so the user re-paired every
+      // ~24h without knowing why. Surface the cause + the one-line fix instead
+      // (tsk_8ba2113d). Same SESSION_EXPIRED contract as the dead-refresh-token
+      // case below: both mean "re-login required".
+      throw new CliApiError(
+        'SESSION_EXPIRED',
+        'Your somewhere session expired and there is no refresh token saved ' +
+          '(old login format). Run `somewhere login` to sign in again — that ' +
+          'upgrades your config so sessions refresh automatically from now on.',
+        401,
+      );
+    }
 
     let pair: { key?: string; refresh_token?: string };
     try {
