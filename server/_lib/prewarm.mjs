@@ -7,7 +7,7 @@
  *  paid description-match backfill — that spends budget, so it's opt-in and gated
  *  by the caller (the founder, in the morning). sw + fetch injected for tests. */
 
-import { fetchPackument } from './registry.mjs';
+import { fetchPackument, fetchManifest, previousVersion } from './registry.mjs';
 import { computeMechanical } from './compute.mjs';
 import { readVerdict, writeVerdict } from './db.mjs';
 import { summarize } from './llm.mjs';
@@ -15,6 +15,7 @@ import { authorProfile } from './author.mjs';
 import { queryAdvisoryHistory } from './history.mjs';
 import { checkDependencies, resolveVersion as resolveDependencyVersion } from './dep-tree.mjs';
 import { cascadeVerdict } from './engine.mjs';
+import { repoMeta } from './github.mjs';
 
 const DAY_MS = 86_400_000;
 
@@ -108,7 +109,7 @@ export async function prewarmSlice(sw, opts = {}) {
  *  dependency-tree check + verdict cascade, author reputation, and the LLM
  *  narrative. Mutates and returns `row`. Shared by the bulk pre-warm and the
  *  lazy on-demand fill (enrichPending). */
-export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmModel } = {}) {
+export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmModel, githubToken } = {}) {
   const history = await queryAdvisoryHistory(row.package, { fetchImpl });
   row.known_cves = history.filter((h) => h.kind === 'CVE').length;
   row.compromised_history = history.filter((h) => h.kind === 'MAL').map(({ id, published }) => ({ id, published }));
@@ -120,6 +121,8 @@ export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmMo
     fetchImpl,
   });
   row.dependency_flags = deps.flagged;
+  row.dep_verified = deps.verified;
+  row.dep_unknown = deps.unknown;
   const cascaded = cascadeVerdict(row.verdict, deps.flagged.map((d) => d.verdict));
   if (cascaded !== row.verdict) {
     row.verdict = cascaded;
@@ -134,11 +137,45 @@ export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmMo
     row.author_first_publish = author.oldest_package_date;
   }
 
+  // The narrative is the PRIMARY enrich output — run it BEFORE the optional
+  // metadata fetches below, so its flex-tier LLM call (which can queue) isn't
+  // starved of the request's time budget by the extra GitHub/registry round-trips.
   const s = await summarize(sw, { ...row, author }, { provider: llmProvider, model: llmModel });
   if (s) {
     row.summary = s.summary;
     if (s.description_match) row.description_match = s.description_match;
   }
+
+  // Maintainer change: who published THIS version vs the previous one. A new
+  // publisher on an established package is a classic account-takeover tell.
+  try {
+    const pack = await fetchPackument(row.package, { fetchImpl });
+    const prev = previousVersion(pack, row.version);
+    if (prev && row.publisher) {
+      const pm = await fetchManifest(row.package, prev, { fetchImpl }).catch(() => null);
+      const prevPub = pm?._npmUser?.name ?? null;
+      if (prevPub) {
+        row.previous_publisher = prevPub;
+        row.maintainer_changed = prevPub !== row.publisher;
+      }
+    }
+  } catch {
+    // leave maintainer fields null — a missing signal, not a negative one
+  }
+
+  // Repo maintenance: archived / last push / open issues. A hijacked or dead
+  // package often points at an archived or long-abandoned repo.
+  try {
+    const meta = await repoMeta(row.github_repo, { fetchImpl, token: githubToken });
+    if (meta) {
+      row.repo_archived = meta.archived;
+      row.repo_last_commit = meta.last_commit;
+      row.repo_open_issues = meta.open_issues;
+    }
+  } catch {
+    // leave maintenance fields null
+  }
+
   return row;
 }
 

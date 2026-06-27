@@ -39,8 +39,12 @@ export async function checkDependencies(deps, opts = {}) {
     .slice(0, 50);
 
   let checked = 0;
+  let verified = 0;
   const flagged = [];
-  if (typeof readVerdict !== 'function') return { checked, flagged };
+  const total = names.length;
+  if (typeof readVerdict !== 'function') {
+    return { checked, total, verified: 0, unverified: 0, unknown: total, flagged };
+  }
 
   for (const name of names) {
     let version;
@@ -59,10 +63,15 @@ export async function checkDependencies(deps, opts = {}) {
     } catch {
       row = null;
     }
-    if (row?.verdict && row.verdict !== 'verified') {
+    if (row?.verdict === 'verified') {
+      verified++;
+    } else if (row?.verdict) {
       flagged.push({ name, version, verdict: row.verdict });
     }
+    // no row, or unresolved → "unknown" (not in cache yet); counted at the end
   }
 
-  return { checked, flagged };
+  const unverified = flagged.length;
+  const unknown = total - verified - unverified;
+  return { checked, total, verified, unverified, unknown, flagged };
 }

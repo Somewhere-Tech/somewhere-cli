@@ -44,3 +44,32 @@ export async function hasGithubTag(repoUrl, version, { fetchImpl = fetch, token 
   }
   return 0;
 }
+
+/** Repo maintenance signals: is it archived, when was it last pushed (a proxy for
+ *  "last commit"), and how many issues are open. A hijacked/abandoned package
+ *  often points at an archived or long-dead repo. Returns null on no/non-GitHub
+ *  repo or any API error — a missing signal must not read as a negative one. */
+export async function repoMeta(repoUrl, { fetchImpl = fetch, token } = {}) {
+  const slug = parseRepoSlug(repoUrl);
+  if (!slug) return null;
+  const headers = { accept: 'application/vnd.github+json', 'user-agent': 'swpx-verdict' };
+  if (token) headers.authorization = `Bearer ${token}`;
+  let res;
+  try {
+    res = await fetchImpl(`https://api.github.com/repos/${slug.owner}/${slug.repo}`, { headers });
+  } catch {
+    return null;
+  }
+  if (res.status !== 200) return null;
+  let j;
+  try {
+    j = await res.json();
+  } catch {
+    return null;
+  }
+  return {
+    archived: !!j.archived,
+    last_commit: typeof j.pushed_at === 'string' ? j.pushed_at : null,
+    open_issues: typeof j.open_issues_count === 'number' ? j.open_issues_count : null,
+  };
+}

@@ -14,6 +14,8 @@ export function rowToVerdict(row) {
     }
   };
   const intOrNull = (x) => (x === null || x === undefined ? null : Number(x));
+  let meta = {};
+  try { meta = JSON.parse(row.metadata) || {}; } catch { /* null / no metadata column yet */ }
   return {
     package: row.package,
     version: row.version,
@@ -47,6 +49,15 @@ export function rowToVerdict(row) {
     known_cves: intOrNull(row.known_cves) ?? 0,
     compromised_history: json(row.compromised_history) ?? [],
     dependency_flags: json(row.dependency_flags) ?? [],
+    license: meta.license ?? null,
+    publisher_repo_match: meta.publisher_repo_match ?? null,
+    maintainer_changed: meta.maintainer_changed ?? null,
+    previous_publisher: meta.previous_publisher ?? null,
+    repo_archived: meta.repo_archived ?? null,
+    repo_last_commit: meta.repo_last_commit ?? null,
+    repo_open_issues: meta.repo_open_issues ?? null,
+    dep_verified: meta.dep_verified ?? null,
+    dep_unknown: meta.dep_unknown ?? null,
     computed_at: row.computed_at,
   };
 }
@@ -59,7 +70,7 @@ const INSERT_COLUMNS = [
   'description_match', 'description_match_reason', 'diff_review', 'diff_review_reason',
   'diff_from_version', 'weekly_downloads', 'verdict', 'verdict_signals',
   'summary', 'author_package_count', 'author_total_downloads', 'author_first_publish', 'dependencies',
-  'known_cves', 'compromised_history', 'dependency_flags',
+  'known_cves', 'compromised_history', 'dependency_flags', 'metadata',
 ];
 
 const INSERT_SQL = `INSERT OR REPLACE INTO verdicts
@@ -104,6 +115,17 @@ export function verdictToParams(v) {
     v.known_cves ?? 0,
     jb(v.compromised_history),
     jb(v.dependency_flags),
+    JSON.stringify({
+      license: v.license ?? null,
+      publisher_repo_match: v.publisher_repo_match ?? null,
+      maintainer_changed: v.maintainer_changed ?? null,
+      previous_publisher: v.previous_publisher ?? null,
+      repo_archived: v.repo_archived ?? null,
+      repo_last_commit: v.repo_last_commit ?? null,
+      repo_open_issues: v.repo_open_issues ?? null,
+      dep_verified: v.dep_verified ?? null,
+      dep_unknown: v.dep_unknown ?? null,
+    }),
   ];
 }
 
@@ -113,6 +135,21 @@ export async function readVerdict(sw, name, version) {
   return row ? rowToVerdict(row) : null;
 }
 
+let schemaEnsured = false;
+/** Add the `metadata` JSON column on the first write per worker instance — a
+ *  no-op once it exists (the ALTER errors on a duplicate column, which we
+ *  swallow). Lets the new signal columns ship without a separate migration. */
+async function ensureSchema(sw) {
+  if (schemaEnsured) return;
+  schemaEnsured = true;
+  try {
+    await sw.db.query('ALTER TABLE verdicts ADD COLUMN metadata TEXT');
+  } catch {
+    // column already exists, or DDL not permitted — writes degrade, never block
+  }
+}
+
 export async function writeVerdict(sw, v) {
+  await ensureSchema(sw);
   await sw.db.query(INSERT_SQL, verdictToParams(v));
 }

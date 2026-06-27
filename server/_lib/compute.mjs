@@ -17,6 +17,7 @@ import {
   fetchEntrySource,
   weeklyDownloads,
   publishTime,
+  licenseOf,
 } from './registry.mjs';
 import { hasGithubTag } from './github.mjs';
 import { detectCapabilities } from './checks/capabilities.mjs';
@@ -103,6 +104,15 @@ export async function computeMechanical(name, version, opts = {}) {
     known_cves: 0,
     compromised_history: [],
     dependency_flags: [],
+    license: licenseOf(manifest),
+    publisher_repo_match: provenance ? 'proven' : 'unverified',
+    maintainer_changed: null,
+    previous_publisher: null,
+    repo_archived: null,
+    repo_last_commit: null,
+    repo_open_issues: null,
+    dep_verified: null,
+    dep_unknown: null,
     computed_at: now ?? new Date().toISOString(),
   };
 }
@@ -141,6 +151,15 @@ export function minimalRow(name, version, now) {
     known_cves: 0,
     compromised_history: [],
     dependency_flags: [],
+    license: null,
+    publisher_repo_match: null,
+    maintainer_changed: null,
+    previous_publisher: null,
+    repo_archived: null,
+    repo_last_commit: null,
+    repo_open_issues: null,
+    dep_verified: null,
+    dep_unknown: null,
     computed_at: now ?? new Date().toISOString(),
   };
 }

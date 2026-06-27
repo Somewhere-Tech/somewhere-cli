@@ -105,3 +105,29 @@ export function publishTime(packument, version) {
   const t = packument?.time;
   return t && typeof t[version] === 'string' ? t[version] : null;
 }
+
+/** The version published immediately BEFORE `version`, by publish time — used to
+ *  detect a maintainer change (the new publisher vs the prior one). Ignores the
+ *  synthetic `created`/`modified` keys. Returns null if `version` is the first
+ *  release or the time map is unusable. */
+export function previousVersion(packument, version) {
+  const time = packument?.time;
+  if (!time || typeof time !== 'object') return null;
+  const entries = Object.entries(time)
+    .filter(([k, v]) => k !== 'created' && k !== 'modified' && typeof v === 'string')
+    .sort((a, b) => (a[1] < b[1] ? -1 : 1));
+  const idx = entries.findIndex(([k]) => k === version);
+  if (idx <= 0) return null;
+  return entries[idx - 1][0];
+}
+
+/** License id from a manifest: a plain string, the legacy `{ type }` object, or
+ *  the even-older `licenses: [{ type }]` array. null if unlicensed/unknown. */
+export function licenseOf(manifest) {
+  const l = manifest?.license;
+  if (typeof l === 'string') return l;
+  if (l && typeof l === 'object' && typeof l.type === 'string') return l.type;
+  const arr = manifest?.licenses;
+  if (Array.isArray(arr) && arr[0] && typeof arr[0].type === 'string') return arr[0].type;
+  return null;
+}
