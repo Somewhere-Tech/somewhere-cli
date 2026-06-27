@@ -34,6 +34,7 @@ function checkMark(level: CheckLevel): string {
 
 /** 1400622 → "1.4M", 11000 → "11k", 11 → "11". */
 function humanizeDownloads(n: number): string {
+  if (n >= 1_000_000_000) return `${(n / 1_000_000_000).toFixed(1).replace(/\.0$/, '')}B`;
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1).replace(/\.0$/, '')}M`;
   if (n >= 10_000) return `${Math.round(n / 1000)}k`;
   if (n >= 1_000) return `${(n / 1000).toFixed(1).replace(/\.0$/, '')}k`;
@@ -46,7 +47,23 @@ function humanizeAge(h: number): string {
   if (h < 1) return `${Math.max(1, Math.round(h * 60))}m`;
   if (h < 48) return `${Math.round(h)}h`;
   const d = h / 24;
-  return d < 60 ? `${Math.round(d)}d` : `${Math.round(d / 30)}mo`;
+  if (d < 60) return `${Math.round(d)}d`;
+  const mo = d / 30;
+  return mo < 24 ? `${Math.round(mo)}mo` : `${Math.round(d / 365)}y`;
+}
+
+/** "20 verified · 2 flagged · 6 not yet checked" from the enrich breakdown
+ *  counts, or null when the counts aren't present (a pre-enrich row). */
+function depBreakdown(v: Verdict): string | null {
+  const verified = v.dep_verified;
+  const unknown = v.dep_unknown;
+  if (typeof verified !== 'number' && typeof unknown !== 'number') return null;
+  const flagged = (v.dependency_flags ?? []).length;
+  const bits: string[] = [];
+  if (typeof verified === 'number') bits.push(`${verified} verified`);
+  if (flagged) bits.push(`${flagged} flagged`);
+  if (typeof unknown === 'number' && unknown > 0) bits.push(`${unknown} not yet checked`);
+  return bits.join(' · ') || null;
 }
 
 /** The per-dimension evidence rows — "show the work, evidence not a grade".
@@ -72,6 +89,19 @@ export function buildChecks(v: Verdict): Check[] {
     const detail = bits.length ? ` (${bits.join(', ')})` : '';
     // A single-package (or brand-new) author is a caution; an established one reassures.
     checks.push({ level: typeof pc === 'number' && pc <= 1 ? 'warn' : 'ok', text: `Author: ${v.publisher}${detail}` });
+  }
+
+  if (v.license) {
+    checks.push({ level: 'ok', text: `${v.license} licensed` });
+  }
+
+  if (v.maintainer_changed === true) {
+    checks.push({
+      level: 'warn',
+      text: `Publisher changed since previous release${v.previous_publisher ? ` (was ${v.previous_publisher})` : ''}`,
+    });
+  } else if (v.maintainer_changed === false) {
+    checks.push({ level: 'ok', text: 'Same publisher as previous release' });
   }
 
   const ageH = ageHours(v.publish_time);
@@ -100,26 +130,26 @@ export function buildChecks(v: Verdict): Check[] {
   if (Array.isArray(v.dependencies)) {
     const deps = v.dependencies;
     const flags = Array.isArray(v.dependency_flags) ? v.dependency_flags : null;
-    if (flags) {
-      const checked = Math.min(deps.length, 50);
-      if (deps.length === 0) {
-        checks.push({ level: 'ok', text: 'No dependencies' });
-      } else if (flags.length) {
-        checks.push({
-          level: 'bad',
-          text: `${flags.length} of ${checked} flagged: ${flags.map((d) => `${d.name} (${d.verdict})`).join(', ')}`,
-        });
-      } else {
-        // "none flagged" not "all verified": uncached deps are unknown, not
-        // verified — we surface the bad ones, so absence of flags ≠ all-clean.
-        // (Post-prewarm, when the tree is cached, this becomes a true all-clear.)
-        checks.push({
-          level: 'ok',
-          text: `${checked} dependenc${checked === 1 ? 'y' : 'ies'}, none flagged`,
-        });
-      }
-    } else if (deps.length === 0) {
+    const breakdown = depBreakdown(v);
+    const checked = Math.min(deps.length, 50);
+    if (deps.length === 0) {
       checks.push({ level: 'ok', text: 'No dependencies' });
+    } else if (flags && flags.length) {
+      // Some dependency is known-bad — name them, with the verified/not-yet-
+      // checked context when the enrich breakdown is available.
+      const list = flags.map((d) => `${d.name} (${d.verdict})`).join(', ');
+      const level: CheckLevel = flags.some((d) => d.verdict === 'blocked') ? 'bad' : 'warn';
+      checks.push({
+        level,
+        text: breakdown ? `${deps.length} dependencies — ${breakdown}: ${list}` : `${flags.length} of ${checked} flagged: ${list}`,
+      });
+    } else if (breakdown) {
+      // Enrich ran: show the real verified / not-yet-checked split.
+      checks.push({ level: 'ok', text: `${deps.length} dependencies — ${breakdown}` });
+    } else if (flags) {
+      // Flags array present but empty, no counts yet: bad ones surfaced, but
+      // uncached deps are unknown — "none flagged", not "all verified".
+      checks.push({ level: 'ok', text: `${checked} dependenc${checked === 1 ? 'y' : 'ies'}, none flagged` });
     } else if (deps.length <= 5) {
       checks.push({ level: 'ok', text: `${deps.length} dependenc${deps.length === 1 ? 'y' : 'ies'}: ${deps.join(', ')}` });
     } else {
@@ -159,6 +189,14 @@ export function buildChecks(v: Verdict): Check[] {
 
   if (v.has_github_tag === 1) checks.push({ level: 'ok', text: 'GitHub tag exists' });
   else if (v.has_github_tag === 0) checks.push({ level: 'warn', text: 'No GitHub tag' });
+
+  if (v.repo_archived === true) checks.push({ level: 'warn', text: 'Source repo is archived' });
+  const lastCommitH = ageHours(v.repo_last_commit);
+  if (lastCommitH != null) {
+    const stale = lastCommitH > 365 * 24;
+    const issues = typeof v.repo_open_issues === 'number' ? `, ${v.repo_open_issues} open issue${v.repo_open_issues === 1 ? '' : 's'}` : '';
+    checks.push({ level: stale ? 'warn' : 'ok', text: `Repo last updated ${humanizeAge(lastCommitH)} ago${issues}` });
+  }
 
   checks.push(
     v.has_provenance

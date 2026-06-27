@@ -88,6 +88,24 @@ export interface Verdict {
   author_package_count?: number | null;
   author_total_downloads?: number | null;
   author_first_publish?: string | null;
+  /** SPDX license id from the manifest, e.g. "MIT". null = unlicensed/unknown. */
+  license?: string | null;
+  /** True if THIS version's publisher differs from the previous version's (an
+   *  account-takeover tell); false = same publisher; null = couldn't determine. */
+  maintainer_changed?: boolean | null;
+  /** The publisher of the previous version (shown when maintainer_changed). */
+  previous_publisher?: string | null;
+  /** Source-repo maintenance (GitHub): archived flag, last push, open issues. */
+  repo_archived?: boolean | null;
+  repo_last_commit?: string | null;
+  repo_open_issues?: number | null;
+  /** 'proven' when provenance cryptographically links repo↔package, else
+   *  'unverified'. Surfaced via the provenance row + the repo link. */
+  publisher_repo_match?: 'proven' | 'unverified' | null;
+  /** Dependency-tree breakdown counts (enrich): cached-verified, and not-yet-
+   *  cached ("unknown"). dependency_flags carries the non-verified ones. */
+  dep_verified?: number | null;
+  dep_unknown?: number | null;
   computed_at?: string;
 }
 

@@ -95,6 +95,7 @@ test('renderVerdict — blocked: advisory row + safe versions + malware footer',
 
 test('buildChecks — download thresholds (✓ popular, ⚠ low, omitted when unknown)', () => {
   const dl = (n) => buildChecks({ package: 'p', version: '1', verdict: 'verified', weekly_downloads: n })[0];
+  assert.deepEqual(dl(4_570_900_000), { level: 'ok', text: '4.6B weekly downloads' });
   assert.deepEqual(dl(1400622), { level: 'ok', text: '1.4M weekly downloads' });
   assert.deepEqual(dl(50000), { level: 'ok', text: '50k weekly downloads' });
   assert.deepEqual(dl(11), { level: 'warn', text: '11 weekly downloads' });
@@ -238,4 +239,37 @@ test('buildChecks — dependency row: none / few (named) / many (count)', () => 
   assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: [] }).some((c) => c.text === 'No dependencies'));
   assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: ['a', 'b'] }).some((c) => c.text === '2 dependencies: a, b'));
   assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: Array.from({ length: 9 }, (_, i) => 'd' + i) }).some((c) => c.text === '9 dependencies'));
+});
+
+test('buildChecks — license row appears only when present', () => {
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', license: 'MIT' }).some((c) => c.level === 'ok' && c.text === 'MIT licensed'));
+  assert.ok(!buildChecks({ package: 'x', version: '1', verdict: 'verified' }).some((c) => /licensed/.test(c.text)));
+});
+
+test('buildChecks — maintainer change: ⚠ when changed (with previous), ✓ when same, omitted when unknown', () => {
+  const changed = buildChecks({ package: 'x', version: '1', verdict: 'verified', maintainer_changed: true, previous_publisher: 'oldguy' });
+  assert.ok(changed.some((c) => c.level === 'warn' && c.text === 'Publisher changed since previous release (was oldguy)'));
+  const same = buildChecks({ package: 'x', version: '1', verdict: 'verified', maintainer_changed: false });
+  assert.ok(same.some((c) => c.level === 'ok' && c.text === 'Same publisher as previous release'));
+  assert.ok(!buildChecks({ package: 'x', version: '1', verdict: 'verified' }).some((c) => /publisher/i.test(c.text)));
+});
+
+test('buildChecks — repo maintenance: archived ⚠, last-commit age + open issues, stale ⚠', () => {
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', repo_archived: true }).some((c) => c.level === 'warn' && c.text === 'Source repo is archived'));
+  const recent = new Date(Date.now() - 10 * 86400000).toISOString();
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', repo_last_commit: recent, repo_open_issues: 47 }).some((c) => c.level === 'ok' && c.text === 'Repo last updated 10d ago, 47 open issues'));
+  const stale = new Date(Date.now() - 800 * 86400000).toISOString();
+  assert.ok(buildChecks({ package: 'x', version: '1', verdict: 'verified', repo_last_commit: stale }).some((c) => c.level === 'warn' && /Repo last updated/.test(c.text)));
+});
+
+test('buildChecks — dependency breakdown (verified / flagged / not yet checked)', () => {
+  assert.ok(
+    buildChecks({ package: 'x', version: '1', verdict: 'verified', dependencies: ['a', 'b', 'c'], dependency_flags: [], dep_verified: 1, dep_unknown: 2 })
+      .some((c) => c.level === 'ok' && c.text === '3 dependencies — 1 verified · 2 not yet checked'),
+  );
+  const flagged = buildChecks({
+    package: 'x', version: '1', verdict: 'suspicious',
+    dependencies: ['a', 'b'], dependency_flags: [{ name: 'evil', version: '1.0.0', verdict: 'blocked' }], dep_verified: 1, dep_unknown: 0,
+  });
+  assert.ok(flagged.some((c) => c.level === 'bad' && c.text === '2 dependencies — 1 verified · 1 flagged: evil (blocked)'));
 });
