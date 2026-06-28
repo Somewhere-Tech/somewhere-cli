@@ -8,6 +8,7 @@
  *  {name,downloads}); a small built-in seed validates the pipeline first. */
 
 import { prewarmSlice, enrichPending, normalizeNames } from '../_lib/prewarm.mjs';
+import { TOP_PACKAGES } from '../_lib/top-packages.mjs';
 
 const SEED = [
   'react', 'react-dom', 'lodash', 'axios', 'express', 'chalk', 'commander', 'semver',
@@ -51,16 +52,23 @@ export default async function (req, sw) {
   const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') ?? '50', 10) || 50));
   const enrich = url.searchParams.get('enrich') === '1';
 
-  let names = SEED;
+  // Default to the BUNDLED top list (imported, always available). TOP_PACKAGES_URL
+  // is an optional EXTERNAL override — note a same-project URL won't work, since a
+  // worker can't reliably fetch its own hostname (that silently falls back here).
+  let names = TOP_PACKAGES.length ? TOP_PACKAGES : SEED;
+  let source = TOP_PACKAGES.length ? 'bundled' : 'seed';
   if (sw.env?.TOP_PACKAGES_URL) {
     try {
       const r = await fetch(sw.env.TOP_PACKAGES_URL);
       if (r.ok) {
         const fromList = normalizeNames(await r.json());
-        if (fromList.length) names = fromList;
+        if (fromList.length) {
+          names = fromList;
+          source = 'url';
+        }
       }
     } catch {
-      // fall back to the seed rather than failing the run
+      // fall back to the bundled list rather than failing the run
     }
   }
 
@@ -73,5 +81,5 @@ export default async function (req, sw) {
     llmProvider: sw.env?.PREWARM_PROVIDER,
     llmModel: sw.env?.PREWARM_MODEL,
   });
-  return Response.json({ ok: true, data: { source: names === SEED ? 'seed' : 'TOP_PACKAGES_URL', ...summary } });
+  return Response.json({ ok: true, data: { source, ...summary } });
 }
