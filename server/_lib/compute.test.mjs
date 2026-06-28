@@ -139,6 +139,10 @@ function fakeSw(storedRow) {
     writes,
     db: {
       query: async (sql, params) => {
+        // The MAL cache (mal_advisories) is a separate layer — empty here so these
+        // tests still exercise the live OSV path, and its writes stay out of the
+        // verdict-table `writes` counter the assertions below depend on.
+        if (sql.includes('mal_advisories')) return { data: [] };
         if (sql.startsWith('SELECT')) return { data: storedRow ? [storedRow] : [] };
         if (sql.startsWith('INSERT')) {
           writes.push(params);

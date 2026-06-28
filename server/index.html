@@ -1,0 +1,563 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Security-check ANY npm package · somewhere.tech</title>
+<meta name="description" content="Check any npm package against live malware advisories, provenance, capabilities, freshness, and its dependency tree, before you install it. Free, no signup.">
+<meta name="theme-color" content="#0d0e14">
+<link rel="icon" type="image/png" href="https://somewhere.tech/favicon.png">
+<link rel="apple-touch-icon" href="https://somewhere.tech/favicon.png">
+<meta property="og:type" content="website">
+<meta property="og:title" content="Security-check any npm package">
+<meta property="og:description" content="The verdict layer npm is missing: provenance, capabilities, live malware checks, dependency tree. Before you install.">
+<meta property="og:image" content="https://somewhere.tech/og-image.png">
+<meta property="og:url" content="https://npm.somewhere.tech">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Security-check any npm package">
+<meta name="twitter:image" content="https://somewhere.tech/og-image.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600&family=DM+Mono:wght@400;500&family=Instrument+Serif:ital@0;1&display=swap" rel="stylesheet">
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --bg: #0d0e14; --surface: #13161f; --surface-2: #181b25;
+    --border: rgba(255,255,255,0.08); --border-strong: rgba(255,255,255,0.14);
+    --text: #f0f0eb; --text-muted: #7a8099; --text-dim: #4a5066;
+    --teal: #2dd4bf; --teal-deep: #14b8a6; --teal-glow: rgba(45,212,191,0.18); --teal-glow-soft: rgba(45,212,191,0.06);
+    --ok: #34d399; --warn: #fbbf24; --err: #f87171;
+    --serif: 'Instrument Serif', Georgia, serif;
+    --sans: 'DM Sans', system-ui, sans-serif;
+    --mono: 'DM Mono', ui-monospace, monospace;
+  }
+  html { scroll-behavior: smooth; }
+  body {
+    background: var(--bg); color: var(--text); font-family: var(--sans);
+    font-weight: 400; letter-spacing: 0.01em; line-height: 1.7; font-size: 16px;
+    -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale; text-rendering: optimizeLegibility;
+  }
+  ::selection { background: var(--teal-glow); color: var(--text); }
+  a { color: inherit; text-decoration: none; }
+  code { font-family: var(--mono); }
+
+  .dot-grid { position: fixed; inset: 0; z-index: 0; pointer-events: none;
+    background-image: radial-gradient(rgba(255,255,255,0.05) 1px, transparent 1px); background-size: 30px 30px; }
+  .hero-glow { position: absolute; top: 24%; left: 50%; width: 1100px; height: 1100px;
+    transform: translate(-50%,-50%); z-index: 0; pointer-events: none;
+    background: radial-gradient(circle at center, var(--teal-glow) 0%, rgba(45,212,191,0.05) 30%, transparent 60%); filter: blur(20px); }
+
+  .container { max-width: 1040px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+  .container-narrow { max-width: 760px; margin: 0 auto; padding: 0 24px; position: relative; z-index: 1; }
+  section { padding: 84px 0; border-top: 1px solid var(--border); position: relative; z-index: 1; }
+
+  .nav { position: fixed; top: 0; left: 0; right: 0; z-index: 100; height: 64px;
+    display: flex; align-items: center; justify-content: space-between; padding: 0 24px;
+    background: rgba(13,14,20,0.72); backdrop-filter: blur(18px) saturate(140%); -webkit-backdrop-filter: blur(18px) saturate(140%);
+    border-bottom: 1px solid var(--border); }
+  .brand { display: flex; align-items: center; gap: 10px; }
+  .brand img { width: 26px; height: 26px; }
+  .brand .wordmark { font-size: 19px; line-height: 1; }
+  .brand .wordmark .name { font-family: var(--serif); font-style: italic; color: var(--text); }
+  .brand .wordmark .tld { font-family: var(--sans); color: var(--text-muted); font-size: 15px; }
+  .nav-right { display: flex; align-items: center; gap: 20px; }
+  .nav-link { color: var(--text-muted); font-size: 14px; transition: color 0.2s ease; }
+  .nav-link:hover { color: var(--text); }
+
+  .eyebrow { display: inline-block; font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: 0.14em; text-transform: uppercase; color: var(--teal);
+    border: 1px solid rgba(45,212,191,0.3); border-radius: 999px; padding: 6px 14px; background: rgba(45,212,191,0.04); }
+  .label { display: block; font-family: var(--mono); font-size: 11px; font-weight: 500;
+    letter-spacing: 0.16em; text-transform: uppercase; color: var(--text-dim); margin-bottom: 16px; }
+
+  .display { font-family: var(--serif); font-weight: 400; letter-spacing: -0.015em; line-height: 1.08; }
+  .display em { color: var(--teal); font-style: italic; font-weight: 400; }
+  .hero h1.display { font-size: clamp(34px, 5vw, 54px); color: var(--text); margin: 20px auto 16px; text-align: center; }
+  .hero .eyebrow { display: block; width: -webkit-fit-content; width: fit-content; margin-left: auto; margin-right: auto; }
+  .hero .lead { text-align: center; margin-left: auto; margin-right: auto; }
+  section h2.display { font-size: clamp(28px, 4vw, 40px); margin-bottom: 14px; color: var(--text); }
+  .subtitle, .lead { font-size: 17px; color: var(--text-muted); max-width: 600px; }
+  .lead { margin-bottom: 8px; }
+  .subtitle { margin-bottom: 36px; max-width: 780px; }
+
+  .hero { position: relative; padding: 124px 0 80px; }
+
+  /* ── Demo: checker + click-to-explain ── */
+  .demo-grid { display: grid; grid-template-columns: 1.25fr 0.9fr; gap: 18px; align-items: start; margin-top: 22px; }
+  .check-form { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+  .check-input { flex: 1; min-width: 220px; font-family: var(--mono); font-size: 14px; color: var(--text);
+    background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 13px 22px;
+    outline: none; transition: border-color 0.2s ease, box-shadow 0.2s ease; }
+  .check-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px var(--teal-glow-soft); }
+  .check-input::placeholder { color: var(--text-dim); }
+  .check-btn { font-family: var(--sans); font-weight: 600; font-size: 14px; background: var(--teal); color: #0a1410;
+    border: none; border-radius: 999px; padding: 13px 26px; cursor: pointer; transition: transform 0.18s ease, background 0.2s ease; }
+  .check-btn:hover { background: #4ce0c8; transform: translateY(-1px); }
+  .check-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 16px; }
+  .chip { font-family: var(--mono); font-size: 12px; color: var(--text-muted); background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 6px 14px; cursor: pointer; transition: color 0.15s ease, border-color 0.15s ease; }
+  .chip:hover { color: var(--teal); border-color: rgba(45,212,191,0.3); }
+
+  .terminal { background: #0b0d13; border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+  .terminal-bar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 10px 16px; display: flex; align-items: center; gap: 6px; }
+  .terminal-dot { width: 10px; height: 10px; border-radius: 50%; }
+  .terminal-dot.r { background: var(--err); } .terminal-dot.y { background: var(--warn); } .terminal-dot.g { background: var(--ok); }
+  .terminal-label { font-family: var(--mono); font-size: 12px; color: var(--text-dim); margin-left: 8px; }
+  .terminal pre { padding: 20px; font-family: var(--mono); font-size: 12.5px; line-height: 1.85; color: var(--text); overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+  .terminal pre .prompt { color: var(--teal); } .terminal pre .cmd { color: var(--text); font-weight: 500; }
+  .terminal pre .ok { color: var(--ok); } .terminal pre .warn { color: var(--warn); } .terminal pre .err { color: var(--err); }
+  .terminal pre .dim { color: var(--text-dim); } .terminal pre .info { color: var(--teal); } .terminal pre .muted { color: var(--text-muted); }
+  /* clickable check rows */
+  .chk { cursor: pointer; border-radius: 4px; transition: background 0.12s ease; }
+  .chk:hover { background: rgba(255,255,255,0.05); }
+  .chk.active { background: var(--teal-glow-soft); box-shadow: inset 2px 0 0 var(--teal); }
+
+  .explain { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 22px; position: sticky; top: 84px; }
+  .explain .label { color: var(--teal); }
+  .explain h4 { font-family: var(--sans); font-size: 15px; font-weight: 600; color: var(--text); margin: 0 0 8px; }
+  .explain p { font-size: 13.5px; color: var(--text-muted); line-height: 1.62; }
+  .explain .hint { font-size: 12px; color: var(--text-dim); margin-top: 14px; }
+
+  .install-block { display: inline-flex; align-items: center; gap: 10px; background: var(--surface-2);
+    border: 1px solid var(--border-strong); border-radius: 999px; padding: 13px 24px; font-family: var(--mono); font-size: 14px; color: var(--teal); }
+  .install-block .sigil { color: var(--text-dim); }
+  .cta-row { margin-top: 28px; display: flex; align-items: center; gap: 16px; flex-wrap: wrap; }
+  .cta-row .foot { font-size: 13px; color: var(--text-dim); }
+  .cta-row .foot code { color: var(--teal); }
+
+  /* Demo is a plain centered column — the hint floats out of flow so it can't push it off-center. */
+  .demo-wrap { position: relative; max-width: 680px; margin: 26px auto 0; }
+  /* Floating hint: lives in the left dark space, hovers over nothing important, never intercepts clicks,
+     and fades away the moment the visitor types or clicks anywhere. */
+  .demo-note { position: absolute; top: 300px; right: calc(100% + 26px); width: 198px; z-index: 5;
+    background: rgba(45,212,191,0.08); border: 1px solid rgba(45,212,191,0.32); border-radius: 12px; padding: 14px 16px;
+    box-shadow: 0 12px 34px rgba(0,0,0,0.32); -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+    pointer-events: none; opacity: 1; transition: opacity 0.45s ease, transform 0.45s ease; }
+  .demo-note.dismissed { opacity: 0; transform: translateX(-8px); }
+  .demo-note .label { color: var(--teal); margin-bottom: 7px; }
+  .demo-note p { font-size: 13px; color: var(--text); line-height: 1.5; }
+  .demo-note::after { content: ''; position: absolute; top: 22px; right: -8px; width: 14px; height: 14px;
+    background: rgba(45,212,191,0.08); border-top: 1px solid rgba(45,212,191,0.32); border-right: 1px solid rgba(45,212,191,0.32);
+    transform: rotate(45deg); }
+  /* No room for the floating hint on narrower viewports — drop it; the click affordance still works. */
+  @media (max-width: 1180px) { .demo-note { display: none; } }
+  .cta-col { margin-top: 30px; text-align: center; }
+  .install-btn { display: inline-flex; align-items: center; gap: 12px; font-family: var(--mono); font-size: 14px; color: var(--teal);
+    background: var(--surface-2); border: 1px solid var(--border-strong); border-radius: 999px; padding: 11px 12px 11px 22px; cursor: pointer; transition: border-color 0.2s ease; }
+  .install-btn:hover { border-color: var(--teal); }
+  .install-btn .sigil { color: var(--text-dim); }
+  .install-btn .ibtag { font-family: var(--sans); font-weight: 600; font-size: 12px; color: #0a1410; background: var(--teal); border-radius: 999px; padding: 5px 13px; }
+  .cta-foot { margin-top: 14px; font-size: 13px; color: var(--text-dim); }
+  .cta-foot code { color: var(--teal); }
+  .sw-popup { position: fixed; z-index: 200; max-width: 320px; background: var(--surface-2); border: 1px solid var(--border-strong);
+    border-radius: 12px; padding: 16px 18px; box-shadow: 0 16px 48px rgba(0,0,0,0.55); display: none; }
+  .sw-popup.show { display: block; }
+  .sw-popup .label { color: var(--teal); margin-bottom: 8px; }
+  .sw-popup h4 { font-family: var(--sans); font-size: 14px; font-weight: 600; color: var(--text); margin: 0 0 6px; }
+  .sw-popup p { font-size: 13px; color: var(--text-muted); line-height: 1.55; }
+
+  /* ── Scorecard ── */
+  .attack-grid { display: flex; flex-direction: column; gap: 2px; }
+  .attack-row { display: grid; grid-template-columns: 1fr auto auto; gap: 16px; align-items: center; background: var(--surface); padding: 15px 20px; border-radius: 6px; }
+  .attack-row:first-child { border-radius: 12px 12px 6px 6px; } .attack-row:last-child { border-radius: 6px 6px 12px 12px; }
+  .attack-name { font-weight: 600; color: var(--text); font-size: 14px; }
+  .attack-date { font-family: var(--mono); font-size: 12px; color: var(--text-dim); font-weight: 400; }
+  .attack-detail { font-size: 13px; color: var(--text-muted); margin-top: 2px; line-height: 1.55; }
+  .attack-window { font-family: var(--mono); font-size: 12px; color: var(--text-muted); text-align: right; white-space: nowrap; }
+  .attack-result { font-family: var(--mono); font-size: 12px; font-weight: 600; text-align: right; white-space: nowrap; }
+  .result-blocked { color: var(--err); } .result-flagged { color: var(--warn); } .result-window { color: var(--teal); }
+  .honesty-box { background: var(--surface); border: 1px solid var(--border); border-left: 3px solid var(--teal);
+    border-radius: 0 12px 12px 0; padding: 22px 26px; margin: 32px 0 0; }
+  .honesty-box .label { color: var(--teal); margin-bottom: 12px; }
+  .honesty-box p { font-size: 14px; color: var(--text-muted); line-height: 1.7; }
+  .honesty-box p + p { margin-top: 14px; }
+  .honesty-box strong { color: var(--text); font-weight: 600; }
+  .honesty-box code { color: var(--teal); font-size: 13px; }
+
+  /* ── FAQ ── */
+  .faq-item { border-bottom: 1px solid var(--border); }
+  .faq-q { width: 100%; text-align: left; background: none; border: none; cursor: pointer; font-family: var(--sans);
+    font-size: 16px; font-weight: 600; color: var(--text); padding: 22px 0; display: flex; align-items: center; justify-content: space-between; gap: 16px; transition: color 0.15s ease; }
+  .faq-q:hover { color: var(--teal); }
+  .faq-q .chev { color: var(--text-dim); font-size: 18px; line-height: 1; transition: transform 0.2s ease, color 0.2s ease; flex-shrink: 0; }
+  .faq-item.open .faq-q { color: var(--teal); }
+  .faq-item.open .faq-q .chev { transform: rotate(90deg); color: var(--teal); }
+  .faq-a { display: none; padding: 0 0 28px; }
+  .faq-item.open .faq-a { display: block; }
+  .faq-a p { font-size: 15px; color: var(--text-muted); max-width: 660px; }
+  .faq-a p + p { margin-top: 10px; }
+  .faq-a code { color: var(--teal); font-size: 13px; }
+  .faq-a em { color: var(--text); font-style: italic; }
+  .compare2 { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin: 14px 0 4px; }
+  @media (max-width: 640px) { .compare2 { grid-template-columns: 1fr; } }
+  .faq-term { background: #0b0d13; border: 1px solid var(--border); border-radius: 10px; margin: 14px 0 4px; overflow: hidden; }
+  .faq-term pre { padding: 16px 18px; font-family: var(--mono); font-size: 12.5px; line-height: 1.8; color: var(--text); overflow-x: auto; white-space: pre-wrap; }
+  .faq-term pre .prompt { color: var(--teal); } .faq-term pre .cmd { color: var(--text); font-weight: 500; }
+  .faq-term pre .ok { color: var(--ok); } .faq-term pre .warn { color: var(--warn); } .faq-term pre .err { color: var(--err); }
+  .faq-term pre .dim { color: var(--text-dim); } .faq-term pre .muted { color: var(--text-muted); } .faq-term pre .info { color: var(--teal); }
+
+  footer { border-top: 1px solid var(--border); padding: 36px 24px; position: relative; z-index: 1;
+    display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; max-width: 1040px; margin: 0 auto; }
+  footer .foot-links { display: flex; gap: 22px; font-size: 13px; color: var(--text-muted); }
+  footer .foot-links a:hover { color: var(--teal); }
+
+  @media (max-width: 860px) {
+    .demo-grid { grid-template-columns: 1fr; }
+    .explain { position: static; }
+  }
+  @media (max-width: 600px) {
+    .attack-row { grid-template-columns: 1fr; gap: 6px; }
+    .attack-window, .attack-result { text-align: left; }
+  }
+</style>
+</head>
+<body>
+<div class="dot-grid"></div>
+<div class="sw-popup" id="sw-popup"></div>
+
+<nav class="nav">
+  <a class="brand" href="https://somewhere.tech" aria-label="somewhere.tech">
+    <img src="https://somewhere.tech/logo.svg" alt="" width="26" height="26">
+    <span class="wordmark"><span class="name">somewhere</span><span class="tld">.tech</span></span>
+  </a>
+  <div class="nav-right">
+    <a class="nav-link" href="https://somewhere.tech">Platform</a>
+    <a class="nav-link" href="https://www.npmjs.com/package/somewhere-cli">npm</a>
+  </div>
+</nav>
+
+<!-- ════ SECTION 1 · DEMO ════ -->
+<header class="hero">
+  <div class="hero-glow"></div>
+  <div class="container">
+    <span class="eyebrow">npm.somewhere.tech</span>
+    <h1 class="display">Security-check ANY <em>npm package</em>.</h1>
+    <p class="lead">Type a package. We check it against live malware advisories, provenance, capability access, freshness, and its whole dependency tree. That's the exact verdict the somewhere CLI gives you, before anything installs.</p>
+
+    <div class="demo-wrap">
+      <aside class="demo-note" id="demo-hint">
+        <span class="label">What we check</span>
+        <p>Click any line in the result to see why we check it.</p>
+      </aside>
+        <form class="check-form" onsubmit="return swCheck(event)">
+          <input id="sw-input" class="check-input" type="text" spellcheck="false" autocapitalize="off" autocomplete="off" autocorrect="off"
+                 placeholder="package  ·  e.g.  express  or  @ctrl/tinycolor@4.1.1" value="cors" aria-label="npm package to check">
+          <button class="check-btn" type="submit">Check</button>
+        </form>
+        <div class="check-presets">
+          <button class="chip" type="button" onclick="swRun('cors')">cors</button>
+          <button class="chip" type="button" onclick="swRun('express')">express</button>
+          <button class="chip" type="button" onclick="swRun('@ctrl/tinycolor@4.1.1')">@ctrl/tinycolor@4.1.1</button>
+          <button class="chip" type="button" onclick="swRun('left-pad')">left-pad</button>
+        </div>
+        <div class="terminal"><div class="terminal-bar"><div class="terminal-dot r"></div><div class="terminal-dot y"></div><div class="terminal-dot g"></div><span class="terminal-label" id="sw-bar">swpx check</span></div>
+          <pre id="sw-out"><span class="dim">Checking…</span></pre></div>
+    </div>
+
+    <div class="cta-col">
+      <button class="install-btn" type="button" onclick="copyInstall()">
+        <span class="sigil">$</span> <span class="ibcmd">npm i -g somewhere-cli</span>
+        <span class="ibtag" id="installTag">Copy</span>
+      </button>
+      <p class="cta-foot">Then <code>swpx</code> instead of npx · <code>swpm</code> instead of npm</p>
+    </div>
+  </div>
+</header>
+
+<!-- ════ SECTION 2 · WHAT WE WOULD HAVE CAUGHT ════ -->
+<section>
+  <div class="container">
+    <span class="label">Back testing</span>
+    <h2 class="display">What we would have <em>caught</em> (and what we'd have missed.)</h2>
+    <p class="subtitle">Every significant npm supply-chain attack since 2018, and the honest answer for each: did a confirmed advisory exist, and how long was the bad version live before it landed?</p>
+    <div class="attack-grid">
+      <div class="attack-row"><div><div class="attack-name">Mastra / easy-day-js <span class="attack-date">Jun 2026</span></div><div class="attack-detail">Typosquat of dayjs injected across 140+ @mastra packages via a stale contributor account. Postinstall dropper.</div></div><div class="attack-window">advisory in ~hours</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">Red Hat / Miasma <span class="attack-date">Jun 2026</span></div><div class="attack-detail">32 packages republished via a stolen GitHub account, with valid SLSA provenance. A self-propagating worm.</div></div><div class="attack-window">advisory same day</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">node-ipc (2026) <span class="attack-date">May 2026</span></div><div class="attack-detail">80KB obfuscated credential-stealer via a hijacked dormant maintainer (expired email-domain takeover).</div></div><div class="attack-window">advisory in ~hours</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">TanStack router <span class="attack-date">May 2026</span></div><div class="attack-detail">42 @tanstack packages republished by the Mini Shai-Hulud worm, with cryptographically valid provenance.</div></div><div class="attack-window">advisory same day</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">axios <span class="attack-date">Mar 2026</span></div><div class="attack-detail">100M weekly downloads. Stolen maintainer credentials; a phantom dependency dropped a cross-platform RAT.</div></div><div class="attack-window">flagged in 6 min</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">Shai-Hulud worm <span class="attack-date">Sep 2025 – 2026</span></div><div class="attack-detail">First self-replicating npm worm. Stole tokens and auto-republished across 500+ packages, in waves.</div></div><div class="attack-window">advisory in ~hours</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">chalk / debug <span class="attack-date">Sep 2025</span></div><div class="attack-detail">18 packages, ~2.6B combined weekly downloads, the widest blast radius yet. Phished maintainer. Crypto-clipper.</div></div><div class="attack-window">caught in ~2h</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">node-ipc (protestware) <span class="attack-date">Mar 2022</span></div><div class="attack-detail">Maintainer added geo-targeted file-wiping code (CVE-2022-23812).</div></div><div class="attack-window">advisory in ~1d</div><div class="attack-result result-flagged">FLAGGED</div></div>
+      <div class="attack-row"><div><div class="attack-name">ua-parser-js <span class="attack-date">Oct 2021</span></div><div class="attack-detail">Hijacked maintainer account. Preinstall script dropped a crypto miner + password stealer.</div></div><div class="attack-window">live ~4h</div><div class="attack-result result-blocked">BLOCKED</div></div>
+      <div class="attack-row"><div><div class="attack-name">event-stream <span class="attack-date">Nov 2018</span></div><div class="attack-detail">Social-engineered maintainership transfer. Malicious flatmap-stream dependency targeting Copay wallets.</div></div><div class="attack-window">undetected ~2.5mo</div><div class="attack-result result-flagged">FLAGGED</div></div>
+    </div>
+    <div class="honesty-box">
+      <span class="label">What we still would have missed</span>
+      <p>Ultimately, if no one catches it, we won't catch it. We consolidate the best known info about any package, so there's an easy way to stay safe: just wait. The <strong>window</strong> between a malicious publish and its advisory is usually minutes to hours (axios: 6 minutes; chalk: ~2 hours), though once in a while it's much longer (event-stream sat undetected for ~2.5 months).</p>
+      <p>So we close the window a different way: <strong>swpx won't trust a version that's less than 24 hours old by default.</strong> Almost every attack above was caught inside that window, so wait a day and you're already past it. Need the newest version right away? <code>swpx --fresh</code> (or set the age threshold in your config). Honesty over a green checkmark.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ════ SECTION 3 · FAQ ════ -->
+<section>
+  <div class="container-narrow">
+    <span class="label">Everything else</span>
+    <h2 class="display">FAQ</h2>
+    <p class="subtitle">How it behaves, how it works, and what it looks like. Tap to expand.</p>
+
+    <div class="faq-item open">
+      <button class="faq-q" type="button">Shouldn't npm just do this? <span class="chev">›</span></button>
+      <div class="faq-a"><p>YES!! They 100% should! All of this is publicly available information. We built it because WE needed it to vet the packages in our own users' builds. somewhere.tech is the backend platform AI agents use to build and ship real apps, and every build pulls in npm packages we had to trust before they ran. We shared the tool with our users, and now we're opening it up to everyone, even without a free somewhere login. Until npm catches up, your installs shouldn't be blind.</p></div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">What does it look like when a package is fine? <span class="chev">›</span></button>
+      <div class="faq-a"><p>Silent. <code>swpx</code> wraps <code>npx</code>, <code>swpm</code> wraps <code>npm</code>. A verified package just runs, and you don't notice anything different.</p>
+        <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpx create-next-app my-app</span>
+<span class="ok">✓</span> <span class="muted">create-next-app@15.2.0 —</span> <span class="info">network, fs, child_process</span> <span class="ok">✓ matches "Create Next.js apps"</span>
+
+Creating a new Next.js app in /Users/dev/my-app...
+<span class="dim">  [normal npx output continues]</span>
+
+<span class="prompt">$</span> <span class="cmd">swpx is-odd</span>
+<span class="ok">✓</span> <span class="muted">is-odd@1.0.0 —</span> <span class="ok">(no system access)</span></pre></div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">And when it's not? <span class="chev">›</span></button>
+      <div class="faq-a"><p>It stops with the evidence. An unverified package is a soft stop you can override; confirmed malware is a hard block.</p>
+        <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpx some-analytics-tool</span>
+
+<span class="warn">⚠ some-analytics-tool@2.1.0 — could not verify</span>
+  <span class="warn">⚠</span> <span class="muted">No provenance · minified · has a postinstall script</span>
+  <span class="warn">⚠</span> <span class="info">network, fs, child_process, process.env</span>
+  <span class="err">⚠</span> <span class="err">capabilities don't match "lightweight date formatter"</span>
+  <span class="dim">Run npx some-analytics-tool to proceed unverified.</span></pre></div>
+        <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpx @ctrl/tinycolor@4.1.1</span>
+
+<span class="err">✖ BLOCKED — @ctrl/tinycolor@4.1.1</span>
+  <span class="err">MAL-2025-47141</span> <span class="muted">· credential-stealer (Shai-Hulud)</span>
+  <span class="muted">Disclosed 2025-09-15 · OpenSSF / OSV</span>
+  <span class="err">Confirmed malware. Do not install.</span></pre></div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">What about a whole install, with swpm? <span class="chev">›</span></button>
+      <div class="faq-a"><p><code>swpm install</code> checks the entire resolved tree, direct and transitive, before anything runs. One blocked package stops the install.</p>
+        <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpm install</span>
+<span class="muted">Checking 47 packages (12 direct, 35 transitive)</span>
+
+  <span class="ok">✓ 44 verified</span>
+  <span class="warn">⚠  2 unverified</span>
+     <span class="dim">└</span> <span class="muted">obfuscated-util@1.2.0 — minified, no provenance</span>
+  <span class="err">✖  1 blocked</span>
+     <span class="dim">└</span> <span class="err">@ctrl/tinycolor@4.1.1</span> <span class="muted">— MAL-2025-47141</span>
+
+  <span class="muted">Remove or replace blocked packages to continue.</span></pre></div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">npm today vs swpx: what's the difference? <span class="chev">›</span></button>
+      <div class="faq-a"><p>Same command. One of them warned you. <code>@ctrl/tinycolor@4.1.1</code> shipped a credential-stealer in September 2025:</p>
+        <div class="compare2">
+          <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">npm i @ctrl/tinycolor@4.1.1</span>
+<span class="dim">&gt; @ctrl/tinycolor@4.1.1 postinstall</span>
+<span class="dim">&gt; node bundle.js</span>
+<span class="muted">added 1 package in 0.9s</span>
+<span class="dim">— the stealer already ran.</span></pre></div>
+          <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpm i @ctrl/tinycolor@4.1.1</span>
+<span class="err">✖ BLOCKED — MAL-2025-47141</span>
+<span class="muted">credential-stealer (Shai-Hulud)</span>
+<span class="ok">Nothing installed. Nothing ran.</span></pre></div>
+        </div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">How does it catch a poisoned update? <span class="chev">›</span></button>
+      <div class="faq-a"><p>Every supply-chain attack arrives as a change to a previously-clean package, so the attack is in the delta. We read that delta: the diff, the changelog, and the package's stated purpose, and ask whether the change fits.</p>
+        <div class="faq-term"><pre><span class="dim">event-stream@3.3.5 → 3.3.6</span>
+<span class="warn">⚠</span> <span class="muted">Added dependency flatmap-stream — no changelog entry</span>
+<span class="err">⚠ encrypted payload, unrelated to event streaming</span>
+
+<span class="dim">axios@1.7.0 → 1.14.1</span>
+<span class="warn">⚠</span> <span class="muted">Added dependency plain-crypto-js — no changelog entry</span>
+<span class="err">⚠ network exfiltration, unrelated to an HTTP client</span></pre></div>
+        <p>Every version is reviewed once; the result is instant for everyone who checks it after.</p>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">How does it actually work? <span class="chev">›</span></button>
+      <div class="faq-a"><p>We're not a registry or a mirror, and we never touch your packages. You run <code>swpx</code>/<code>swpm</code>; it resolves the exact version and asks our verdict database one question. Clean? It hands off to real npx/npm, so the bytes come straight from npm's own CDN at the same speed, and we're never in the download path. Flagged? It stops with the evidence. Confirmed malware? It hard-blocks. We track the live malware feeds continuously, so a version flagged an hour ago is blocked now, even if it's since been unpublished. <em>(And pssst, check out our repo, the CLI is open source.)</em></p></div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">Can agents use this? <span class="chev">›</span></button>
+      <div class="faq-a"><p>Yes. Agents run npm constantly and are the most exposed to silent malware. Every check is a structured object an agent can act on, escalating to a human only when something trips:</p>
+        <div class="faq-term"><pre><span class="prompt">$</span> <span class="cmd">swpx check some-pkg --json</span>
+{ <span class="info">"verdict"</span>: <span class="warn">"unverified"</span>, <span class="info">"signals"</span>: {
+    <span class="muted">"provenance": false, "readable": false,</span>
+    <span class="muted">"install_scripts": ["postinstall"],</span>
+    <span class="muted">"capabilities": ["network", "fs", "process.env"]</span> } }</pre></div>
+      </div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">What if you go down? <span class="chev">›</span></button>
+      <div class="faq-a"><p>By default <code>swpx</code> falls back to plain <code>npx</code> with a loud warning. We're a gate, not a wall, and our outage shouldn't stop your work. Rather be safe than sorry? <code>swpx --enforce</code> (or <code>SWPX_ENFORCE=1</code>) makes a failed check <em>refuse</em> the install instead of waving it through. Set once, your call.</p></div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">What is the somewhere CLI? <span class="chev">›</span></button>
+      <div class="faq-a"><p>A set of tools for agents (and people) to ship web apps easily <em>AND</em> safely. <code>swpx</code> / <code>swpm</code> are the package-verdict layer you're looking at; the same CLI gives you a sandboxed <code>browser</code>, a server-side <code>deploy-check</code> oracle, and the rest of the somewhere.tech toolchain. One install: <code>npm i -g somewhere-cli</code>.</p></div>
+    </div>
+
+    <div class="faq-item">
+      <button class="faq-q" type="button">Account? Open source? Wrong verdict? Do you store packages? <span class="chev">›</span></button>
+      <div class="faq-a"><p>No account needed. Free, no login (signing in unlocks higher limits and org policies). The client is open source, so you can read exactly what <code>swpx</code> does: resolve, check, show, hand off. If a verdict's ever wrong, the fallback is plain <code>npx</code>: a false positive costs one keystroke, a false negative is no worse than not using us. And no, we don't store or serve packages; npm serves the bytes from its own CDN, we store verdicts and point at theirs.</p></div>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <a class="brand" href="https://somewhere.tech" aria-label="somewhere.tech">
+    <img src="https://somewhere.tech/logo.svg" alt="" width="22" height="22">
+    <span class="wordmark"><span class="name">somewhere</span><span class="tld">.tech</span></span>
+  </a>
+  <div class="foot-links">
+    <a href="https://somewhere.tech">Platform</a>
+    <a href="https://www.npmjs.com/package/somewhere-cli">npm package</a>
+    <a href="https://somewhere.tech/docs">Docs</a>
+  </div>
+</footer>
+
+<script>
+(function () {
+  var API = 'https://npm.somewhere.tech';
+  var EXPLAIN = {
+    downloads: ['Popularity', 'Popularity isn’t safety, but millions of weekly installs means millions of eyes. A near-zero count on something that should be everywhere, or a sudden drop, is worth a second look.'],
+    author: ['Author reputation', 'Who published this, how many packages they maintain, and how long they’ve been at it. A prolific, long-tenured maintainer is a very different risk than a brand-new single-package account.'],
+    license: ['License', 'A declared license is table stakes for a real, maintained package. Missing or unusual licensing is a small signal that something is off.'],
+    maintainer: ['Maintainer change', 'The pattern behind most 2025–26 npm compromises: a dormant or hijacked account publishes a poisoned version. We flag when this version’s publisher differs from the previous one’s.'],
+    age: ['Freshness', 'Advisory feeds lag a malicious publish by minutes to hours. A version published moments ago hasn’t had time to be caught, so we mark it, and by default the CLI won’t trust anything under 24 hours old.'],
+    scripts: ['Install scripts', 'Code that runs automatically at install time, before you ever import the package. The mechanism behind nearly every install-time worm.'],
+    readability: ['Readability', 'Is the published code readable, or minified / obfuscated? Minified isn’t malicious, just unverifiable. You can’t review what you can’t read.'],
+    caps: ['Capability access', 'What the code reaches for: network, filesystem, child processes, environment variables. A date formatter that opens a socket is a mismatch worth knowing about.'],
+    deps: ['Dependency tree', 'A clean-looking package can still pull in a compromised dependency. We resolve the tree and inherit the worst verdict in it, then tell you which ones we’ve verified vs. haven’t checked yet.'],
+    cves: ['Known CVEs', 'Published vulnerabilities for this package across its versions. Not malware, but known risk you should weigh.'],
+    advisories: ['Live malware advisories', 'Checked against the live malware feeds (OSV, GitHub Advisory). A version flagged an hour ago is blocked now, even if it’s since been unpublished.'],
+    history: ['Past compromise', 'Has this package ever been compromised before? If so, we say so, and tell you whether the version you’re looking at is clean.'],
+    typosquat: ['Typosquat distance', 'Is this name one character away from a package with millions of downloads? A mechanical check that catches look-alike names.'],
+    githubtag: ['GitHub release tag', 'Legitimate releases get tagged in the source repo. A package published to npm with no matching git tag is a small but real red flag.'],
+    repo: ['Repo maintenance', 'Is the source repo archived or long-abandoned? A hijacked package often points at a repo nobody is watching anymore.'],
+    provenance: ['Provenance', 'A cryptographic attestation (Sigstore) that the package was built from a specific commit in a specific CI run. Origin you can verify, not just trust, though valid provenance proves where it came from, not that it’s safe.'],
+    descmatch: ['Description match', 'Does what the code actually does match what the package says it does? A quick read flags a “lightweight date util” that’s quietly reaching for your environment variables.'],
+  };
+
+  function out(){ return document.getElementById('sw-out'); }
+  function bar(){ return document.getElementById('sw-bar'); }
+  function explainEl(){ return document.getElementById('sw-explain'); }
+  function esc(s){ return String(s).replace(/[&<>]/g, function(c){ return {'&':'&amp;','<':'&lt;','>':'&gt;'}[c]; }); }
+  function parseSpec(spec){ spec = spec.trim(); var at = spec.lastIndexOf('@'); if (at > 0) return { name: spec.slice(0,at), version: spec.slice(at+1) }; return { name: spec, version: '' }; }
+  function sym(v){ if (v === 'blocked') return ['✖','err']; if (v === 'verified') return ['✓','ok']; return ['⚠','warn']; }
+  function fmtNum(n){ if (n==null||isNaN(n)) return null; if (n>=1e9) return (n/1e9).toFixed(1).replace(/\.0$/,'')+'B'; if (n>=1e6) return (n/1e6).toFixed(1).replace(/\.0$/,'')+'M'; if (n>=1e3) return (n/1e3).toFixed(1).replace(/\.0$/,'')+'k'; return String(n); }
+  function fmtAge(iso){ if(!iso) return null; var t=Date.parse(iso); if(isNaN(t)) return null; var ms=Date.now()-t,day=86400000; if(ms<day) return Math.max(1,Math.floor(ms/3600000))+'h ago'; var d=Math.floor(ms/day); if(d<60) return d+' days ago'; if(d<730) return Math.floor(d/30)+' months ago'; return Math.floor(d/365)+' years ago'; }
+  function yr(iso){ var d=iso?new Date(iso):null; return d&&!isNaN(d)?d.getUTCFullYear():null; }
+  function row(sig, s, c, t){ return '  <span class="chk" data-sig="'+sig+'"><span class="'+c+'">'+s+'</span> <span class="muted">'+esc(t)+'</span></span>\n'; }
+
+  function render(name, version, d, pending){
+    var v = d.verdict || 'unverified';
+    var s = sym(v), o = '';
+    o += '<span class="prompt">$</span> <span class="cmd">swpx check '+esc(name)+(version?'@'+esc(version):'')+'</span>\n\n';
+    o += '<span class="'+s[1]+'">'+s[0]+' '+v.toUpperCase()+' — '+esc(name)+(version?'@'+esc(version):'')+'</span>\n';
+    if (d.summary) o += '\n<span class="muted" style="white-space:pre-wrap;display:block">'+esc(d.summary)+'</span>';
+    o += '\n';
+    var mal = (d.mal && d.mal.length) ? d.mal : null;
+    if (mal) { for (var i=0;i<mal.length;i++){ o += '  <span class="chk" data-sig="advisories"><span class="err">'+esc(mal[i].id)+'</span><span class="muted"> · '+esc(mal[i].summary||'malicious code')+'</span></span>\n'; if (mal[i].disclosed) o += '  <span class="muted">  disclosed '+esc(mal[i].disclosed)+'</span>\n'; } o += '\n'; }
+    if (v === 'blocked') { o += '  <span class="err">This version is confirmed malware. swpx hard-blocks it.</span>\n'; }
+    else {
+      var dl = fmtNum(d.weekly_downloads); if (dl) o += row('downloads','✓','ok', dl+' weekly downloads');
+      if (d.publisher || d.author_package_count!=null){ var ap=[]; if(d.publisher) ap.push(d.publisher); if(d.author_package_count!=null) ap.push(d.author_package_count+' package'+(d.author_package_count===1?'':'s')); var atd=fmtNum(d.author_total_downloads); if(atd) ap.push(atd+' total downloads'); var since=yr(d.author_first_publish); if(since) ap.push('publishing since '+since); o += row('author','✓','ok','author: '+ap.join(' · ')); }
+      if (d.maintainer_changed===true) o += row('maintainer','⚠','warn','publisher changed since the previous release'+(d.previous_publisher?' (was '+d.previous_publisher+')':'')); else if (d.maintainer_changed===false) o += row('maintainer','✓','ok','same publisher as the previous release');
+      if (d.license) o += row('license','✓','ok', d.license+' licensed');
+      var age=fmtAge(d.publish_time); if (age){ var fresh=(d.verdict_signals||[]).indexOf('freshly_published')>=0; o += row('age', fresh?'⚠':'✓', fresh?'warn':'ok', 'published '+age+(fresh?' — very new, advisory feeds may lag':'')); }
+      o += d.has_provenance ? row('provenance','✓','ok','provenance verified'+(d.provenance_repo?' — built from '+d.provenance_repo:'')) : row('provenance','—','dim','no provenance');
+      o += d.is_minified ? row('readability','⚠','warn','minified / unreadable') : row('readability','✓','ok','readable source');
+      o += d.has_install_scripts ? row('scripts','⚠','warn','install scripts'+(d.install_script_types&&d.install_script_types.length?': '+d.install_script_types.join(', '):'')) : row('scripts','✓','ok','no install scripts');
+      if (d.capabilities && d.capabilities.length) o += row('caps','→','info', d.capabilities.join(', ')); else o += row('caps','✓','ok','no system access');
+      if (d.typosquat_of) o += row('typosquat','⚠','warn','looks like a typosquat of "'+d.typosquat_of+'"');
+      if (d.has_github_tag===1) o += row('githubtag','✓','ok','GitHub release tag present'); else if (d.has_github_tag===0) o += row('githubtag','⚠','warn','no matching GitHub tag');
+      if (d.repo_archived===true) o += row('repo','⚠','warn','source repository is archived');
+      var lc=fmtAge(d.repo_last_commit); if (lc) o += row('repo','✓','ok','repo last updated '+lc+(typeof d.repo_open_issues==='number'?' · '+d.repo_open_issues+' open issues':''));
+      if (typeof d.known_cves==='number') o += d.known_cves>0 ? row('cves','⚠','warn', d.known_cves+' known '+(d.known_cves===1?'CVE':'CVEs')) : row('cves','✓','ok','no known CVEs');
+      if (d.compromised_history && d.compromised_history.length){ for (var h=0;h<d.compromised_history.length;h++){ var ch=d.compromised_history[h]; o += row('history','⚠','warn','prior advisory: '+(ch.id||'compromise')+(ch.published?' ('+ch.published+')':'')); } } else if (typeof d.known_cves==='number') o += row('history','✓','ok','no prior compromise advisories');
+      if (d.description_match==='match') o += row('descmatch','✓','ok','behaviour matches its description'); else if (typeof d.description_match==='string') o += row('descmatch','⚠','warn','behaviour may not match its description');
+      var deps=d.dependencies||[], flags=d.dependency_flags||[];
+      if (deps.length){ var bits=[]; if(d.dep_verified!=null) bits.push(d.dep_verified+' verified'); if(flags.length) bits.push(flags.length+' flagged'); if(d.dep_unknown) bits.push(d.dep_unknown+' not yet checked'); var any=flags.some(function(f){return f.verdict==='blocked';}); var ds=flags.length?(any?['✖','err']:['⚠','warn']):['⊕','dim']; var dt=deps.length+' direct dependencies'+(bits.length?' — '+bits.join(' · '):(flags.length?'':' — none flagged')); o += '  <span class="chk" data-sig="deps"><span class="'+ds[1]+'">'+ds[0]+'</span> <span class="muted">'+esc(dt)+(flags.length?':':'')+'</span></span>\n'; for (var f=0;f<flags.length;f++){ var fl=flags[f]; o += '     <span class="dim">└</span> <span class="'+(fl.verdict==='blocked'?'err':'warn')+'">'+esc(fl.name)+'@'+esc(fl.version)+' → '+esc(fl.verdict)+'</span>\n'; } }
+    }
+    if (pending) o += '\n  <span class="dim">↻ fetching full report…</span>';
+    out().innerHTML = o;
+  }
+
+  function popupEl(){ return document.getElementById('sw-popup'); }
+  function clearActive(){ var a = document.querySelectorAll('.chk.active'); for (var i=0;i<a.length;i++) a[i].classList.remove('active'); }
+  function showPopup(sig, el){
+    var e = EXPLAIN[sig]; if (!e) return;
+    var p = popupEl();
+    p.innerHTML = '<span class="label">Why we check this</span><h4>'+esc(e[0])+'</h4><p>'+esc(e[1])+'</p>';
+    p.classList.add('show'); clearActive(); el.classList.add('active');
+    var r = el.getBoundingClientRect(), pw = p.offsetWidth, ph = p.offsetHeight, m = 14;
+    var left = Math.max(m, Math.min(r.left, window.innerWidth - pw - m));
+    var top = r.bottom + 8; if (top + ph > window.innerHeight - m) top = Math.max(m, r.top - ph - 8);
+    p.style.left = left + 'px'; p.style.top = top + 'px';
+  }
+  function hidePopup(){ popupEl().classList.remove('show'); clearActive(); }
+  document.addEventListener('click', function(ev){
+    var el = ev.target.closest ? ev.target.closest('.chk') : null;
+    if (el && el.getAttribute('data-sig')) { showPopup(el.getAttribute('data-sig'), el); return; }
+    if (!ev.target.closest || !ev.target.closest('#sw-popup')) hidePopup();
+  });
+  window.addEventListener('scroll', hidePopup, true);
+  window.copyInstall = function(){
+    var cmd = 'npm i -g somewhere-cli', tag = document.getElementById('installTag');
+    function done(){ if (tag){ tag.textContent = 'Copied ✓'; setTimeout(function(){ tag.textContent = 'Copy'; }, 1800); } }
+    function fb(){ try { var t=document.createElement('textarea'); t.value=cmd; t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select(); document.execCommand('copy'); document.body.removeChild(t); } catch(e){} done(); }
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(cmd).then(done).catch(fb); else fb();
+  };
+
+  function fail(msg){ out().innerHTML = '<span class="warn">⚠ '+esc(msg)+'</span>'; }
+  function vurl(name, version, enrich){ return API+'/api/verdict/'+encodeURIComponent(name)+'/'+encodeURIComponent(version)+'?from=web'+(enrich?'&enrich=1':''); }
+  function resolveLatest(name){ return fetch('https://registry.npmjs.org/'+name.replace(/\//g,'%2F')+'/latest').then(function(r){ if(!r.ok) throw 'notfound'; return r.json(); }).then(function(j){ if(!j.version) throw 'notfound'; return j.version; }); }
+  var seq = 0;
+  window.swRun = function(spec){
+    var p = parseSpec(spec); if (!p.name) return; var mine = ++seq;
+    var input = document.getElementById('sw-input'); if (input) input.value = spec;
+    bar().textContent = 'swpx check '+p.name;
+    out().innerHTML = '<span class="dim">Checking '+esc(p.name)+'…</span>';
+    (p.version?Promise.resolve(p.version):resolveLatest(p.name)).then(function(version){
+      return fetch(vurl(p.name,version,false)).then(function(r){ if(r.status===429) throw 'rate'; if(!r.ok) throw 'down'; return r.json(); }).then(function(j){
+        if (mine!==seq) return; var d=(j&&j.data)||{};
+        var willEnrich = !(j&&j.enriched) && !!d.verdict && d.verdict!=='blocked';
+        render(p.name, version, d, willEnrich);
+        if (willEnrich) setTimeout(function(){ if(mine!==seq) return; fetch(vurl(p.name,version,true)).then(function(r){ if(!r.ok) throw 0; return r.json(); }).then(function(j2){ if(mine===seq) render(p.name, version, (j2&&j2.data)||d, false); }).catch(function(){}); }, 5000);
+      });
+    }).catch(function(e){ if (mine!==seq) return; if(e==='rate') fail('Rate limited — give it a moment and try again.'); else if(e==='notfound') fail('That package wasn’t found on npm.'); else fail('Could not reach the verdict service. (swpx falls back to npm when this happens.)'); });
+  };
+  window.swCheck = function(ev){ ev.preventDefault(); var el=document.getElementById('sw-input'); if(el&&el.value.trim()) window.swRun(el.value.trim()); return false; };
+  function initFaq(){
+    var qs = document.querySelectorAll('.faq-q');
+    for (var i=0;i<qs.length;i++){ qs[i].addEventListener('click', function(){
+      var item = this.parentElement, wasOpen = item.classList.contains('open');
+      var open = document.querySelectorAll('.faq-item.open');
+      for (var j=0;j<open.length;j++) open[j].classList.remove('open');
+      if (!wasOpen) item.classList.add('open');
+    }); }
+  }
+  function dismissHint(){ var h=document.getElementById('demo-hint'); if (h) h.classList.add('dismissed'); }
+  function initHint(){
+    var inp=document.getElementById('sw-input');
+    if (inp){ inp.addEventListener('focus', dismissHint); inp.addEventListener('input', dismissHint); }
+    document.addEventListener('click', dismissHint);
+  }
+  function boot(){ initFaq(); initHint(); var q=(new URLSearchParams(location.search)).get('pkg'); window.swRun(q&&q.trim()?q.trim():'cors'); }
+  if (document.readyState!=='loading') boot(); else document.addEventListener('DOMContentLoaded', boot);
+})();
+</script>
+</body>
+</html>

@@ -4,19 +4,22 @@
 
 import { readVerdict, writeVerdict } from './db.mjs';
 import { computeMechanical, finalize, minimalRow } from './compute.mjs';
-import { queryMalAdvisories } from './osv.mjs';
+import { cachedMalAdvisories } from './mal-cache.mjs';
 
 export async function resolveVerdict(sw, name, version, opts = {}) {
   const githubToken = opts.githubToken ?? sw?.env?.GITHUB_TOKEN;
 
   // MAL is the authoritative block signal and is INDEPENDENT of the registry
   // manifest — confirmed-malware versions are frequently unpublished from npm, so
-  // we must be able to block a version we can no longer fetch. Check it first,
-  // live, never cached. An OSV outage yields "no MAL info" (mal = []), never a
-  // silent clean pass.
+  // we must be able to block a version we can no longer fetch. Read through a
+  // short-TTL cache (60s) instead of hitting OSV on every request: fast on the hot
+  // path, at most ~60s behind a brand-new advisory, and on an OSV outage it serves
+  // last-known-recent advisories (keep blocking known-bad) rather than failing
+  // open. An unrecoverable failure yields "no MAL info" (mal = []), never a silent
+  // clean pass.
   let mal = [];
   try {
-    mal = await queryMalAdvisories(name, version, { fetchImpl: opts.fetchImpl });
+    mal = await cachedMalAdvisories(sw, name, version, { fetchImpl: opts.fetchImpl });
   } catch {
     mal = [];
   }
