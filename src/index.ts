@@ -24,6 +24,7 @@ import { registerCheck } from './commands/check.js';
 import { registerApi } from './commands/api.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
+import { registerUpdate } from './commands/update.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -61,5 +62,6 @@ registerCheck(program);
 registerApi(program);
 registerMcp(program);
 registerSwpx(program);
+registerUpdate(program);
 
 program.parse();
