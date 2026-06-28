@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { prewarmSlice, normalizeNames } from './prewarm.mjs';
+import { prewarmSlice, coverDependencies, normalizeNames } from './prewarm.mjs';
 import { rowToVerdict } from './db.mjs';
 
 test('normalizeNames — strings, {name} objects, {rows}, garbage', () => {
@@ -165,4 +165,39 @@ test('prewarmSlice enrich — advisory history + dependency cascade are cached b
   assert.deepEqual(row.compromised_history, [{ id: 'MAL-2025-99', published: '2025-09-15' }]);
   assert.deepEqual(row.dependency_flags, [{ name: 'bad-dep', version: '2.0.0', verdict: 'blocked' }]);
   assert.equal(row.summary, 'Dependency bad-dep is blocked.');
+});
+
+// --- coverDependencies (close the dependency closure) ---
+function depSw(uncovered) {
+  const writes = [];
+  return {
+    writes,
+    env: {},
+    db: {
+      query: async (sql, params) => {
+        if (/SELECT DISTINCT je\.value/.test(sql)) return { data: uncovered.map((d) => ({ dep: d })) };
+        if (/COUNT\(DISTINCT je\.value\)/.test(sql)) return { data: [{ c: Math.max(0, uncovered.length - writes.length) }] };
+        if (sql.startsWith('INSERT')) { writes.push(params[0]); return { changes: 1 }; }
+        return { data: [] }; // ALTER (ensureSchema) + anything else
+      },
+    },
+  };
+}
+
+test('coverDependencies — computes uncovered deps and reports remaining', async () => {
+  const sw = depSw(['uncov-a', 'uncov-b']);
+  const out = await coverDependencies(sw, { fetchImpl: routeFetch(), now: Date.now() });
+  assert.equal(out.processed, 2);
+  assert.equal(out.written, 2);
+  assert.equal(out.errors, 0);
+  assert.deepEqual(sw.writes.sort(), ['uncov-a', 'uncov-b']);
+  assert.equal(out.remaining_uncovered, 0);
+});
+
+test('coverDependencies — nothing uncovered is a clean no-op', async () => {
+  const sw = depSw([]);
+  const out = await coverDependencies(sw, { fetchImpl: routeFetch(), now: Date.now() });
+  assert.equal(out.processed, 0);
+  assert.equal(out.written, 0);
+  assert.equal(out.remaining_uncovered, 0);
 });

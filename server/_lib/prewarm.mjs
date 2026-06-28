@@ -208,3 +208,70 @@ export async function enrichPending(sw, { limit = 3, llmProvider, llmModel, fetc
   }
   return { pending: rows.length, enriched, errors };
 }
+
+/** Close the dependency closure: a cached package's verdict is only as complete
+ *  as its dependency coverage (the "N not yet checked" line, and the cascade that
+ *  inherits the worst dep verdict). This finds dependency names referenced by
+ *  cached rows that aren't themselves cached, and computes a MECHANICAL verdict
+ *  for each (free — no LLM). Run it repeatedly: each pass covers a slice and the
+ *  newly-cached deps reveal THEIR uncovered deps, so the closure converges to
+ *  remaining_uncovered = 0. A few deps never resolve (unpublished/private) and
+ *  stay uncovered — the caller should stop when remaining stops dropping. */
+export async function coverDependencies(sw, { limit = 50, githubToken, fetchImpl = fetch, now = Date.now() } = {}) {
+  const cap = Math.min(Math.max(1, limit), 200);
+  let deps = [];
+  try {
+    const r = await sw.db.query(
+      `SELECT DISTINCT je.value AS dep
+       FROM verdicts v, json_each(v.dependencies) je
+       WHERE je.value NOT IN (SELECT package FROM verdicts)
+       LIMIT ?`,
+      [cap],
+    );
+    deps = (Array.isArray(r?.data) ? r.data : []).map((x) => x.dep).filter((d) => typeof d === 'string');
+  } catch {
+    return { processed: 0, written: 0, errors: 0, remaining_uncovered: null, note: 'closure query failed' };
+  }
+
+  let processed = 0;
+  let written = 0;
+  let errors = 0;
+  for (let i = 0; i < deps.length; i += 5) {
+    const chunk = deps.slice(i, i + 5);
+    await Promise.all(
+      chunk.map(async (name) => {
+        processed++;
+        try {
+          const pack = await fetchPackument(name, { fetchImpl });
+          const version = latestVersion(pack);
+          if (!version) {
+            errors++;
+            return;
+          }
+          const row = await computeMechanical(name, version, {
+            githubToken,
+            fetchImpl,
+            now: new Date(now).toISOString(),
+          });
+          await writeVerdict(sw, row);
+          written++;
+        } catch {
+          errors++;
+        }
+      }),
+    );
+  }
+
+  let remaining = null;
+  try {
+    const rr = await sw.db.query(
+      `SELECT COUNT(DISTINCT je.value) AS c
+       FROM verdicts v, json_each(v.dependencies) je
+       WHERE je.value NOT IN (SELECT package FROM verdicts)`,
+    );
+    remaining = rr?.data?.[0]?.c ?? null;
+  } catch {
+    // best-effort progress signal
+  }
+  return { processed, written, errors, remaining_uncovered: remaining };
+}

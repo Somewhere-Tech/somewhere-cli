@@ -7,7 +7,7 @@
  *  list comes from sw.env.TOP_PACKAGES_URL (JSON list of names or
  *  {name,downloads}); a small built-in seed validates the pipeline first. */
 
-import { prewarmSlice, enrichPending, normalizeNames } from '../_lib/prewarm.mjs';
+import { prewarmSlice, enrichPending, coverDependencies, normalizeNames } from '../_lib/prewarm.mjs';
 import { TOP_PACKAGES } from '../_lib/top-packages.mjs';
 
 const SEED = [
@@ -46,6 +46,17 @@ export default async function (req, sw) {
       llmModel: sw.env?.PREWARM_MODEL,
     });
     return Response.json({ ok: true, data: { mode: 'pending', ...summary } });
+  }
+
+  // Close the dependency closure: compute MECHANICAL verdicts (free, no LLM) for
+  // dependency names referenced by cached rows but not yet cached. Call repeatedly
+  // until remaining_uncovered stops dropping. (POST /api/prewarm?deps=1)
+  if (url.searchParams.get('deps') === '1') {
+    const summary = await coverDependencies(sw, {
+      limit: parseInt(url.searchParams.get('limit') ?? '50', 10) || 50,
+      githubToken: sw.env?.GITHUB_TOKEN,
+    });
+    return Response.json({ ok: true, data: { mode: 'deps', ...summary } });
   }
 
   const offset = Math.max(0, parseInt(url.searchParams.get('offset') ?? '0', 10) || 0);
