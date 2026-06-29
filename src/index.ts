@@ -25,6 +25,7 @@ import { registerApi } from './commands/api.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
+import { computeUpdateNotice } from './lib/update-check.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -64,4 +65,11 @@ registerMcp(program);
 registerSwpx(program);
 registerUpdate(program);
 
-program.parse();
+// Throttled, stderr-only, interactive-only check for a newer CLI version. Shown
+// as a parting line AFTER the command (process exit) so it never touches stdout
+// or agent/piped output. Fail-open — computeUpdateNotice swallows all errors.
+void (async () => {
+  const updateNotice = await computeUpdateNotice(process.argv);
+  if (updateNotice) process.on('exit', () => process.stderr.write(updateNotice));
+  program.parse();
+})();
