@@ -25,7 +25,7 @@ import { registerApi } from './commands/api.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
-import { computeUpdateNotice } from './lib/update-check.js';
+import { collectNotices } from './lib/notify/index.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -65,11 +65,12 @@ registerMcp(program);
 registerSwpx(program);
 registerUpdate(program);
 
-// Throttled, stderr-only, interactive-only check for a newer CLI version. Shown
-// as a parting line AFTER the command (process exit) so it never touches stdout
-// or agent/piped output. Fail-open — computeUpdateNotice swallows all errors.
+// User-notification pipeline (update-available, advisories, announcements…).
+// Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
+// STDERR as a parting line AFTER the command — never stdout, agent, or swpx/swpm
+// safety output. Fail-open: collectNotices swallows all errors.
 void (async () => {
-  const updateNotice = await computeUpdateNotice(process.argv);
-  if (updateNotice) process.on('exit', () => process.stderr.write(updateNotice));
+  const notices = await collectNotices(process.argv);
+  if (notices.length) process.on('exit', () => process.stderr.write('\n' + notices.join('\n') + '\n'));
   program.parse();
 })();
