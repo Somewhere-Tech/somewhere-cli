@@ -55,14 +55,15 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   }
 
   // Couldn't verify the tree → LOUD, then fall back (default) or refuse (enforce).
-  const failOpen = async (rateLimited: boolean): Promise<SwpmOutcome> => {
-    loudUnavailable(d.errLog, 'this install', rateLimited);
+  const failOpen = async (rateLimited: boolean, cause?: string): Promise<SwpmOutcome> => {
+    loudUnavailable(d.errLog, 'this install', rateLimited, cause);
     if (enforce) {
       refused(d.errLog, 'this install', 'npm');
       return { exitCode: 1, action: 'blocked' };
     }
     return { exitCode: await d.runReal('npm', clean), action: 'fallback' };
   };
+  const causeOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
   const explicit = clean.slice(1).filter((a) => !a.startsWith('-'));
   let toCheck: PkgRef[] = [];
@@ -95,15 +96,15 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
         return { exitCode: await d.runReal('npm', clean), action: 'passthrough' };
       }
     }
-  } catch {
-    return failOpen(false);
+  } catch (err) {
+    return failOpen(false, causeOf(err));
   }
 
   let verdicts: Verdict[];
   try {
     verdicts = await d.getVerdictBatch(toCheck);
   } catch (err) {
-    return failOpen(err instanceof VerdictUnavailable && err.rateLimited);
+    return failOpen(err instanceof VerdictUnavailable && err.rateLimited, causeOf(err));
   }
 
   const aligned = alignVerdicts(toCheck, verdicts);

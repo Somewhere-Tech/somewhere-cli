@@ -347,12 +347,14 @@ test('swpx — default + unavailable falls back with a LOUD warning', async () =
   const r = await runSwpx(['foo'], {
     ...cap, enforce: false,
     resolveVersion: async () => '1.0.0',
-    getVerdict: async () => { throw new Error('down'); },
+    getVerdict: async () => { throw new Error('The operation was aborted due to timeout'); },
     runReal,
   });
   assert.equal(r.action, 'fallback');
   assert.equal(runReal.calls.length, 1);
   assert.match(cap.errText(), /COULD NOT VERIFY foo/);
+  // the underlying cause must be surfaced (a timeout vs an outage vs a 503) — not swallowed
+  assert.match(cap.errText(), /Reason: The operation was aborted due to timeout/);
 });
 
 test('swpx — --enforce is stripped from the npx passthrough', async () => {

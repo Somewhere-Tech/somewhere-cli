@@ -12,7 +12,7 @@ import { renderSingle, toJsonVerdict } from './render.js';
 import { bindDeps, msg, type RunDeps } from './run-common.js';
 import { VerdictUnavailable } from './verdict-client.js';
 import type { VerdictLevel } from './types.js';
-import { yellow } from '../lib/output.js';
+import { dim, yellow } from '../lib/output.js';
 
 function exitForLevel(level: VerdictLevel): number {
   if (level === 'verified') return 0;
@@ -50,6 +50,7 @@ export async function runCheck(
         ? `${yellow('⚠')} Rate limited — couldn't check ${spec.name}. Wait a moment and retry.`
         : `${yellow('⚠')} Could not verify ${spec.name}@${version} — the verdict service was unreachable.`,
     );
+    if (!rl) d.errLog(`  ${dim(`Reason: ${err instanceof Error ? err.message : String(err)}`)}`);
     return 3;
   }
 

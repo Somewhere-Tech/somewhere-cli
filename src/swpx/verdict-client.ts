@@ -16,9 +16,13 @@ import type { FetchLike, FetchResponse } from './registry.js';
 const VERDICT_BASE =
   process.env.SWPX_VERDICT_URL?.replace(/\/$/, '') || 'https://npm.somewhere.tech';
 
-/** Short by design: the verdict check sits in front of every `npx`, so a slow
- *  or unreachable service must fail fast to fallback, not stall the user. */
-const VERDICT_TIMEOUT_MS = Number(process.env.SWPX_VERDICT_TIMEOUT_MS) || 4000;
+/** Budget for one verdict lookup. It sits in front of every `npx`, so it must
+ *  fail to fallback rather than stall — but 4s was too tight for the COLD path
+ *  (fresh DNS/TLS from the client + a cold worker + a first-time uncached compute),
+ *  which spuriously tripped the fail-open banner on the very first call while every
+ *  warm call after was instant. 8s comfortably covers a cold uncached lookup;
+ *  override with SWPX_VERDICT_TIMEOUT_MS (e.g. lower it for strict fail-fast in CI). */
+const VERDICT_TIMEOUT_MS = Number(process.env.SWPX_VERDICT_TIMEOUT_MS) || 8000;
 
 const defaultFetch: FetchLike = (url, init) =>
   fetch(url, init as RequestInit) as unknown as Promise<FetchResponse>;
