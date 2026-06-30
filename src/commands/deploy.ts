@@ -148,14 +148,22 @@ export function registerDeploy(program: Command) {
         });
 
         spinner.stop();
-        const fileCount =
+        const staticCount =
           typeof result.files === 'number'
             ? result.files
             : (result.files ?? []).length;
-        success(`${fileCount} files uploaded (${formatBytes(totalBytes)})`);
-
-        if (result.has_functions) {
-          success('Functions deployed');
+        const fnCount = Object.keys(functions).length;
+        // ONE scope-consistent headline — report only the layer this deploy
+        // actually touched, so it never claims "Functions deployed" on a
+        // static-only deploy or counts static files on a backend-only deploy
+        // (audit #3: the old output printed "Functions deployed" + a static
+        // count + "the other layer was left untouched" all at once).
+        if (scope === 'functions') {
+          success(`${fnCount} function(s) deployed — site left untouched`);
+        } else if (scope === 'static') {
+          success(`${staticCount} static file(s) deployed (${formatBytes(totalBytes)}) — functions left untouched`);
+        } else {
+          success(`${staticCount} static file(s)${fnCount > 0 ? ` + ${fnCount} function(s)` : ''} deployed (${formatBytes(totalBytes)})`);
         }
 
         // Build log: entry chunk, chunks + sizes, functions + sizes (returned
@@ -188,13 +196,7 @@ export function registerDeploy(program: Command) {
           for (const w of result.warnings) warn(w);
         }
 
-        if (scope === 'functions') {
-          success(`Functions live at ${teal(result.url)} (site left untouched)`);
-        } else if (scope === 'static') {
-          success(`Site live at ${teal(result.url)} (functions left untouched)`);
-        } else {
-          success(`Live at ${teal(result.url)}`);
-        }
+        success(`Live at ${teal(result.url)}`);
 
         // Remind the dev of the round-trip trade-off they opted into. Raw
         // source stays editable end-to-end; bundled files do not — pull/export

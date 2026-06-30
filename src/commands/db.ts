@@ -34,13 +34,16 @@ export function registerDb(program: Command) {
         projectId = config.project_id;
       }
 
-      const spinner = ora('Running query...').start();
+      // --json must emit ONLY the JSON envelope on stdout — no spinner noise
+      // (the "Running query..." line broke scripting; audit #6). Skip the
+      // spinner entirely in --json mode rather than relying on the stream.
+      const spinner = opts.json ? null : ora('Running query...').start();
       try {
         const r = await client.call<QueryResult>('POST', '/db/query', {
           project_id: projectId,
           sql,
         });
-        spinner.stop();
+        spinner?.stop();
 
         if (opts.json) {
           console.log(JSON.stringify(r, null, 2));
@@ -67,7 +70,7 @@ export function registerDb(program: Command) {
         console.log('');
         info(dim(`${r.rows.length} row${r.rows.length === 1 ? '' : 's'}${r.duration_ms != null ? ` · ${r.duration_ms}ms` : ''}`));
       } catch (err) {
-        spinner.fail('Query failed');
+        spinner?.fail('Query failed');
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
@@ -154,19 +157,24 @@ export function registerDb(program: Command) {
       }
 
       try {
-        const r = await client.call<{ tables: Array<{ name: string; row_count?: number }> }>(
+        const r = await client.call<{ tables: Array<string | { name: string; row_count?: number }> }>(
           'GET',
           '/db/tables',
           undefined,
           { project_id: projectId },
         );
-        if (!r.tables.length) {
+        // The API returns tables as an array of NAME STRINGS. (The old CLI read
+        // them as { name, row_count } objects, so every name came back empty and
+        // every row count printed "?" — audit #5.) Normalize defensively so a
+        // future object shape still works.
+        const rows = (r.tables ?? []).map((t) => (typeof t === 'string' ? { name: t } : t));
+        if (!rows.length) {
           info(dim('No tables yet. Create one with `somewhere db query "CREATE TABLE …"`.'));
           return;
         }
         table(
           ['Table', 'Rows'],
-          r.tables.map((t) => [teal(t.name), t.row_count != null ? String(t.row_count) : dim('?')]),
+          rows.map((t) => [teal(t.name), t.row_count != null ? String(t.row_count) : dim('—')]),
         );
       } catch (err) {
         error(err instanceof Error ? err.message : String(err));
