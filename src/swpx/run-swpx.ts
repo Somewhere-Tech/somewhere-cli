@@ -40,27 +40,28 @@ export async function runSwpx(args: string[], deps: RunDeps = {}): Promise<SwpxO
 
   // Couldn't verify → LOUD warning (never silent), then fall back (default) OR
   // refuse (enforce / fail-closed).
-  const failOpen = async (rateLimited: boolean): Promise<SwpxOutcome> => {
-    loudUnavailable(d.errLog, spec.name, rateLimited);
+  const failOpen = async (rateLimited: boolean, cause?: string): Promise<SwpxOutcome> => {
+    loudUnavailable(d.errLog, spec.name, rateLimited, cause);
     if (enforce) {
       refused(d.errLog, spec.name, 'npx');
       return { exitCode: 1, action: 'blocked' };
     }
     return { exitCode: await d.runReal('npx', passthrough), action: 'fallback' };
   };
+  const causeOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
   let version: string;
   try {
     version = await d.resolveVersion(spec.name, spec.version);
-  } catch {
-    return failOpen(false);
+  } catch (err) {
+    return failOpen(false, causeOf(err));
   }
 
   let verdict;
   try {
     verdict = await d.getVerdict(spec.name, version);
   } catch (err) {
-    return failOpen(err instanceof VerdictUnavailable && err.rateLimited);
+    return failOpen(err instanceof VerdictUnavailable && err.rateLimited, causeOf(err));
   }
 
   const action = decide(verdict);

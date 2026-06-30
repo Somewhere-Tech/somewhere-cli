@@ -30,8 +30,16 @@ export function resolveEnforce(args: string[]): boolean {
   }
 }
 
-/** The LOUD "couldn't verify" block — printed to stderr, never silent. */
-export function loudUnavailable(emit: (s: string) => void, pkg: string, rateLimited: boolean): void {
+/** The LOUD "couldn't verify" block — printed to stderr, never silent. `cause` is
+ *  the underlying reason (timeout / HTTP status / network error / bad body); we
+ *  surface it so a timeout is distinguishable from an outage or a tamper — the
+ *  thing this banner claims to care about must itself be debuggable. */
+export function loudUnavailable(
+  emit: (s: string) => void,
+  pkg: string,
+  rateLimited: boolean,
+  cause?: string,
+): void {
   emit('');
   if (rateLimited) {
     emit(`${yellow('⚠')} Rate limited checking ${pkg} — the verdict service is throttling.`);
@@ -40,6 +48,7 @@ export function loudUnavailable(emit: (s: string) => void, pkg: string, rateLimi
     emit(`${red('⚠')}  COULD NOT VERIFY ${pkg} — the verdict service was unreachable.`);
     emit(`   ${dim('Running UNCHECKED (like plain npx/npm). Usually an outage — but a blocked')}`);
     emit(`   ${dim("check can also be malware hiding. If you didn't expect this, stop and retry.")}`);
+    if (cause) emit(`   ${dim(`Reason: ${cause}`)}`);
   }
   emit('');
 }
