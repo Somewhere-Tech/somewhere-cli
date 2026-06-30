@@ -110,12 +110,18 @@ export function registerDeploy(program: Command) {
       try {
         const body: Record<string, unknown> = {
           project_id: projectId,
-          files,
+          // --scope functions deploys ONLY the backend: send no static at all
+          // (an empty object, NOT omitted — the worker requires a files map).
+          // Sending the on-disk static under scope:functions is what bricked
+          // compiled SPAs (tsk_08cff5f4); the worker now ignores it too, but
+          // the CLI shouldn't send it in the first place. --scope static is the
+          // inverse: no functions.
+          files: scope === 'functions' ? {} : files,
         };
-        if (Object.keys(binaryFiles).length > 0) {
+        if (scope !== 'functions' && Object.keys(binaryFiles).length > 0) {
           body.binary_files = binaryFiles;
         }
-        if (Object.keys(functions).length > 0) {
+        if (scope !== 'static' && Object.keys(functions).length > 0) {
           body.functions = functions;
         }
         if (scope) body.scope = scope;
