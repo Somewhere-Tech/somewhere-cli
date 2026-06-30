@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { Command } from 'commander';
 import { registerAuth } from './commands/auth.js';
 import { registerInit } from './commands/init.js';
+import { registerLink } from './commands/link.js';
 import { registerProject } from './commands/project.js';
 import { registerDeploy } from './commands/deploy.js';
 import { registerPull } from './commands/pull.js';
@@ -43,6 +44,7 @@ program.enablePositionalOptions();
 
 registerAuth(program);
 registerInit(program);
+registerLink(program);
 registerProject(program);
 registerDeploy(program);
 registerPull(program);

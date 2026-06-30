@@ -8,6 +8,8 @@ export function registerLogs(program: Command) {
     .command('logs [project]')
     .description('Show recent logs')
     .option('--level <level>', 'Filter by level (debug, info, warn, error)')
+    .option('--source <source>', 'Filter by source (server, client, job, cron, queue, function, …)')
+    .option('--function <route>', 'Filter to one function route (e.g. /api/checkout)')
     .option('--tail <n>', 'Number of lines', '20')
     .option('--follow', 'Keep polling for new logs')
     .action(async (project: string | undefined, opts) => {
@@ -28,6 +30,12 @@ export function registerLogs(program: Command) {
         project_id: projectId,
         limit: parseInt(String(opts.tail), 10) || 20,
         level: opts.level,
+        // `source` is filtered server-side today. `function` is forwarded
+        // forward-compatibly: GET /logs does not yet filter by a specific
+        // function route (only by `source`), so the worker ignores it until a
+        // matching filter ships.
+        source: opts.source,
+        function: opts.function,
       };
 
       try {
@@ -67,6 +75,8 @@ export function registerLogs(program: Command) {
                 project_id: projectId,
                 limit: 50,
                 level: opts.level,
+                source: opts.source,
+                function: opts.function,
                 after: lastSeen,
               });
               for (const log of (fresh.logs ?? []).reverse()) {

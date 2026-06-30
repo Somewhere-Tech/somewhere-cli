@@ -1,12 +1,16 @@
 /**
  * Local HTTP server for `somewhere dev --local` — bridges Node's http server
  * to the fetch-shaped dispatch in runtime.ts, with chokidar hot reload.
- * Functions only: static files are the deploy/preview pipeline's job.
+ * Functions take precedence; requests that match no function route fall
+ * through to static files served straight off disk (index.html + assets, with
+ * an SPA fallback to index.html). Raw TSX/JSX is NOT compiled here — that's the
+ * deploy pipeline's job (CLAUDE.md rule 11); see serveStaticFile below.
  */
 import { createServer } from 'node:http';
 import type { IncomingMessage, ServerResponse } from 'node:http';
+import { readFileSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
-import { relative } from 'node:path';
+import { extname, join, relative, resolve, sep } from 'node:path';
 import chokidar from 'chokidar';
 import { IGNORE } from '../lib/files.js';
 import { bold, dim, green, red, teal, warn, yellow } from '../lib/output.js';
@@ -71,6 +75,143 @@ export interface LocalServerOptions {
   onReloadTypecheck?: () => void | Promise<void>;
 }
 
+// ─── Static-file fallthrough ────────────────────────────────────────────────
+//
+// When the function router matches NO route, serve the project's frontend
+// straight off disk: index.html + assets, with an SPA fallback to index.html
+// for extensionless paths (client-side routes). This is what makes
+// `http://localhost:<port>/` render the actual app while `/api/*` and any
+// matched function keep precedence (static only runs after a null match).
+//
+// SCOPE: raw/plain files only. We do NOT compile TSX/JSX here — the platform
+// compiles TSX on deploy (CLAUDE.md rule 11), and serving a raw `.tsx` with a
+// JS MIME type would not execute in the browser. Compile-parity for
+// `dev --local` (so an uncompiled `src/main.tsx` entry runs locally) is a
+// deliberate follow-up; serving already-built/plain static files closes the
+// "open localhost and see your app" gap on its own.
+
+const STATIC_MIME: Record<string, string> = {
+  '.html': 'text/html; charset=utf-8',
+  '.htm': 'text/html; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.mjs': 'text/javascript; charset=utf-8',
+  '.cjs': 'text/javascript; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.map': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif',
+  '.webp': 'image/webp',
+  '.avif': 'image/avif',
+  '.ico': 'image/x-icon',
+  '.bmp': 'image/bmp',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+  '.ttf': 'font/ttf',
+  '.otf': 'font/otf',
+  '.eot': 'application/vnd.ms-fontobject',
+  '.txt': 'text/plain; charset=utf-8',
+  '.md': 'text/markdown; charset=utf-8',
+  '.xml': 'application/xml; charset=utf-8',
+  '.wasm': 'application/wasm',
+  '.pdf': 'application/pdf',
+  '.mp3': 'audio/mpeg',
+  '.mp4': 'video/mp4',
+  '.webm': 'video/webm',
+  '.wav': 'audio/wav',
+  '.ogg': 'audio/ogg',
+};
+
+function safeStat(p: string): ReturnType<typeof statSync> | null {
+  try {
+    return statSync(p);
+  } catch {
+    return null;
+  }
+}
+
+/** Resolve `rel` under `cwd`, returning null if it would escape the root. */
+function resolveWithinCwd(cwd: string, rel: string): string | null {
+  const root = resolve(cwd);
+  const abs = resolve(root, rel);
+  if (abs !== root && !abs.startsWith(root + sep)) return null;
+  return abs;
+}
+
+/** True if any path segment is `..`, an IGNORE'd dir, or a dotfile/dotdir —
+ *  never serve `.env`, `.git`, `.somewhere.json`, etc. off disk. */
+function isBlockedPath(rel: string): boolean {
+  return rel
+    .split('/')
+    .some((seg) => seg === '..' || IGNORE.has(seg) || (seg !== '' && seg.startsWith('.')));
+}
+
+function fileResponse(abs: string, method: string): Response {
+  const buf = readFileSync(abs);
+  const type = STATIC_MIME[extname(abs).toLowerCase()] ?? 'application/octet-stream';
+  const headers: Record<string, string> = {
+    'Content-Type': type,
+    'Content-Length': String(buf.byteLength),
+    'Cache-Control': 'no-store', // local dev — always fresh
+  };
+  // HEAD: headers only, no body.
+  return new Response(method === 'HEAD' ? null : buf, { status: 200, headers });
+}
+
+/**
+ * Serve a static file for a request the function router did not match.
+ * Returns the response + a log label, or null to fall through to the 404.
+ * GET/HEAD only — other methods on an unmatched path stay a 404.
+ */
+function serveStaticFile(
+  cwd: string,
+  request: Request,
+): { response: Response; label: string } | null {
+  const method = request.method.toUpperCase();
+  if (method !== 'GET' && method !== 'HEAD') return null;
+
+  let pathname: string;
+  try {
+    pathname = decodeURIComponent(new URL(request.url).pathname);
+  } catch {
+    return null;
+  }
+  const rel = pathname.replace(/^\/+/, '');
+
+  // 1. Literal file on disk ("/" → index.html, "/dir/" → dir/index.html).
+  const target = rel === '' ? 'index.html' : rel;
+  if (!isBlockedPath(target)) {
+    const abs = resolveWithinCwd(cwd, target);
+    if (abs) {
+      const st = safeStat(abs);
+      if (st?.isFile()) {
+        return { response: fileResponse(abs, method), label: `static:${relative(cwd, abs) || 'index.html'}` };
+      }
+      if (st?.isDirectory()) {
+        const idx = resolveWithinCwd(cwd, join(target, 'index.html'));
+        const idxStat = idx ? safeStat(idx) : null;
+        if (idx && idxStat?.isFile()) {
+          return { response: fileResponse(idx, method), label: `static:${relative(cwd, idx)}` };
+        }
+      }
+    }
+  }
+
+  // 2. SPA fallback: extensionless paths (client routes like /about) → index.html.
+  if (extname(pathname) === '') {
+    const indexAbs = resolveWithinCwd(cwd, 'index.html');
+    const st = indexAbs ? safeStat(indexAbs) : null;
+    if (indexAbs && st?.isFile()) {
+      return { response: fileResponse(indexAbs, method), label: 'static:index.html (spa)' };
+    }
+  }
+
+  return null;
+}
+
 export function startLocalServer(state: LocalProjectState, opts: LocalServerOptions): void {
   const { port } = opts;
 
@@ -85,7 +226,14 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
         res.end(JSON.stringify({ ok: false, error: 'BAD_REQUEST', message: String(err) }));
         return;
       }
-      const result = await dispatchRequest(request, state);
+      let result = await dispatchRequest(request, state);
+      // Static-file fallthrough: no function route matched → try to serve the
+      // frontend (index.html + assets, SPA fallback) from disk. Functions keep
+      // precedence — this only runs when dispatch returned no route.
+      if (!result.route) {
+        const served = serveStaticFile(state.cwd, request);
+        if (served) result = { response: served.response, route: served.label };
+      }
       const ms = Date.now() - t0;
       const color = statusColor(result.response.status);
       console.log(
@@ -112,6 +260,12 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
     for (const r of state.routes) {
       console.log(`   ${dim('•')} ${r.displayPath} ${dim(`(${r.file})`)}`);
     }
+    console.log(
+      dim(
+        '   unmatched paths → static files from this folder (index.html + assets, SPA fallback). ' +
+          'raw TSX is compiled on deploy, not locally.',
+      ),
+    );
     if (state.missingEnvKeys.length) {
       warn(
         `Platform env keys with no local value (access will throw): ${state.missingEnvKeys.join(', ')}. ` +

@@ -106,7 +106,7 @@ export function registerInit(program: Command) {
     });
 }
 
-async function linkExisting(
+export async function linkExisting(
   client: ApiClient,
   dir: string,
 ) {
