@@ -99,6 +99,44 @@ test('buildBrowserBody: --include forwards the trimmed section array', () => {
   assert.deepEqual(body.include, ['network', 'dom']);
 });
 
+test('buildBrowserBody: --extract forwards extract:"markdown" (feature A)', () => {
+  const body = buildBrowserBody('https://example.com', { extract: true });
+  assert.equal(body.extract, 'markdown');
+});
+
+test('buildBrowserBody: --include markdown passes through', () => {
+  const body = buildBrowserBody('https://example.com', { include: 'markdown' });
+  assert.deepEqual(body.include, ['markdown']);
+});
+
+test('buildBrowserBody: --session forwards session_id (feature B)', () => {
+  const body = buildBrowserBody('https://example.com', { session: 'checkout-flow' });
+  assert.equal(body.session_id, 'checkout-flow');
+});
+
+test('formatBrowserReport: surfaces the session handle + expiry', () => {
+  const lines = formatBrowserReport({
+    passed: true,
+    final_url: 'https://example.com/',
+    session_id: 'flow1',
+    session_expires_at: '2026-01-01T00:00:00Z',
+    session_note: 'session expired, started fresh',
+  });
+  assert.ok(lines.some((l) => l.includes('session: flow1')));
+  assert.ok(lines.some((l) => l.includes('session_note')));
+});
+
+test('formatBrowserReport: prints extracted markdown fenced', () => {
+  const lines = formatBrowserReport({
+    passed: true,
+    final_url: 'https://example.com/',
+    markdown: '# Title\n\nBody text',
+  });
+  assert.ok(lines.includes('--- markdown ---'));
+  assert.ok(lines.includes('# Title'));
+  assert.ok(lines.includes('--- end markdown ---'));
+});
+
 test('request shape: POSTs /browser with bearer auth and the built body', async () => {
   lastRequest = null;
   const client = new ApiClient('smt_test_key');

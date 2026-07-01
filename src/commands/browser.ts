@@ -54,6 +54,13 @@ export interface BrowserResult {
     selector?: string;
   }>;
   testid_map?: Record<string, unknown>;
+  /** Structured extraction (--extract / --include markdown): the page as clean markdown. */
+  markdown?: string;
+  /** Persistent session (--session): the handle to reconnect on the next call. */
+  session_id?: string;
+  session_expires_at?: string;
+  /** Fail-soft note, e.g. "session expired, started fresh". */
+  session_note?: string;
 }
 
 export interface BrowserOptions {
@@ -67,6 +74,8 @@ export interface BrowserOptions {
   viewport?: string;
   store?: boolean;
   include?: string;
+  extract?: boolean;
+  session?: string;
   json?: boolean;
 }
 
@@ -110,6 +119,10 @@ export function buildBrowserBody(
     const sections = opts.include.split(',').map((s) => s.trim()).filter(Boolean);
     if (sections.length) body.include = sections;
   }
+  // Structured extraction: read the page as clean markdown (feature A).
+  if (opts.extract) body.extract = 'markdown';
+  // Persistent session: reuse ONE live browser across calls (feature B).
+  if (opts.session) body.session_id = opts.session;
   return body;
 }
 
@@ -174,6 +187,12 @@ export function formatBrowserReport(
 
   const verdict = r.passed === false ? red('FAIL') : green('PASS');
   lines.push(`${verdict} ${teal(r.final_url ?? '(no url)')}`);
+  // Persistent session (feature B): surface the handle to reconnect + its expiry.
+  if (r.session_id) {
+    const exp = r.session_expires_at ? dim(` (expires ${r.session_expires_at})`) : '';
+    lines.push(`session: ${r.session_id}${exp}`);
+    if (r.session_note) lines.push(`session_note: ${dim(r.session_note)}`);
+  }
   lines.push(`console_errors: ${ce.length}`);
   lines.push(`page_errors: ${pe.length}`);
   lines.push(`failed_requests: ${fr.length}`);
@@ -215,6 +234,14 @@ export function formatBrowserReport(
         `screenshot: ${label}${dim('captured inline (image bytes — not shown in the terminal; re-run with --store for a viewable link, or --json for the base64)')}`,
       );
     }
+  }
+
+  // Structured extraction (feature A): the page as clean markdown, printed last
+  // so it doesn't bury the signals. Fenced so it's obvious where it starts/ends.
+  if (typeof r.markdown === 'string' && r.markdown.length) {
+    lines.push('--- markdown ---');
+    for (const l of r.markdown.split('\n')) lines.push(l);
+    lines.push('--- end markdown ---');
   }
 
   // Full interactive-element map only on demand; the count above is the default.
@@ -260,7 +287,15 @@ export function registerBrowser(program: Command) {
     )
     .option(
       '--include <sections>',
-      'Opt-in heavy sections for a no-steps inspect call: a comma list of "network" and/or "dom" (e.g. --include network,dom). Lean by default.',
+      'Opt-in heavy sections for a no-steps inspect call: a comma list of "network", "dom", and/or "markdown" (e.g. --include network,dom). Lean by default.',
+    )
+    .option(
+      '--extract',
+      'Read the page as clean MARKDOWN (headings, links, lists, main content) in the output instead of vision-parsing a screenshot. Same as --include markdown. No-steps inspect calls.',
+    )
+    .option(
+      '--session <id>',
+      'Keep ONE live browser page alive across calls under this handle (1–64 chars: letters/digits/dot/dash/underscore). Navigate in one call, then reconnect with the same --session to wait/screenshot the SAME page (cookies, current URL, in-flight stream preserved). A reconnect skips the initial navigation — use --path to move. Idles out after ~3 min. Omit for the default fresh-per-call browser.',
     )
     .option('--json', 'Print the raw browser response envelope as JSON.')
     .action(async (target: string | undefined, opts: BrowserOptions) => {
@@ -272,9 +307,9 @@ export function registerBrowser(program: Command) {
         const bad = opts.include
           .split(',')
           .map((s) => s.trim())
-          .filter((s) => s && s !== 'network' && s !== 'dom');
+          .filter((s) => s && s !== 'network' && s !== 'dom' && s !== 'markdown');
         if (bad.length) {
-          error(`--include only accepts "network" and/or "dom" (got "${bad.join(', ')}")`);
+          error(`--include only accepts "network", "dom", and/or "markdown" (got "${bad.join(', ')}")`);
           process.exit(1);
         }
       }
