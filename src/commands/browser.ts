@@ -27,7 +27,23 @@ export interface BrowserResult {
   page_errors?: unknown[];
   failed_requests?: unknown[];
   steps?: BrowserStepResult[];
-  screenshots?: Array<string | { path?: string; url?: string }>;
+  /** A screenshot is a bare path string (legacy) OR an object. In VERIFY mode
+   *  it carries `fs_path` (durable project file); in EYES mode it carries either
+   *  `inline_base64` (the image bytes — not renderable in a terminal) or, with
+   *  --store, a short-TTL `scratch_url` (+ `scratch_expires_at`). */
+  screenshots?: Array<
+    | string
+    | {
+        label?: string;
+        path?: string;
+        url?: string;
+        fs_path?: string;
+        inline_base64?: string;
+        scratch_url?: string;
+        scratch_expires_at?: string;
+        error?: string;
+      }
+  >;
   dom_outline?: Array<{
     tag?: string;
     id?: string;
@@ -49,6 +65,8 @@ export interface BrowserOptions {
   screenshot?: boolean;
   snapshot?: boolean;
   viewport?: string;
+  store?: boolean;
+  include?: string;
   json?: boolean;
 }
 
@@ -61,7 +79,9 @@ const looksLikeUrl = (s?: string): boolean => !!s && /^https?:\/\//i.test(s);
  * becomes `url`; otherwise --project (or a non-URL positional, then the linked
  * project) becomes `project_id`. The action flags compile to an ordered `steps`
  * array (goto → wait_for → eval → screenshot). `--snapshot` is display-only
- * (the DOM map is always returned) so it is NOT a step here.
+ * (the DOM map is always returned) so it is NOT a step here. `--store` (EYES
+ * mode: get a scratch signed URL instead of an inline shot) and `--include`
+ * (opt-in `network`/`dom` sections) forward the matching request params.
  */
 export function buildBrowserBody(
   target: string | undefined,
@@ -83,6 +103,13 @@ export function buildBrowserBody(
   if (steps.length) body.steps = steps;
 
   if (opts.viewport) body.viewport = opts.viewport;
+  if (opts.store) body.store = true;
+  // Opt-in heavy sections for a no-steps inspect call. Split the CSV, trim, and
+  // drop empties; the worker filters to the known section names.
+  if (opts.include) {
+    const sections = opts.include.split(',').map((s) => s.trim()).filter(Boolean);
+    if (sections.length) body.include = sections;
+  }
   return body;
 }
 
@@ -167,8 +194,27 @@ export function formatBrowserReport(
   for (const e of fr) lines.push(`failed_request: ${failedRequestText(e)}`);
 
   for (const shot of r.screenshots ?? []) {
-    const p = typeof shot === 'string' ? shot : shot.path ?? shot.url;
-    if (p) lines.push(`screenshot: ${p}`);
+    if (typeof shot === 'string') {
+      lines.push(`screenshot: ${shot}`);
+      continue;
+    }
+    const label = shot.label ? `${shot.label} — ` : '';
+    if (shot.error) {
+      lines.push(`screenshot: ${label}${red(`error — ${shot.error}`)}`);
+    } else if (shot.scratch_url) {
+      // EYES mode + --store: a short-TTL signed link to the full-res image.
+      const exp = shot.scratch_expires_at ? dim(` (expires ${shot.scratch_expires_at})`) : '';
+      lines.push(`screenshot: ${label}${shot.scratch_url}${exp}`);
+    } else if (shot.fs_path ?? shot.path ?? shot.url) {
+      // VERIFY mode: a durable project file path (or a legacy path/url).
+      lines.push(`screenshot: ${label}${shot.fs_path ?? shot.path ?? shot.url}`);
+    } else if (shot.inline_base64) {
+      // EYES mode default: the image came back inline. A terminal can't render
+      // it — say it was captured and point at the ways to actually view it.
+      lines.push(
+        `screenshot: ${label}${dim('captured inline (image bytes — not shown in the terminal; re-run with --store for a viewable link, or --json for the base64)')}`,
+      );
+    }
   }
 
   // Full interactive-element map only on demand; the count above is the default.
@@ -186,9 +232,10 @@ export function registerBrowser(program: Command) {
   program
     .command('browser [target]')
     .description(
-      'Drive the agent-native browser against a deployed app (or any public URL) and print the ' +
-        'combined HEALTH SIGNAL — console errors, failed requests, JS page errors, and the ' +
-        'interactive-element (DOM) map — as grep-able text, not a dumped image. ' +
+      'SEE, inspect, and DRIVE any web page and print the combined HEALTH SIGNAL — console ' +
+        'errors, failed requests, JS page errors, and the interactive-element (DOM) map — as ' +
+        'grep-able text, not a dumped image. Two modes: EYES (no --project, any public URL — look ' +
+        'at / screenshot ANY page) and VERIFY (--project — drive + assert YOUR deployed app). ' +
         '`target` is a URL (https://…) or a project ref; defaults to the linked project. ' +
         'Add steps with --path / --wait / --eval / --screenshot. ' +
         'Exits non-zero when the page is unhealthy (a step failed, a request failed, or JS threw).',
@@ -207,11 +254,29 @@ export function registerBrowser(program: Command) {
     .option('--screenshot', 'Capture a screenshot and print its stored path (requires a project).')
     .option('--snapshot', 'Print the full interactive-element / DOM map, not just the count.')
     .option('--viewport <size>', 'desktop (default) or mobile.')
+    .option(
+      '--store',
+      'EYES mode only: store the screenshot in an ephemeral, self-expiring scratch store and print a short-lived signed URL (plus its expiry) instead of an inline capture. Ignored with a project.',
+    )
+    .option(
+      '--include <sections>',
+      'Opt-in heavy sections for a no-steps inspect call: a comma list of "network" and/or "dom" (e.g. --include network,dom). Lean by default.',
+    )
     .option('--json', 'Print the raw browser response envelope as JSON.')
     .action(async (target: string | undefined, opts: BrowserOptions) => {
       if (opts.viewport && opts.viewport !== 'desktop' && opts.viewport !== 'mobile') {
         error(`--viewport must be "desktop" or "mobile" (got "${opts.viewport}")`);
         process.exit(1);
+      }
+      if (opts.include) {
+        const bad = opts.include
+          .split(',')
+          .map((s) => s.trim())
+          .filter((s) => s && s !== 'network' && s !== 'dom');
+        if (bad.length) {
+          error(`--include only accepts "network" and/or "dom" (got "${bad.join(', ')}")`);
+          process.exit(1);
+        }
       }
 
       const client = new ApiClient(getToken());
@@ -232,7 +297,7 @@ export function registerBrowser(program: Command) {
 
       let r: BrowserResult;
       try {
-        r = await client.call<BrowserResult>('POST', '/browser', body, undefined, {
+        r = await client.call<BrowserResult>('POST', '/browser/test', body, undefined, {
           timeoutMs: BROWSER_TIMEOUT_MS,
         });
       } catch (err) {

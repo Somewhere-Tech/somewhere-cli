@@ -89,14 +89,24 @@ test('buildBrowserBody: --snapshot is display-only (not a step)', () => {
   assert.equal('steps' in body, false);
 });
 
+test('buildBrowserBody: --store forwards store:true (EYES mode)', () => {
+  const body = buildBrowserBody('https://example.com', { store: true });
+  assert.equal(body.store, true);
+});
+
+test('buildBrowserBody: --include forwards the trimmed section array', () => {
+  const body = buildBrowserBody('https://example.com', { include: 'network, dom' });
+  assert.deepEqual(body.include, ['network', 'dom']);
+});
+
 test('request shape: POSTs /browser with bearer auth and the built body', async () => {
   lastRequest = null;
   const client = new ApiClient('smt_test_key');
   const body = buildBrowserBody('https://example.com', { eval: 'document.title' });
-  await client.call('POST', '/browser', body);
+  await client.call('POST', '/browser/test', body);
 
   assert.equal(lastRequest.method, 'POST');
-  assert.equal(lastRequest.url, '/browser');
+  assert.equal(lastRequest.url, '/browser/test');
   assert.equal(lastRequest.auth, 'Bearer smt_test_key');
   assert.equal(lastRequest.contentType, 'application/json');
   assert.deepEqual(lastRequest.body, {
@@ -127,6 +137,36 @@ test('formatBrowserReport: surfaces the health signal as grep-able lines', () =>
   assert.match(out, /failed_request: 500 GET https:\/\/example\.com\/api\/foo/);
   assert.match(out, /result: Example Domain/);
   assert.match(out, /screenshot: \/_browser_tests\/abc\.jpg/);
+});
+
+test('formatBrowserReport: EYES-mode scratch_url renders with its expiry', () => {
+  const lines = formatBrowserReport({
+    passed: true,
+    screenshots: [
+      { label: 'page', scratch_url: 'https://api.example/scratch/x.jpg', scratch_expires_at: '2026-07-01T00:00:00Z' },
+    ],
+  });
+  const out = lines.join('\n');
+  assert.match(out, /screenshot: page — https:\/\/api\.example\/scratch\/x\.jpg/);
+  assert.match(out, /expires 2026-07-01T00:00:00Z/);
+});
+
+test('formatBrowserReport: an inline-only shot is noted, not dumped', () => {
+  const lines = formatBrowserReport({
+    passed: true,
+    screenshots: [{ label: 'page', inline_base64: 'AAAA' }],
+  });
+  const out = lines.join('\n');
+  assert.match(out, /screenshot: page — .*captured inline/);
+  assert.doesNotMatch(out, /AAAA/);
+});
+
+test('formatBrowserReport: a VERIFY-mode fs_path prints as the stored path', () => {
+  const lines = formatBrowserReport({
+    passed: true,
+    screenshots: [{ label: 'dashboard', fs_path: '/_browser_tests/run/00-dashboard.jpg' }],
+  });
+  assert.match(lines.join('\n'), /screenshot: dashboard — \/_browser_tests\/run\/00-dashboard\.jpg/);
 });
 
 test('formatBrowserReport: --snapshot prints the full DOM map', () => {
