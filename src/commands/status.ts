@@ -38,6 +38,7 @@ export function registerStatus(program: Command) {
         }
       } catch (err) {
         error(`Project: ${err instanceof Error ? err.message : String(err)}`);
+        process.exitCode = 1; // a failed status must not report success to a script
       }
 
       try {

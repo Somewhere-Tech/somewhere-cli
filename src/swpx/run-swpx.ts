@@ -25,13 +25,30 @@ export interface SwpxOutcome {
   action: 'ran' | 'blocked' | 'stopped' | 'fallback';
 }
 
+/** The value of npx's -p/--package flag, in either `--package X` / `-p X` or
+ *  `--package=X` form — the package npx actually installs. Returns the first such
+ *  value (multiple -p flags are rare; noted as a residual). null if absent. */
+function packageFlagValue(args: string[]): string | null {
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a === '--package' || a === '-p') return args[i + 1] ?? null;
+    if (a.startsWith('--package=')) return a.slice('--package='.length);
+    if (a.startsWith('-p=')) return a.slice('-p='.length);
+  }
+  return null;
+}
+
 export async function runSwpx(args: string[], deps: RunDeps = {}): Promise<SwpxOutcome> {
   const d = bindDeps(deps);
   const enforce = deps.enforce ?? resolveEnforce(args);
   const passthrough = stripEnforceFlags(args);
 
-  // The package is the first non-flag arg, so `swpx -y create-next-app` works.
-  const pkgArg = passthrough.find((a) => !a.startsWith('-'));
+  // npx's -p/--package names the package that actually gets installed and run; the
+  // positional is just the binary to invoke from it (`npx -p typescript tsc`). So
+  // grade the --package value when present — otherwise `swpx --package=evil helper`
+  // would grade `helper`, print a green "verified", and let npx fetch+run `evil`.
+  // Falls back to the first non-flag arg (so `swpx -y create-next-app` still works).
+  const pkgArg = packageFlagValue(passthrough) ?? passthrough.find((a) => !a.startsWith('-'));
   if (!pkgArg) {
     d.errLog('Usage: swpx <package> [args...]');
     return { exitCode: 1, action: 'stopped' };

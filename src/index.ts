@@ -71,8 +71,14 @@ registerUpdate(program);
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
 // STDERR as a parting line AFTER the command — never stdout, agent, or swpx/swpm
 // safety output. Fail-open: collectNotices swallows all errors.
-void (async () => {
-  const notices = await collectNotices(process.argv);
-  if (notices.length) process.on('exit', () => process.stderr.write('\n' + notices.join('\n') + '\n'));
-  program.parse();
-})();
+//
+// Do NOT await this before parsing — the once-a-day cache-refresh fetch would add
+// startup latency to every command. Kick it off, parse immediately; if it resolves
+// before the process exits (the common cache-hit path is instant) it prints on
+// exit, otherwise it silently lags to the next invocation.
+collectNotices(process.argv)
+  .then((notices) => {
+    if (notices.length) process.on('exit', () => process.stderr.write('\n' + notices.join('\n') + '\n'));
+  })
+  .catch(() => {});
+program.parse();

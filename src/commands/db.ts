@@ -3,7 +3,7 @@ import { Command } from 'commander';
 import ora from '../lib/spinner.js';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, table, teal, warn } from '../lib/output.js';
+import { dim, error, info, success, table, teal, warn, yellow } from '../lib/output.js';
 
 const API_BASE = 'https://api.somewhere.tech/v1';
 
@@ -127,10 +127,14 @@ export function registerDb(program: Command) {
         } else {
           spinner.stop();
           process.stdout.write(sql);
-          info(dim(`${tables} tables, ${rows} rows`));
+          // Summary to STDERR — stdout must stay pure SQL for `db dump > backup.sql`.
+          process.stderr.write(dim(`${tables} tables, ${rows} rows`) + '\n');
         }
         if (truncated) {
-          warn(`Per-table row cap hit on: ${truncated} — contact support for a streaming dump if needed.`);
+          // stderr for the same reason (applies to the piped-dump path).
+          process.stderr.write(
+            yellow(`⚠ Per-table row cap hit on: ${truncated} — contact support for a streaming dump if needed.`) + '\n',
+          );
         }
       } catch (err) {
         spinner.fail('Dump failed');

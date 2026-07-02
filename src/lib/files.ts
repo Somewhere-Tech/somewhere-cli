@@ -43,12 +43,16 @@ export interface CollectedFiles {
   files: Record<string, string>;
   binaryFiles: Record<string, string>;
   functions: Record<string, string>;
+  /** Files intentionally NOT uploaded (too big / symlink). A deploy is a full
+   *  replacement, so a silent skip DELETES the file from production — the caller
+   *  must surface these, not drop them quietly. */
+  skipped: Array<{ path: string; reason: string }>;
 }
 
 /** Walk a directory tree and bucket every file into static / binary / function,
  *  applying the same path remapping the deploy command uses. */
 export function collectFiles(baseDir: string): CollectedFiles {
-  const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {} };
+  const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {}, skipped: [] };
   walk(baseDir, baseDir, out);
   return out;
 }
@@ -58,12 +62,26 @@ function walk(baseDir: string, currentDir: string, out: CollectedFiles) {
     if (IGNORE.has(entry.name) || entry.name.startsWith('.')) continue;
 
     const fullPath = join(currentDir, entry.name);
+    // Symlinks are neither isFile() nor isDirectory() (lstat), so they'd fall
+    // through silently — record and skip (we never follow them: they can escape
+    // the project root).
+    if (entry.isSymbolicLink()) {
+      out.skipped.push({ path: relative(baseDir, fullPath), reason: 'symlink (not followed)' });
+      continue;
+    }
     if (entry.isDirectory()) {
       walk(baseDir, fullPath, out);
       continue;
     }
     if (!entry.isFile()) continue;
-    if (statSync(fullPath).size > MAX_FILE_SIZE) continue;
+    const size = statSync(fullPath).size;
+    if (size > MAX_FILE_SIZE) {
+      out.skipped.push({
+        path: relative(baseDir, fullPath),
+        reason: `${formatBytes(size)} exceeds the ${formatBytes(MAX_FILE_SIZE)} per-file limit`,
+      });
+      continue;
+    }
 
     const relPath = relative(baseDir, fullPath);
     classifyInto(out, baseDir, relPath);

@@ -383,3 +383,84 @@ test('swpm — enforce + tree-unavailable refuses (no npm)', async () => {
   assert.equal(r.exitCode, 1);
   assert.equal(runReal.calls.length, 0);
 });
+
+// ---------------- review hardening (fix/cli-review-hardening) ----------------
+
+test('swpm — flags before the subcommand still gate (no silent passthrough)', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpm(['-g', 'install', '@ctrl/tinycolor@4.1.1'], {
+    ...cap,
+    resolveVersion: async () => '4.1.1',
+    getVerdictBatch: async () => [BLOCKED],
+    runReal,
+  });
+  assert.equal(r.action, 'blocked');
+  assert.equal(runReal.calls.length, 0); // did NOT silently passthrough to npm
+});
+
+test('swpx — an unrecognized verdict level stops, never runs', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpx(['foo'], {
+    ...cap,
+    resolveVersion: async () => '1.0.0',
+    getVerdict: async () => ({ package: 'foo', version: '1.0.0', verdict: 'quarantined' }),
+    runReal,
+  });
+  assert.equal(r.action, 'stopped');
+  assert.equal(runReal.calls.length, 0);
+});
+
+test('swpm — an unrecognized verdict level halts the install', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpm(['install'], {
+    ...cap,
+    readTree: () => ({ directNames: ['x'], ranges: {}, locked: [{ package: 'x', version: '1' }] }),
+    getVerdictBatch: async () => [{ package: 'x', version: '1', verdict: 'quarantined' }],
+    runReal,
+  });
+  assert.equal(r.action, 'blocked');
+  assert.equal(runReal.calls.length, 0);
+});
+
+test('swpx — grades the --package value, not the positional command', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  let graded;
+  const r = await runSwpx(['--package=@ctrl/tinycolor@4.1.1', 'tinycolor'], {
+    ...cap,
+    resolveVersion: async () => '4.1.1',
+    getVerdict: async (n) => {
+      graded = n;
+      return BLOCKED;
+    },
+    runReal,
+  });
+  assert.equal(graded, '@ctrl/tinycolor'); // graded the --package target, not "tinycolor"
+  assert.equal(r.action, 'blocked');
+  assert.equal(runReal.calls.length, 0);
+});
+
+test('swpm install — a dep added to package.json after the lockfile is still checked', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const checked = [];
+  const r = await runSwpm(['install'], {
+    ...cap,
+    readTree: () => ({
+      directNames: ['locked-dep', 'new-dep'],
+      ranges: { 'new-dep': '^1' },
+      locked: [{ package: 'locked-dep', version: '1.0.0' }],
+    }),
+    resolveVersion: async () => '2.0.0',
+    getVerdictBatch: async (pkgs) => {
+      for (const p of pkgs) checked.push(p.package);
+      return pkgs.map((p) => ({ ...p, verdict: 'verified' }));
+    },
+    runReal,
+  });
+  assert.ok(checked.includes('new-dep')); // the drift dep got checked, not skipped
+  assert.equal(r.action, 'ran');
+});

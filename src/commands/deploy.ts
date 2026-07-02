@@ -90,7 +90,19 @@ export function registerDeploy(program: Command) {
 
       const spinner = ora('Collecting files...').start();
 
-      const { files, binaryFiles, functions } = collectFiles(targetDir);
+      const { files, binaryFiles, functions, skipped } = collectFiles(targetDir);
+
+      // A deploy replaces the whole project, so a file we skip is DELETED from
+      // production if it was there before. Never silent — surface every skip.
+      if (skipped.length) {
+        spinner.stop();
+        warn(
+          `${skipped.length} file(s) will NOT be uploaded — a deploy is a full ` +
+            `replacement, so any already deployed will be REMOVED from production:`,
+        );
+        for (const s of skipped) warn(`  ${dim('•')} ${s.path} — ${s.reason}`);
+        spinner.start();
+      }
 
       const totalFiles =
         Object.keys(files).length +

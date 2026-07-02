@@ -96,7 +96,7 @@ export function registerProject(program: Command) {
 
       if (confirm !== nameOrId) {
         error('Name did not match. Aborted.');
-        return;
+        process.exit(1);
       }
 
       const spinner = ora('Requesting deletion...').start();
@@ -116,7 +116,7 @@ export function registerProject(program: Command) {
 
         if (!code) {
           error('No code entered. Aborted.');
-          return;
+          process.exit(1);
         }
 
         const delSpinner = ora('Deleting...').start();
