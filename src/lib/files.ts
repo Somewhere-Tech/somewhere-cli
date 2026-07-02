@@ -75,6 +75,15 @@ export type FileKind = 'static' | 'binary' | 'function';
 /** The deploy key + bucket a relative path maps to. `functions/`-prefixed paths
  *  are stripped to their route; root-level api/_lib/[param] paths are functions. */
 export function classifyKey(relPath: string): { kind: FileKind; key: string } {
+  // Deploy keys are always POSIX/forward-slash. The worker's function detection
+  // (api/, _lib/), the `functions/` prefix strip, and the bundler's index.html
+  // entry matching all key off '/'. On Windows node:path hands back backslashes
+  // (relative()/readdir join), so a raw win32 key ships as `src\App.jsx` /
+  // `api\login.ts` → functions upload as static, entries never match →
+  // DEPLOY_BLANK_PAGE. Normalize here: the single chokepoint every collector
+  // (deploy, check, dev live-sync) routes its keys through. Disk reads still use
+  // the original path via join(), which is win32-safe.
+  relPath = relPath.replace(/\\/g, '/');
   if (relPath.startsWith('functions/')) {
     return { kind: 'function', key: relPath.slice('functions/'.length) };
   }
