@@ -153,11 +153,17 @@ function runInstall(host: string): void {
   }
 }
 
+// Windows: the `codex` CLI installs as codex.cmd. spawnSync without a shell does
+// no PATHEXT resolution (won't find the .cmd) and .cmd needs a shell anyway since
+// CVE-2024-27980 — so probes silently reported "not found" on win32. Shell on
+// win32 only; args are static identifiers, no injection surface.
+const CODEX_SHELL = process.platform === 'win32';
+
 /** Codex owns its own config format, so we drive its CLI instead of writing
  *  the file ourselves. The entry uses the stdio bridge so auth rides the
  *  CLI login rather than a token pasted into Codex config. */
 function installCodex(loggedIn: boolean): void {
-  const probe = spawnSync('codex', ['--version'], { stdio: 'ignore' });
+  const probe = spawnSync('codex', ['--version'], { stdio: 'ignore', shell: CODEX_SHELL });
   if (probe.error || probe.status !== 0) {
     error('Codex CLI not found on PATH.');
     info('Install Codex first, then either re-run this command or add the entry manually:');
@@ -165,12 +171,12 @@ function installCodex(loggedIn: boolean): void {
     process.exit(1);
   }
 
-  const existing = spawnSync('codex', ['mcp', 'get', 'somewhere'], { stdio: 'ignore' });
+  const existing = spawnSync('codex', ['mcp', 'get', 'somewhere'], { stdio: 'ignore', shell: CODEX_SHELL });
   if (existing.status === 0) {
     success('Codex already has a "somewhere" MCP server configured.');
     info(dim('To reconfigure: codex mcp remove somewhere, then re-run this command.'));
   } else {
-    const add = spawnSync('codex', ['mcp', 'add', 'somewhere', '--', 'somewhere', 'mcp'], { stdio: 'inherit' });
+    const add = spawnSync('codex', ['mcp', 'add', 'somewhere', '--', 'somewhere', 'mcp'], { stdio: 'inherit', shell: CODEX_SHELL });
     if (add.status !== 0) {
       error('`codex mcp add` failed (see output above).');
       process.exit(1);
@@ -297,10 +303,10 @@ async function runDoctor(version: string): Promise<void> {
   } else {
     info(dim('Claude Code: not configured — somewhere mcp install claude-code (or just somewhere login)'));
   }
-  const codexProbe = spawnSync('codex', ['--version'], { stdio: 'ignore' });
+  const codexProbe = spawnSync('codex', ['--version'], { stdio: 'ignore', shell: CODEX_SHELL });
   if (codexProbe.error || codexProbe.status !== 0) {
     info(dim('Codex: CLI not found on PATH — skipped'));
-  } else if (spawnSync('codex', ['mcp', 'get', 'somewhere'], { stdio: 'ignore' }).status === 0) {
+  } else if (spawnSync('codex', ['mcp', 'get', 'somewhere'], { stdio: 'ignore', shell: CODEX_SHELL }).status === 0) {
     success('Codex: "somewhere" MCP server configured');
   } else {
     info(dim('Codex: not configured — somewhere mcp install codex'));

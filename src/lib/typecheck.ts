@@ -119,6 +119,11 @@ export function runTypecheck(projectDir: string): Promise<TypecheckResult> {
         cwd: projectDir,
         env: process.env,
         stdio: ['ignore', 'pipe', 'pipe'],
+        // Windows: tsc.cmd / npx.cmd are batch shims, and since Node 18.20/20.12
+        // (CVE-2024-27980) spawning a .cmd/.bat without a shell throws EINVAL.
+        // The bundled path runs node directly (process.execPath) and must NOT
+        // shell — its arg is a resolved file path that a shell could mis-split.
+        shell: /\.(cmd|bat)$/i.test(command),
       });
     } catch (err) {
       resolve({
