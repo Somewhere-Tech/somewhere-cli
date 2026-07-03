@@ -103,6 +103,7 @@ export function registerDeploy(program: Command) {
       // an account" as a broken command.
       if (!storedConfig?.token && !opts.temporary) {
         console.log('No account found. To deploy without logging in, rerun with --temporary.');
+        console.log('Everything you can run without an account: somewhere docs start');
         process.exit(0);
       }
 
@@ -333,6 +334,11 @@ export function registerDeploy(program: Command) {
           info(`To keep it: ${teal(tempSession.claimUrl)}`);
           info("Claiming connects the Somewhere MCP so your agent can manage this project's");
           info('database, email, and cron directly next time.');
+          // Additive pointer (tsk_497b7eeb) — the claim block above is verbatim
+          // epic copy; this line is separate. Next thing a fresh agent needs is
+          // the anonymous capability map (tables via `somewhere db query`, logs,
+          // redeploys) — `docs start` is that map, no account required.
+          info('What else works without an account: somewhere docs start');
         } else {
           success(`Live at ${teal(result.url)}`);
         }

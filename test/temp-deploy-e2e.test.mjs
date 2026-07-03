@@ -183,7 +183,8 @@ test('deploy (no --temporary) with no stored credential prints the discovery hin
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   assert.equal(
     result.stdout,
-    'No account found. To deploy without logging in, rerun with --temporary.\n',
+    'No account found. To deploy without logging in, rerun with --temporary.\n' +
+      'Everything you can run without an account: somewhere docs start\n',
   );
 });
 
