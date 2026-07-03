@@ -9,6 +9,11 @@ const API_BASE = 'https://api.somewhere.tech/v1';
 
 interface QueryResult {
   rows: Array<Record<string, unknown>>;
+  // Rows affected by a write — the API sends `changes` (canonicalQueryShape);
+  // `rows_affected` never existed on the wire and is kept only as a legacy
+  // fallback (tsk_abea03ab: the dead-field check made every write/DDL print
+  // an ambiguous "No rows returned.").
+  changes?: number;
   rows_affected?: number;
   duration_ms?: number;
 }
@@ -51,10 +56,14 @@ export function registerDb(program: Command) {
         }
 
         if (!r.rows || r.rows.length === 0) {
-          if (typeof r.rows_affected === 'number') {
-            success(`${r.rows_affected} row${r.rows_affected === 1 ? '' : 's'} affected${r.duration_ms != null ? dim(` (${r.duration_ms}ms)`) : ''}`);
+          const affected = typeof r.changes === 'number' ? r.changes : r.rows_affected;
+          if (typeof affected === 'number' && affected > 0) {
+            success(`${affected} row${affected === 1 ? '' : 's'} affected${r.duration_ms != null ? dim(` (${r.duration_ms}ms)`) : ''}`);
           } else {
-            warn('No rows returned.');
+            // Explicit SUCCESS, not a warning — an agent seeing "No rows
+            // returned." after CREATE/INSERT couldn't tell success from a
+            // silent failure (tsk_abea03ab). Failures error loudly above.
+            success('OK — no rows returned (normal for DDL and zero-row writes; failures error loudly).');
           }
           return;
         }
