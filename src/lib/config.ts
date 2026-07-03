@@ -41,6 +41,18 @@ export function updateTokens(token: string, refreshToken: string): void {
 
 export function getToken(): string {
   const config = loadConfig();
+  // A temporary (--temporary, tsk_35674c33) credential carries its own
+  // expiry independent of the normal login flow. Check it BEFORE the
+  // generic "no token" case below so an expired temp session gets
+  // temp-aware copy (re-mint vs. real login) instead of the bare
+  // "Not logged in" message, which would send a dev to `somewhere login`
+  // when they never signed up in the first place.
+  if (config?.temporary && config.temp_expires_at && new Date(config.temp_expires_at).getTime() <= Date.now()) {
+    console.error(
+      'Temporary session expired. Run somewhere deploy --temporary for a new one, or somewhere login to keep your work.',
+    );
+    process.exit(1);
+  }
   if (!config?.token) {
     console.error('Not logged in. Run: somewhere login');
     process.exit(1);

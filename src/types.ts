@@ -13,6 +13,17 @@ export interface CliConfig {
    *  can't be obtained, instead of falling back to the real tool. Overridable
    *  per-invocation by --enforce / --no-enforce / SWPX_ENFORCE. */
   enforce?: boolean;
+  /** True when `token` is a `--temporary` no-login credential (tsk_35674c33)
+   *  rather than a real account login. Distinguishes the two so getToken()
+   *  can give temp-aware expiry messaging and deploy can reuse/re-mint
+   *  instead of ever prompting `somewhere login`. */
+  temporary?: boolean;
+  /** ISO expiry for a temporary credential (3h TTL from the server). Unused
+   *  when `temporary` is not set. */
+  temp_expires_at?: string;
+  /** Where claiming a temporary workspace happens — printed on every temp
+   *  deploy so the dev can convert it into a real account. */
+  claim_url?: string;
 }
 
 export interface ProjectConfig {
