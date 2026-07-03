@@ -42,8 +42,10 @@ export function registerRollback(program: Command) {
           initial: true,
         });
         if (!ok) {
+          // Non-zero so a script/agent can't mistake an abort (incl. a non-TTY
+          // prompt that auto-declines) for a completed rollback.
           warn('Aborted.');
-          return;
+          process.exit(1);
         }
       }
 

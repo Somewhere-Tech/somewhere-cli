@@ -49,7 +49,13 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   const enforce = deps.enforce ?? resolveEnforce(args);
   const clean = stripEnforceFlags(args);
 
-  const sub = clean[0];
+  // npm accepts config flags (and a `--` terminator) BEFORE the subcommand, so the
+  // command is the first non-flag token, not necessarily clean[0]. Keying off
+  // clean[0] let `swpm -g install evil` / `swpm -- install evil` skip the gate
+  // silently. (Residual: a value-flag whose value precedes the sub, e.g.
+  // `swpm --prefix /x install`, can still hide it — needs npm's flag schema.)
+  const subIdx = clean.findIndex((a) => !a.startsWith('-'));
+  const sub = subIdx === -1 ? undefined : clean[subIdx];
   if (!sub || !INSTALL_SUBS.has(sub)) {
     return { exitCode: await d.runReal('npm', clean), action: 'passthrough' };
   }
@@ -65,7 +71,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   };
   const causeOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-  const explicit = clean.slice(1).filter((a) => !a.startsWith('-'));
+  const explicit = clean.slice(subIdx + 1).filter((a) => !a.startsWith('-'));
   let toCheck: PkgRef[] = [];
   let directCount = 0;
   try {
@@ -83,6 +89,21 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
         toCheck = tree.locked;
         const directSet = new Set(tree.directNames);
         directCount = tree.locked.filter((l) => directSet.has(l.package)).length;
+        // A dep added to package.json AFTER the lockfile was written isn't in
+        // `locked`, but `npm install` will add it — resolve + check those too, or
+        // they'd install unchecked behind a clean "N verified" summary.
+        const lockedNames = new Set(tree.locked.map((l) => l.package));
+        const missing = tree.directNames.filter((n) => !lockedNames.has(n));
+        if (missing.length) {
+          const extra = await Promise.all(
+            missing.map(async (name) => ({
+              package: name,
+              version: await d.resolveVersion(name, tree.ranges[name]),
+            })),
+          );
+          toCheck = [...toCheck, ...extra];
+          directCount += extra.length;
+        }
       } else if (tree.directNames.length) {
         toCheck = await Promise.all(
           tree.directNames.map(async (name) => ({
@@ -110,7 +131,11 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   const aligned = alignVerdicts(toCheck, verdicts);
   for (const l of renderTree(aligned, directCount)) d.errLog(l);
 
-  if (aligned.some((v) => v.verdict === 'blocked')) {
+  // Halt on a hard block OR any level we don't recognize as installable. Known
+  // installable levels warn but proceed (unverified/suspicious); an unrecognized
+  // or future-harsher level (e.g. "quarantined") must NOT install behind a warn.
+  const INSTALLABLE = new Set(['verified', 'unverified', 'suspicious']);
+  if (aligned.some((v) => !INSTALLABLE.has(v.verdict))) {
     return { exitCode: 1, action: 'blocked' };
   }
   return { exitCode: await d.runReal('npm', clean), action: 'ran' };

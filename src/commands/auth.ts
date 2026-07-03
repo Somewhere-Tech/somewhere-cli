@@ -69,8 +69,11 @@ export function registerAuth(program: Command) {
         info(dim(`${r.stats.projects} project${r.stats.projects === 1 ? '' : 's'}, ${r.stats.api_keys} active key${r.stats.api_keys === 1 ? '' : 's'}`));
         info(dim(`key ${config.token.slice(0, 12)}…`));
       } catch {
+        // Agents gate on `whoami` to validate the token — a stored-but-dead token
+        // must NOT report success. Show the cached identity, then exit non-zero.
         console.log(teal(config.user.email));
-        info(dim('Could not fetch account details'));
+        info(dim('Could not fetch account details — token may be expired. Run: somewhere login'));
+        process.exitCode = 1;
       }
     });
 

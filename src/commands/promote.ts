@@ -46,8 +46,9 @@ export function registerPromote(program: Command) {
           initial: true,
         });
         if (!ok) {
+          // Non-zero: an abort (or auto-declined non-TTY prompt) is not a promote.
           warn('Aborted.');
-          return;
+          process.exit(1);
         }
       }
 

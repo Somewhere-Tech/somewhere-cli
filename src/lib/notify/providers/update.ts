@@ -12,7 +12,9 @@ const FETCH_TIMEOUT_MS = 1000;
 
 interface UpdateCache {
   checkedAt: number;
-  latest: string;
+  /** Last known published version, or null if the last check failed (we still
+   *  stamp checkedAt so we don't re-fetch on every command). */
+  latest: string | null;
 }
 
 /** Numeric major.minor.patch compare, ignoring pre-release tags. Returns true when
@@ -31,13 +33,17 @@ export function isNewer(a: string, b: string): boolean {
 
 function readCache(): UpdateCache | null {
   try {
-    return JSON.parse(readFileSync(CACHE_PATH, 'utf8')) as UpdateCache;
+    const c = JSON.parse(readFileSync(CACHE_PATH, 'utf8')) as UpdateCache;
+    // Guard a corrupt/absent checkedAt: NaN comparisons read as "fresh forever",
+    // which would silence updates until the file is hand-deleted.
+    if (typeof c?.checkedAt !== 'number') return null;
+    return c;
   } catch {
     return null;
   }
 }
 
-function writeCache(latest: string): void {
+function writeCache(latest: string | null): void {
   try {
     const dir = dirname(CACHE_PATH);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -48,16 +54,17 @@ function writeCache(latest: string): void {
 }
 
 async function fetchLatest(): Promise<string | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
     const res = await fetch(REGISTRY, { signal: controller.signal, headers: { accept: 'application/json' } });
-    clearTimeout(timer);
     if (!res.ok) return null;
     const body = (await res.json()) as { version?: string };
     return typeof body.version === 'string' ? body.version : null;
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer); // also clear on reject, so a pending timer can't hold the event loop
   }
 }
 
@@ -72,12 +79,13 @@ export const updateProvider: NoticeProvider = {
       let cache = readCache();
       if (!cache || Date.now() - cache.checkedAt > ONE_DAY) {
         const latest = await fetchLatest();
-        if (latest) {
-          writeCache(latest);
-          cache = { checkedAt: Date.now(), latest };
-        }
+        // Stamp checkedAt even on failure so a blackholed network (captive portal,
+        // proxy) doesn't make every command re-pay the fetch — retry is daily.
+        const known = latest ?? cache?.latest ?? null;
+        writeCache(known);
+        cache = { checkedAt: Date.now(), latest: known };
       }
-      if (!cache?.latest || !isNewer(cache.latest, currentVersion)) return null;
+      if (!cache.latest || !isNewer(cache.latest, currentVersion)) return null;
       return (
         `  ${teal('▲ Update available')}  ${dim(currentVersion)} → ${teal(cache.latest)}\n` +
         `  Run ${teal('somewhere update')} to upgrade.  ${dim('(SOMEWHERE_NO_NOTIFICATIONS=1 to silence)')}`

@@ -253,7 +253,11 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
     });
   });
 
-  server.listen(port, () => {
+  // Bind loopback only: these functions run with the developer's real CLI token
+  // (PROJECT_API_KEY) and hit the real project, so exposing them on the LAN would
+  // let anyone on the network invoke sw.db/sw.email etc. as the developer. A
+  // `--host` opt-in can be added later for the deliberate device-testing case.
+  server.listen(port, '127.0.0.1', () => {
     console.log('');
     console.log(`${green('▲')} ${bold('Local function runtime')} ${dim('— functions run here, sw.* talks to the real project')}`);
     console.log(`${teal('🌐')} ${bold('Listening:')} ${teal(`http://localhost:${port}`)}`);

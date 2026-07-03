@@ -13,11 +13,14 @@
 import { dim, green, red, yellow } from '../lib/output.js';
 import type { Action, JsonVerdict, Verdict, VerdictLevel } from './types.js';
 
-/** verified → run; unverified/suspicious → stop; blocked → block. */
+/** blocked → block; verified → run; EVERYTHING ELSE → stop.
+ *  Fail safe: only an explicit `verified` runs. unverified/suspicious and any
+ *  unrecognized or future level (a malformed row, `"Blocked "`, a new backend
+ *  level like `"quarantined"`) get a soft stop, never a silent run. */
 export function decide(v: Verdict): Action {
   if (v.verdict === 'blocked') return 'block';
-  if (v.verdict === 'unverified' || v.verdict === 'suspicious') return 'stop';
-  return 'run';
+  if (v.verdict === 'verified') return 'run';
+  return 'stop';
 }
 
 type CheckLevel = 'ok' | 'warn' | 'bad';
