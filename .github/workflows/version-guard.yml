@@ -1,0 +1,92 @@
+# Version guard + auto-publish — keeps npm and master in lockstep.
+#
+# The failure mode this kills: we ship CLI changes to master but forget the
+# release ritual, so npm `latest` drifts behind source (or worse, releases get
+# cut from side branches and master lags npm). Observed drift 2026-07-02:
+# master was 0.18.3 while npm latest was 0.19.1.
+#
+# Rules, evaluated on every master push that touches src/bin/package.json:
+#   1. package.json version NOT on npm  → this push IS the release: gate
+#      (build + tests) then publish with provenance and push the v<version>
+#      tag. Merging a bump to master = releasing. No separate ritual.
+#   2. Version already on npm AND npm's gitHead == this commit → in sync
+#      (the tag-driven publish.yml already released this exact commit). Green.
+#   3. Version already on npm AND gitHead differs → source changed but nobody
+#      bumped. RED. Bump package.json (patch at minimum) and re-push.
+#
+# The tag push here uses GITHUB_TOKEN, which deliberately does NOT trigger
+# publish.yml (GitHub suppresses workflow cascade from GITHUB_TOKEN pushes) —
+# so the two workflows can coexist without double-publishing.
+name: Version guard
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'src/**'
+      - 'bin/**'
+      - 'package.json'
+
+permissions:
+  contents: write # tag push on auto-release
+  id-token: write # OIDC — npm provenance
+
+# Never run two guards at once — a rapid double-push could race npm publish.
+concurrency:
+  group: version-guard
+  cancel-in-progress: false
+
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Compare package.json version against npm
+        id: compare
+        run: |
+          set -euo pipefail
+          PKG=$(node -p "require('./package.json').name")
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          # npm view exits non-zero when the version doesn't exist — that's
+          # the "unpublished, this push releases it" branch, not an error.
+          if PUBLISHED_HEAD=$(npm view "$PKG@$VERSION" gitHead 2>/dev/null); then
+            if [ "$PUBLISHED_HEAD" = "$GITHUB_SHA" ]; then
+              echo "mode=in-sync" >> "$GITHUB_OUTPUT"
+              echo "✓ $PKG@$VERSION already published from this exact commit."
+            else
+              echo "mode=drift" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "mode=release" >> "$GITHUB_OUTPUT"
+            echo "▲ $PKG@$VERSION is not on npm — this push releases it."
+          fi
+
+      - name: Fail on drift (source changed, version not bumped)
+        if: steps.compare.outputs.mode == 'drift'
+        run: |
+          echo "::error::src/ changed on master but package.json is still ${{ steps.compare.outputs.version }}, which is already published from a different commit. Bump the version (patch at minimum) so npm and master stay in step — merging the bump auto-publishes."
+          exit 1
+
+      - name: Gate (build + tests)
+        if: steps.compare.outputs.mode == 'release'
+        run: |
+          npm ci
+          npm test
+
+      - name: Publish to npm (provenance)
+        if: steps.compare.outputs.mode == 'release'
+        run: npm publish --provenance --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Tag the release commit
+        if: steps.compare.outputs.mode == 'release'
+        run: |
+          git tag "v${{ steps.compare.outputs.version }}"
+          git push origin "v${{ steps.compare.outputs.version }}"
