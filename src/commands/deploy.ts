@@ -28,6 +28,38 @@ export function prebuiltOptIn(opts: {
   return Boolean(opts.prebuilt || opts.allowBundled);
 }
 
+// Node-server pre-flight (tsk_8e8c6bc8): the #1 first-deploy failure is an
+// agent shipping an Express/Fastify app — it deploys "successfully" as dead
+// static files (routes never run, server source publicly served). Detect the
+// shape BEFORE upload and teach the platform shape. Warning only, never a
+// block (rule 9): a static site that happens to carry a local dev server
+// script must still deploy clean — hence the requirement that functions/ is
+// EMPTY and the server signal is unambiguous.
+const SERVER_FRAMEWORK_DEPS = ['express', 'fastify', 'koa', '@nestjs/core', '@hapi/hapi', 'restify'];
+const SERVER_CODE_PATTERN = /\bapp\.listen\s*\(|\bhttp\.createServer\s*\(|\bfastify\s*\(\s*\)|new\s+Koa\s*\(/;
+export function detectNodeServerShape(
+  files: Record<string, string>,
+  functions: Record<string, string>,
+): string | null {
+  if (Object.keys(functions).length > 0) return null; // has real functions — trust it
+  const pkgRaw = files['package.json'];
+  if (pkgRaw) {
+    try {
+      const pkg = JSON.parse(pkgRaw) as { dependencies?: Record<string, string> };
+      const hit = SERVER_FRAMEWORK_DEPS.find((d) => pkg.dependencies?.[d]);
+      if (hit) return `package.json depends on "${hit}"`;
+    } catch {
+      /* unparseable package.json is someone else's problem */
+    }
+  }
+  for (const [path, content] of Object.entries(files)) {
+    // Root-level entry files only — a vendored lib deep in the tree isn't a signal.
+    if (!/^[^/]+\.(js|mjs|cjs|ts)$/.test(path)) continue;
+    if (SERVER_CODE_PATTERN.test(content)) return `${path} starts a server (app.listen/createServer)`;
+  }
+  return null;
+}
+
 // --temporary auto-creates a project (no `somewhere init` to run without an
 // account): name/subdomain both derive from the target dir's basename,
 // slugified, plus a random suffix so a common dir name (e.g. "app") doesn't
@@ -218,6 +250,19 @@ export function registerDeploy(program: Command) {
             `replacement, so any already deployed will be REMOVED from production:`,
         );
         for (const s of skipped) warn(`  ${dim('•')} ${s.path} — ${s.reason}`);
+        spinner.start();
+      }
+
+      // Node-server pre-flight (tsk_8e8c6bc8) — see detectNodeServerShape.
+      const serverSignal = detectNodeServerShape(files, functions);
+      if (serverSignal) {
+        spinner.stop();
+        warn(`This looks like a Node server app (${serverSignal}) — somewhere.tech does not run server processes.`);
+        warn('It will deploy as static files only: your routes will NOT run, and the');
+        warn('server source will be publicly readable at its file path.');
+        warn('The platform shape: static files at the root + API handlers under functions/');
+        warn('(each default-exports async (req, sw) and becomes a route).');
+        warn('Full quickstart: somewhere docs start');
         spinner.start();
       }
 
