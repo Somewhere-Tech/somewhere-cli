@@ -4,8 +4,10 @@ import { loadConfig, updateTokens } from './config.js';
 
 /** The /v1 API host. Override for staging/tests via SOMEWHERE_API_URL
  *  (mirrors SOMEWHERE_RUNNER_URL below); the value should include the /v1
- *  suffix or a host the route paths can hang off of. */
-const BASE_URL = process.env.SOMEWHERE_API_URL?.replace(/\/$/, '') || 'https://api.somewhere.tech/v1';
+ *  suffix or a host the route paths can hang off of. Exported so other
+ *  modules that need the same base (e.g. lib/temp-auth.ts's unauthenticated
+ *  PoW endpoints) reuse this one env-resolution instead of duplicating it. */
+export const API_BASE_URL = process.env.SOMEWHERE_API_URL?.replace(/\/$/, '') || 'https://api.somewhere.tech/v1';
 
 /** The dedicated run_code runner worker (somewhere-tech-runner). `somewhere run`
  *  MUST hit this host, NOT the /v1 API: the runner is the request ROOT — it
@@ -140,7 +142,7 @@ export class ApiClient {
     query?: Record<string, string | number | undefined>,
     opts?: { timeoutMs?: number; baseUrl?: string },
   ): Promise<T> {
-    let url = `${opts?.baseUrl ?? BASE_URL}${path}`;
+    let url = `${opts?.baseUrl ?? API_BASE_URL}${path}`;
     if (query) {
       const params = new URLSearchParams();
       for (const [k, v] of Object.entries(query)) {
@@ -265,7 +267,7 @@ export class ApiClient {
     body?: unknown,
     opts?: { timeoutMs?: number },
   ): Promise<{ status: number; ok: boolean; body: string }> {
-    const url = `${BASE_URL}${path}`;
+    const url = `${API_BASE_URL}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     let reqBody: string | undefined;
     if (body !== undefined) {

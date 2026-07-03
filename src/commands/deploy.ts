@@ -1,10 +1,11 @@
 import { Command } from 'commander';
-import { resolve } from 'node:path';
+import { basename, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
-import { getToken, loadProjectConfig } from '../lib/config.js';
+import { getToken, loadConfig, loadProjectConfig, saveConfig, saveProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
+import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
@@ -25,6 +26,32 @@ export function prebuiltOptIn(opts: {
   allowBundled?: boolean;
 }): boolean {
   return Boolean(opts.prebuilt || opts.allowBundled);
+}
+
+// --temporary auto-creates a project (no `somewhere init` to run without an
+// account): name/subdomain both derive from the target dir's basename,
+// slugified, plus a random suffix so a common dir name (e.g. "app") doesn't
+// collide with someone else's temp project on a shared subdomain namespace.
+export function slugify(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
+}
+
+export function randomSuffix(): string {
+  return Math.random().toString(36).slice(2, 6).padEnd(4, '0');
+}
+
+export function deriveTempProjectName(dirPath: string): string {
+  const base = slugify(basename(dirPath)) || 'project';
+  return `${base}-${randomSuffix()}`;
+}
+
+// The claim-relay block derives its "N hours" from the server's ttl_seconds
+// (10800 → 3). Falls back to 3 when ttl_seconds is missing/non-finite — e.g.
+// a silently-reused cached credential, where we only persisted temp_expires_at
+// (an absolute timestamp), not the original ttl_seconds.
+export function formatTtlHours(ttlSeconds?: number): number {
+  if (!ttlSeconds || !Number.isFinite(ttlSeconds)) return 3;
+  return Math.round(ttlSeconds / 3600) || 3;
 }
 
 export function registerDeploy(program: Command) {
@@ -59,10 +86,75 @@ export function registerDeploy(program: Command) {
       '--allow-bundled',
       'Alias for --prebuilt.',
     )
+    .option(
+      '--temporary',
+      'Deploy without an account — creates a temporary 3-hour workspace you can claim later',
+    )
     .action(async (dir: string | undefined, opts) => {
-      const token = getToken();
-      const client = new ApiClient(token);
       const targetDir = resolveTargetDir(dir);
+      const storedConfig = loadConfig();
+
+      // Discovery hint (tsk_35674c33): an agent/dev with no stored credential
+      // and no --temporary gets pointed at the no-login path instead of the
+      // old bare "Not logged in" exit. Plain console.log (no error styling,
+      // no spinner) and exit 0 are BOTH deliberate — this isn't a failure,
+      // it's how a first-time caller discovers --temporary exists. A non-zero
+      // exit here would make CI/agent tooling treat "you could deploy without
+      // an account" as a broken command.
+      if (!storedConfig?.token && !opts.temporary) {
+        console.log('No account found. To deploy without logging in, rerun with --temporary.');
+        process.exit(0);
+      }
+
+      // Resolved below: present only for a temp (minted or reused) session,
+      // never for a normal login — gates both project auto-create and the
+      // claim-relay success block.
+      let tempSession: { claimUrl: string; ttlSeconds?: number } | undefined;
+
+      let token: string;
+      if (opts.temporary) {
+        if (storedConfig?.token && !storedConfig.temporary) {
+          // Already have a real account — --temporary would be a downgrade,
+          // so ignore it rather than silently minting a throwaway workspace
+          // next to the dev's own projects.
+          info('Already logged in — deploying to your account.');
+          token = getToken();
+        } else if (
+          storedConfig?.token &&
+          storedConfig.temporary &&
+          storedConfig.temp_expires_at &&
+          new Date(storedConfig.temp_expires_at).getTime() > Date.now()
+        ) {
+          // Reuse silently — this is the "one credential across shells"
+          // requirement: a second `--temporary` deploy in the same 3h window
+          // (a different terminal, a re-run) must not mint a second project.
+          token = storedConfig.token;
+          tempSession = { claimUrl: storedConfig.claim_url ?? '' };
+        } else {
+          const powSpinner = ora('Solving proof-of-work…').start();
+          try {
+            const account = await mintTempAccount();
+            powSpinner.stop();
+            saveConfig({
+              token: account.key,
+              temporary: true,
+              temp_expires_at: account.expires_at,
+              claim_url: account.claim_url,
+              user: { email: '', username: '' },
+            });
+            token = account.key;
+            tempSession = { claimUrl: account.claim_url, ttlSeconds: account.ttl_seconds };
+          } catch (err) {
+            powSpinner.fail('Could not create a temporary session');
+            error(err instanceof Error ? err.message : String(err));
+            process.exit(1);
+          }
+        }
+      } else {
+        token = getToken();
+      }
+
+      const client = new ApiClient(token);
 
       // --scope maps to the worker's partial-deploy guard. Reject unknown
       // values up front so a typo can't silently fall back to a full deploy
@@ -78,14 +170,38 @@ export function registerDeploy(program: Command) {
 
       let projectId = opts.project;
       if (!projectId) {
-        const config = loadProjectConfig(targetDir) ?? loadProjectConfig();
-        if (!config) {
+        const projConfig = loadProjectConfig(targetDir) ?? loadProjectConfig();
+        if (projConfig) {
+          projectId = projConfig.project_id;
+        } else if (tempSession) {
+          // No `.somewhere.json` and no account to run `somewhere init` —
+          // auto-create the project so a temp deploy is a single command.
+          const createSpinner = ora('Creating a temporary project...').start();
+          try {
+            const name = deriveTempProjectName(targetDir);
+            const created = await client.call<{ id: string; name: string; subdomain: string }>(
+              'POST',
+              '/projects',
+              { name, subdomain: name },
+            );
+            createSpinner.stop();
+            saveProjectConfig(targetDir, {
+              project_id: created.id,
+              name: created.name,
+              subdomain: created.subdomain ?? name,
+            });
+            projectId = created.id;
+          } catch (err) {
+            createSpinner.fail('Could not create a temporary project');
+            error(err instanceof Error ? err.message : String(err));
+            process.exit(1);
+          }
+        } else {
           error(
             'No project linked. Run `somewhere init` or pass --project <id>',
           );
           process.exit(1);
         }
-        projectId = config.project_id;
       }
 
       const spinner = ora('Collecting files...').start();
@@ -208,7 +324,18 @@ export function registerDeploy(program: Command) {
           for (const w of result.warnings) warn(w);
         }
 
-        success(`Live at ${teal(result.url)}`);
+        if (tempSession) {
+          // Agent-relay success message (tsk_35674c33, verbatim copy — don't
+          // "improve" it): every temp deploy, minted or silently reused, ends
+          // with this block so the claim path is never missed.
+          const hours = formatTtlHours(tempSession.ttlSeconds);
+          success(`Live at ${teal(result.url)} — yours for ${hours} hour${hours === 1 ? '' : 's'}.`);
+          info(`To keep it: ${teal(tempSession.claimUrl)}`);
+          info("Claiming connects the Somewhere MCP so your agent can manage this project's");
+          info('database, email, and cron directly next time.');
+        } else {
+          success(`Live at ${teal(result.url)}`);
+        }
 
         // Remind the dev of the round-trip trade-off they opted into. Raw
         // source stays editable end-to-end; bundled files do not — pull/export
