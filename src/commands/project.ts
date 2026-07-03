@@ -147,9 +147,6 @@ async function listProjects() {
         slug: string;
         updated_at?: string;
       }>;
-      deployed_count: number;
-      deploy_limit: number;
-      tier: string;
     }>('GET', '/projects');
     spinner.stop();
 
@@ -170,13 +167,6 @@ async function listProjects() {
             : '',
         p.updated_at ? timeAgo(p.updated_at) : '',
       ]),
-    );
-
-    console.log('');
-    info(
-      dim(
-        `${result.deployed_count} of ${result.deploy_limit} deploy slots used (${result.tier === 'builder' ? 'Builder' : 'Free'})`,
-      ),
     );
   } catch (err) {
     spinner.fail('Failed');

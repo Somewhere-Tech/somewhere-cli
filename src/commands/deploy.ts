@@ -7,6 +7,7 @@ import { getToken, loadConfig, loadProjectConfig, saveConfig, saveProjectConfig 
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+import type { CliConfig } from '../types.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
 // `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
@@ -37,10 +38,49 @@ export function prebuiltOptIn(opts: {
 // EMPTY and the server signal is unambiguous.
 const SERVER_FRAMEWORK_DEPS = ['express', 'fastify', 'koa', '@nestjs/core', '@hapi/hapi', 'restify'];
 const SERVER_CODE_PATTERN = /\bapp\.listen\s*\(|\bhttp\.createServer\s*\(|\bfastify\s*\(\s*\)|new\s+Koa\s*\(/;
+const NEXT_APP_SIGNAL_PREFIX = 'Next.js app';
+const NEXT_CONFIG_PATTERN = /^next\.config\.(js|ts|mjs)$/;
+const NEXT_ROUTER_FILE_PATTERN =
+  /^(?:src\/)?(?:app\/(?:.*\/)?(?:page|layout|route|loading|error|not-found)\.(?:js|jsx|ts|tsx|mdx)|pages\/.+\.(?:js|jsx|ts|tsx|mdx))$/;
+const NEXT_APP_WARNING =
+  "somewhere.tech serves static files + serverless functions, not SSR — Next.js apps don't run here. " +
+  'Port API routes to functions/ handlers, or start from a Vite React app; the platform compiles raw JSX/TSX on deploy.';
+
+export function isNextAppShapeSignal(signal: string): boolean {
+  return signal.startsWith(`${NEXT_APP_SIGNAL_PREFIX} (`);
+}
+
+function detectNextAppShape(files: Record<string, string>): string | null {
+  const pkgRaw = files['package.json'];
+  if (pkgRaw) {
+    try {
+      const pkg = JSON.parse(pkgRaw) as {
+        dependencies?: Record<string, string>;
+        devDependencies?: Record<string, string>;
+      };
+      if (pkg.dependencies?.next || pkg.devDependencies?.next) {
+        return `${NEXT_APP_SIGNAL_PREFIX} (package.json depends on "next")`;
+      }
+    } catch {
+      /* unparseable package.json is someone else's problem */
+    }
+  }
+
+  for (const path of Object.keys(files)) {
+    if (NEXT_CONFIG_PATTERN.test(path)) return `${NEXT_APP_SIGNAL_PREFIX} (${path})`;
+    if (NEXT_ROUTER_FILE_PATTERN.test(path)) return `${NEXT_APP_SIGNAL_PREFIX} (${path} router file)`;
+  }
+
+  return null;
+}
+
 export function detectNodeServerShape(
   files: Record<string, string>,
   functions: Record<string, string>,
 ): string | null {
+  const nextSignal = detectNextAppShape(files);
+  if (nextSignal) return nextSignal;
+
   if (Object.keys(functions).length > 0) return null; // has real functions — trust it
   const pkgRaw = files['package.json'];
   if (pkgRaw) {
@@ -77,13 +117,40 @@ export function deriveTempProjectName(dirPath: string): string {
   return `${base}-${randomSuffix()}`;
 }
 
-// The claim-relay block derives its "N hours" from the server's ttl_seconds
-// (10800 → 3). Falls back to 3 when ttl_seconds is missing/non-finite — e.g.
-// a silently-reused cached credential, where we only persisted temp_expires_at
-// (an absolute timestamp), not the original ttl_seconds.
+// The first-mint claim-relay block derives its "N hours" from the server's
+// ttl_seconds (10800 → 3). Reused sessions with no saved expiry (old configs)
+// still fall back here instead of crashing.
 export function formatTtlHours(ttlSeconds?: number): number {
   if (!ttlSeconds || !Number.isFinite(ttlSeconds)) return 3;
   return Math.round(ttlSeconds / 3600) || 3;
+}
+
+export function formatRemainingTempTime(expiresAt: string, nowMs = Date.now()): string | null {
+  const expiresMs = new Date(expiresAt).getTime();
+  if (!Number.isFinite(expiresMs)) return null;
+
+  const totalMinutes = Math.max(0, Math.ceil((expiresMs - nowMs) / 60_000));
+  const hours = Math.floor(totalMinutes / 60);
+  const minutes = totalMinutes % 60;
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+function hasReusableTempCredential(
+  config: CliConfig | null,
+  nowMs = Date.now(),
+): config is CliConfig & { temporary: true } {
+  if (!config?.token || !config.temporary) return false;
+  if (!config.temp_expires_at) return true;
+
+  const expiresMs = new Date(config.temp_expires_at).getTime();
+  return Number.isFinite(expiresMs) && expiresMs > nowMs;
+}
+
+interface TempSession {
+  claimUrl: string;
+  ttlSeconds?: number;
+  expiresAt?: string;
+  reused: boolean;
 }
 
 export function registerDeploy(program: Command) {
@@ -142,7 +209,7 @@ export function registerDeploy(program: Command) {
       // Resolved below: present only for a temp (minted or reused) session,
       // never for a normal login — gates both project auto-create and the
       // claim-relay success block.
-      let tempSession: { claimUrl: string; ttlSeconds?: number } | undefined;
+      let tempSession: TempSession | undefined;
 
       let token: string;
       if (opts.temporary) {
@@ -152,17 +219,16 @@ export function registerDeploy(program: Command) {
           // next to the dev's own projects.
           info('Already logged in — deploying to your account.');
           token = getToken();
-        } else if (
-          storedConfig?.token &&
-          storedConfig.temporary &&
-          storedConfig.temp_expires_at &&
-          new Date(storedConfig.temp_expires_at).getTime() > Date.now()
-        ) {
+        } else if (hasReusableTempCredential(storedConfig)) {
           // Reuse silently — this is the "one credential across shells"
           // requirement: a second `--temporary` deploy in the same 3h window
           // (a different terminal, a re-run) must not mint a second project.
           token = storedConfig.token;
-          tempSession = { claimUrl: storedConfig.claim_url ?? '' };
+          tempSession = {
+            claimUrl: storedConfig.claim_url ?? '',
+            expiresAt: storedConfig.temp_expires_at,
+            reused: true,
+          };
         } else {
           const powSpinner = ora('Solving proof-of-work…').start();
           try {
@@ -176,7 +242,11 @@ export function registerDeploy(program: Command) {
               user: { email: '', username: '' },
             });
             token = account.key;
-            tempSession = { claimUrl: account.claim_url, ttlSeconds: account.ttl_seconds };
+            tempSession = {
+              claimUrl: account.claim_url,
+              ttlSeconds: account.ttl_seconds,
+              reused: false,
+            };
           } catch (err) {
             powSpinner.fail('Could not create a temporary session');
             error(err instanceof Error ? err.message : String(err));
@@ -257,12 +327,16 @@ export function registerDeploy(program: Command) {
       const serverSignal = detectNodeServerShape(files, functions);
       if (serverSignal) {
         spinner.stop();
-        warn(`This looks like a Node server app (${serverSignal}) — somewhere.tech does not run server processes.`);
-        warn('It will deploy as static files only: your routes will NOT run, and the');
-        warn('server source will be publicly readable at its file path.');
-        warn('The platform shape: static files at the root + API handlers under functions/');
-        warn('(each default-exports async (req, sw) and becomes a route).');
-        warn('Full quickstart: somewhere docs start');
+        if (isNextAppShapeSignal(serverSignal)) {
+          warn(NEXT_APP_WARNING);
+        } else {
+          warn(`This looks like a Node server app (${serverSignal}) — somewhere.tech does not run server processes.`);
+          warn('It will deploy as static files only: your routes will NOT run, and the');
+          warn('server source will be publicly readable at its file path.');
+          warn('The platform shape: static files at the root + API handlers under functions/');
+          warn('(each default-exports async (req, sw) and becomes a route).');
+          warn('Full quickstart: somewhere docs start');
+        }
         spinner.start();
       }
 
@@ -371,18 +445,26 @@ export function registerDeploy(program: Command) {
         }
 
         if (tempSession) {
-          // Agent-relay success message (tsk_35674c33, verbatim copy — don't
-          // "improve" it): every temp deploy, minted or silently reused, ends
-          // with this block so the claim path is never missed.
-          const hours = formatTtlHours(tempSession.ttlSeconds);
-          success(`Live at ${teal(result.url)} — yours for ${hours} hour${hours === 1 ? '' : 's'}.`);
+          // Agent-relay success message (tsk_35674c33): every temp deploy,
+          // minted or silently reused, ends with this block so the claim path
+          // is never missed. Reused sessions report the absolute account clock
+          // instead of re-promising a fresh 3 hours.
+          const remaining = tempSession.reused && tempSession.expiresAt
+            ? formatRemainingTempTime(tempSession.expiresAt)
+            : null;
+          if (remaining) {
+            success(`Live at ${teal(result.url)}`);
+            info(`This temporary workspace expires in ${remaining} — claiming keeps ALL projects under it.`);
+          } else {
+            const hours = formatTtlHours(tempSession.ttlSeconds);
+            success(`Live at ${teal(result.url)} — yours for ${hours} hour${hours === 1 ? '' : 's'}.`);
+          }
           info(`To keep it: ${teal(tempSession.claimUrl)}`);
           info("Claiming connects the Somewhere MCP so your agent can manage this project's");
           info('database, email, and cron directly next time.');
-          // Additive pointer (tsk_497b7eeb) — the claim block above is verbatim
-          // epic copy; this line is separate. Next thing a fresh agent needs is
-          // the anonymous capability map (tables via `somewhere db query`, logs,
-          // redeploys) — `docs start` is that map, no account required.
+          // Additive pointer (tsk_497b7eeb). Next thing a fresh agent needs is
+          // the anonymous capability map (tables via `somewhere db query`,
+          // logs, redeploys) — `docs start` is that map, no account required.
           info('What else works without an account: somewhere docs start');
         } else {
           success(`Live at ${teal(result.url)}`);

@@ -163,11 +163,43 @@ test('deploy --temporary — mint, auto-create project, claim relay, then silent
   const second = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
   assert.equal(second.status, 0, `expected exit 0, got ${second.status}\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
   assert.match(second.stdout, /Live at/);
+  assert.doesNotMatch(second.stdout, /yours for 3 hours/);
+  assert.match(second.stdout, /This temporary workspace expires in \d+h \d+m — claiming keeps ALL projects under it\./);
   assert.match(second.stdout, /To keep it:/);
 
   assert.equal(tempCreateCalls, 1, 'still exactly ONE temp-create total — silent reuse');
   assert.equal(projectsCalls, 1, 'still exactly ONE project create total — .somewhere.json was reused');
   assert.equal(deployCalls, 2);
+});
+
+test('deploy --temporary reuses old temp configs without temp_expires_at and keeps fallback copy', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-home-oldconfig-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-fixture-oldconfig-'));
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>hi</body></html>\n');
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_e2e_old',
+    name: 'old-temp',
+    subdomain: 'old-temp',
+  }) + '\n');
+
+  mkdirSync(join(HOME, '.somewhere'), { recursive: true });
+  writeFileSync(join(HOME, '.somewhere', 'config.json'), JSON.stringify({
+    token: 'smt_old_temp',
+    temporary: true,
+    claim_url: 'https://somewhere.tech/claim?token=swtc_old',
+    user: { email: '', username: '' },
+  }) + '\n');
+
+  const beforeTempCreateCalls = tempCreateCalls;
+  const result = await run(['deploy', '--temporary'], {
+    cwd: fixtureDir,
+    env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+  });
+
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stdout, /Live at .*yours for 3 hours/);
+  assert.match(result.stdout, /https:\/\/somewhere\.tech\/claim\?token=swtc_old/);
+  assert.equal(tempCreateCalls, beforeTempCreateCalls, 'missing temp_expires_at falls back without minting a new temp session');
 });
 
 test('deploy (no --temporary) with no stored credential prints the discovery hint and exits 0', async () => {

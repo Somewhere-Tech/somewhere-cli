@@ -1,3 +1,4 @@
+import { once } from 'node:events';
 import { Command } from 'commander';
 import { dim, error } from '../lib/output.js';
 
@@ -7,7 +8,7 @@ import { dim, error } from '../lib/output.js';
 // can run without logging in: `somewhere docs start`. Deliberately a plain
 // fetch-and-print (no auth, no spinner, raw text to stdout) — the consumer is
 // usually a coding agent piping this into context.
-const DOCS_BASE = 'https://somewhere.tech';
+const DOCS_BASE = process.env.SOMEWHERE_DOCS_BASE?.replace(/\/$/, '') || 'https://somewhere.tech';
 
 const TOPICS: Record<string, { path: string; blurb: string }> = {
   start: {
@@ -46,6 +47,23 @@ const ALIASES: Record<string, string> = {
   all: 'llms',
 };
 
+export async function writeResponseBodyToStdout(res: Response): Promise<void> {
+  if (!res.body) return;
+
+  const reader = res.body.getReader();
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value && !process.stdout.write(value)) {
+        await once(process.stdout, 'drain');
+      }
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
 export function registerDocs(program: Command) {
   program
     .command('docs [topic]')
@@ -75,7 +93,7 @@ export function registerDocs(program: Command) {
           error(`Could not fetch ${DOCS_BASE}${entry.path} (HTTP ${res.status}). Try again shortly, or open it in a browser.`);
           process.exit(1);
         }
-        process.stdout.write(await res.text());
+        await writeResponseBodyToStdout(res);
       } catch (e) {
         error(`Could not reach ${DOCS_BASE} — check your connection. (${e instanceof Error ? e.message : String(e)})`);
         process.exit(1);
