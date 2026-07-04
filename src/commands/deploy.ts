@@ -6,7 +6,7 @@ import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadConfig, loadProjectConfig, saveConfig, saveProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
-import { dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+import { dim, error, green, info, printJson, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig } from '../types.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
@@ -189,6 +189,7 @@ export function registerDeploy(program: Command) {
       '--temporary',
       'Deploy without an account — creates a temporary 3-hour workspace you can claim later',
     )
+    .option('--json', 'Print the raw deploy response as JSON')
     .action(async (dir: string | undefined, opts) => {
       const targetDir = resolveTargetDir(dir);
       const storedConfig = loadConfig();
@@ -201,6 +202,13 @@ export function registerDeploy(program: Command) {
       // exit here would make CI/agent tooling treat "you could deploy without
       // an account" as a broken command.
       if (!storedConfig?.token && !opts.temporary) {
+        if (opts.json) {
+          printJson({
+            message: 'No account found. To deploy without logging in, rerun with --temporary.',
+            docs_command: 'somewhere docs start',
+          });
+          process.exit(0);
+        }
         console.log('No account found. To deploy without logging in, rerun with --temporary.');
         console.log('Everything you can run without an account: somewhere docs start');
         process.exit(0);
@@ -217,7 +225,7 @@ export function registerDeploy(program: Command) {
           // Already have a real account — --temporary would be a downgrade,
           // so ignore it rather than silently minting a throwaway workspace
           // next to the dev's own projects.
-          info('Already logged in — deploying to your account.');
+          if (!opts.json) info('Already logged in — deploying to your account.');
           token = getToken();
         } else if (hasReusableTempCredential(storedConfig)) {
           // Reuse silently — this is the "one credential across shells"
@@ -230,10 +238,10 @@ export function registerDeploy(program: Command) {
             reused: true,
           };
         } else {
-          const powSpinner = ora('Solving proof-of-work…').start();
+          const powSpinner = opts.json ? null : ora('Solving proof-of-work…').start();
           try {
             const account = await mintTempAccount();
-            powSpinner.stop();
+            powSpinner?.stop();
             saveConfig({
               token: account.key,
               temporary: true,
@@ -248,7 +256,7 @@ export function registerDeploy(program: Command) {
               reused: false,
             };
           } catch (err) {
-            powSpinner.fail('Could not create a temporary session');
+            powSpinner?.fail('Could not create a temporary session');
             error(err instanceof Error ? err.message : String(err));
             process.exit(1);
           }
@@ -279,7 +287,7 @@ export function registerDeploy(program: Command) {
         } else if (tempSession) {
           // No `.somewhere.json` and no account to run `somewhere init` —
           // auto-create the project so a temp deploy is a single command.
-          const createSpinner = ora('Creating a temporary project...').start();
+          const createSpinner = opts.json ? null : ora('Creating a temporary project...').start();
           try {
             const name = deriveTempProjectName(targetDir);
             const created = await client.call<{ id: string; name: string; subdomain: string }>(
@@ -287,7 +295,7 @@ export function registerDeploy(program: Command) {
               '/projects',
               { name, subdomain: name },
             );
-            createSpinner.stop();
+            createSpinner?.stop();
             saveProjectConfig(targetDir, {
               project_id: created.id,
               name: created.name,
@@ -295,7 +303,7 @@ export function registerDeploy(program: Command) {
             });
             projectId = created.id;
           } catch (err) {
-            createSpinner.fail('Could not create a temporary project');
+            createSpinner?.fail('Could not create a temporary project');
             error(err instanceof Error ? err.message : String(err));
             process.exit(1);
           }
@@ -307,26 +315,26 @@ export function registerDeploy(program: Command) {
         }
       }
 
-      const spinner = ora('Collecting files...').start();
+      const spinner = opts.json ? null : ora('Collecting files...').start();
 
       const { files, binaryFiles, functions, skipped } = collectFiles(targetDir);
 
       // A deploy replaces the whole project, so a file we skip is DELETED from
       // production if it was there before. Never silent — surface every skip.
-      if (skipped.length) {
-        spinner.stop();
+      if (skipped.length && !opts.json) {
+        spinner?.stop();
         warn(
           `${skipped.length} file(s) will NOT be uploaded — a deploy is a full ` +
             `replacement, so any already deployed will be REMOVED from production:`,
         );
         for (const s of skipped) warn(`  ${dim('•')} ${s.path} — ${s.reason}`);
-        spinner.start();
+        spinner?.start();
       }
 
       // Node-server pre-flight (tsk_8e8c6bc8) — see detectNodeServerShape.
       const serverSignal = detectNodeServerShape(files, functions);
-      if (serverSignal) {
-        spinner.stop();
+      if (serverSignal && !opts.json) {
+        spinner?.stop();
         if (isNextAppShapeSignal(serverSignal)) {
           warn(NEXT_APP_WARNING);
         } else {
@@ -337,7 +345,7 @@ export function registerDeploy(program: Command) {
           warn('(each default-exports async (req, sw) and becomes a route).');
           warn('Full quickstart: somewhere docs start');
         }
-        spinner.start();
+        spinner?.start();
       }
 
       const totalFiles =
@@ -351,9 +359,11 @@ export function registerDeploy(program: Command) {
         .reduce((sum, b64) => sum + Math.floor((b64.length * 3) / 4), 0);
       const totalBytes = textBytes + binaryBytes;
 
-      spinner.text = opts.dryRun
-        ? `Checking ${totalFiles} files (${formatBytes(totalBytes)})...`
-        : `Deploying ${totalFiles} files (${formatBytes(totalBytes)})...`;
+      if (spinner) {
+        spinner.text = opts.dryRun
+          ? `Checking ${totalFiles} files (${formatBytes(totalBytes)})...`
+          : `Deploying ${totalFiles} files (${formatBytes(totalBytes)})...`;
+      }
 
       try {
         const body: Record<string, unknown> = {
@@ -386,8 +396,12 @@ export function registerDeploy(program: Command) {
           const plan = await client.call<DryRunResult>('POST', '/deploy', body, undefined, {
             timeoutMs: LONG_CALL_TIMEOUT_MS,
           });
-          spinner.stop();
-          printDryRun(plan, scope);
+          spinner?.stop();
+          if (opts.json) {
+            printJson(plan);
+          } else {
+            printDryRun(plan, scope);
+          }
           return;
         }
 
@@ -395,7 +409,15 @@ export function registerDeploy(program: Command) {
           timeoutMs: LONG_CALL_TIMEOUT_MS,
         });
 
-        spinner.stop();
+        spinner?.stop();
+        if (opts.json) {
+          printJson(result);
+          if (result.function_errors && result.function_errors.length > 0) {
+            process.exit(1);
+          }
+          return;
+        }
+
         const staticCount =
           typeof result.files === 'number'
             ? result.files
@@ -486,7 +508,7 @@ export function registerDeploy(program: Command) {
           process.exit(1);
         }
       } catch (err) {
-        spinner.fail(opts.dryRun ? 'Dry run failed' : 'Deploy failed');
+        spinner?.fail(opts.dryRun ? 'Dry run failed' : 'Deploy failed');
         // Structured build failures get the full treatment: file:line
         // heading + a code frame rebuilt from the local source (we have the
         // files the server compiled — this is where the CLI beats a remote

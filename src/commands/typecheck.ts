@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
-import { bold, dim, error, info, red, success, teal, warn } from '../lib/output.js';
+import { bold, dim, error, info, printJson, red, success, teal, warn } from '../lib/output.js';
 import { runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
 
 export function registerTypecheck(program: Command) {
@@ -13,10 +13,21 @@ export function registerTypecheck(program: Command) {
         'Catches undefined symbols (a dropped import) and type errors with file:line BEFORE they 500 in production. ' +
         'Run after `somewhere pull`, which scaffolds the tsconfig this uses.',
     )
-    .action(async (dirArg: string | undefined) => {
+    .option('--json', 'Print the raw typecheck result as JSON')
+    .action(async (dirArg: string | undefined, opts) => {
       const dir = resolve(process.cwd(), dirArg ?? '.');
 
       if (!existsSync(join(dir, 'tsconfig.json'))) {
+        if (opts.json) {
+          printJson({
+            ok: false,
+            errors: [],
+            via: 'bundled',
+            raw: '',
+            spawnError: 'No tsconfig.json here to typecheck against.',
+          });
+          process.exit(1);
+        }
         error('No tsconfig.json here to typecheck against.');
         info(
           dim(
@@ -26,10 +37,14 @@ export function registerTypecheck(program: Command) {
         process.exit(1);
       }
 
-      const spinner = ora('Typechecking (tsc --noEmit)...').start();
+      const spinner = opts.json ? null : ora('Typechecking (tsc --noEmit)...').start();
       const result = await runTypecheck(dir);
-      spinner.stop();
+      spinner?.stop();
 
+      if (opts.json) {
+        printJson(result);
+        process.exit(result.ok ? 0 : 1);
+      }
       reportTypecheck(result);
       process.exit(result.ok ? 0 : 1);
     });

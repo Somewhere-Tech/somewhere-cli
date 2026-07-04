@@ -3,9 +3,7 @@ import { Command } from 'commander';
 import ora from '../lib/spinner.js';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, table, teal, warn, yellow } from '../lib/output.js';
-
-const API_BASE = 'https://api.somewhere.tech/v1';
+import { dim, error, info, printJson, success, table, teal, yellow } from '../lib/output.js';
 
 interface QueryResult {
   rows: Array<Record<string, unknown>>;
@@ -90,6 +88,7 @@ export function registerDb(program: Command) {
     .description('Export the full database as SQL (schema + every row). Pipe to a file: somewhere db dump > backup.sql')
     .option('--project <id>', 'Project ID (defaults to .somewhere.json)')
     .option('-o, --output <file>', 'Write to file instead of stdout')
+    .option('--json', 'Print the dump response as JSON')
     .action(async (opts) => {
       let projectId: string | undefined = opts.project;
       if (!projectId) {
@@ -101,52 +100,58 @@ export function registerDb(program: Command) {
         projectId = config.project_id;
       }
 
-      // Bypass ApiClient — the response is application/sql, not JSON.
-      const spinner = ora('Dumping database…').start();
+      const client = new ApiClient(getToken());
+      const spinner = opts.json ? null : ora('Dumping database…').start();
       try {
-        const res = await fetch(`${API_BASE}/db/dump`, {
-          method: 'POST',
-          headers: {
-            Authorization: `Bearer ${getToken()}`,
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ project_id: projectId }),
-        });
+        const res = await client.callRaw('POST', '/db/dump', { project_id: projectId });
 
         if (!res.ok) {
-          spinner.fail('Dump failed');
-          const body = await res.text();
+          spinner?.fail('Dump failed');
           try {
-            const json = JSON.parse(body) as { error?: string; message?: string };
-            error(`${json.error ?? 'ERROR'}: ${json.message ?? body.slice(0, 200)}`);
+            const json = JSON.parse(res.body) as { error?: string; message?: string };
+            error(`${json.error ?? 'ERROR'}: ${json.message ?? res.body.slice(0, 200)}`);
           } catch {
-            error(`HTTP ${res.status}: ${body.slice(0, 200)}`);
+            error(`HTTP ${res.status}: ${res.body.slice(0, 200)}`);
           }
           process.exit(1);
         }
 
-        const sql = await res.text();
-        const tables = res.headers.get('X-Tables') ?? '?';
-        const rows = res.headers.get('X-Rows') ?? '?';
-        const truncated = res.headers.get('X-Truncated-Tables');
+        const sql = res.body;
+        const tables = res.headers['x-tables'] ?? '?';
+        const rows = res.headers['x-rows'] ?? '?';
+        const truncated = res.headers['x-truncated-tables'];
+        const dumpResult = {
+          sql,
+          tables,
+          rows,
+          truncated_tables: truncated ?? null,
+        };
 
         if (opts.output) {
           writeFileSync(opts.output, sql);
-          spinner.succeed(`Wrote ${opts.output} (${tables} tables, ${rows} rows)`);
+          if (opts.json) {
+            printJson(dumpResult);
+          } else {
+            spinner?.succeed(`Wrote ${opts.output} (${tables} tables, ${rows} rows)`);
+          }
         } else {
-          spinner.stop();
-          process.stdout.write(sql);
-          // Summary to STDERR — stdout must stay pure SQL for `db dump > backup.sql`.
-          process.stderr.write(dim(`${tables} tables, ${rows} rows`) + '\n');
+          spinner?.stop();
+          if (opts.json) {
+            printJson(dumpResult);
+          } else {
+            process.stdout.write(sql);
+            // Summary to STDERR — stdout must stay pure SQL for `db dump > backup.sql`.
+            process.stderr.write(dim(`${tables} tables, ${rows} rows`) + '\n');
+          }
         }
-        if (truncated) {
+        if (truncated && !opts.json) {
           // stderr for the same reason (applies to the piped-dump path).
           process.stderr.write(
             yellow(`⚠ Per-table row cap hit on: ${truncated} — contact support for a streaming dump if needed.`) + '\n',
           );
         }
       } catch (err) {
-        spinner.fail('Dump failed');
+        spinner?.fail('Dump failed');
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
@@ -156,6 +161,7 @@ export function registerDb(program: Command) {
     .command('tables')
     .description('List tables in the project database')
     .option('--project <id>', 'Project ID (defaults to .somewhere.json)')
+    .option('--json', 'Print the raw tables response as JSON')
     .action(async (opts) => {
       const client = new ApiClient(getToken());
 
@@ -176,6 +182,10 @@ export function registerDb(program: Command) {
           undefined,
           { project_id: projectId },
         );
+        if (opts.json) {
+          printJson(r);
+          return;
+        }
         // The API returns tables as an array of NAME STRINGS. (The old CLI read
         // them as { name, row_count } objects, so every name came back empty and
         // every row count printed "?" — audit #5.) Normalize defensively so a

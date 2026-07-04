@@ -15,7 +15,7 @@ import {
   saveGlobalMcpConfig,
 } from '../lib/config.js';
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
-import { dim, error, info, success, teal } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal } from '../lib/output.js';
 
 async function loginAction(opts: { legacy?: boolean }): Promise<void> {
   if (opts.legacy) {
@@ -43,7 +43,8 @@ export function registerAuth(program: Command) {
   program
     .command('whoami')
     .description('Show current user info')
-    .action(async () => {
+    .option('--json', 'Print the raw account response as JSON')
+    .action(async (opts) => {
       const config = loadConfig();
       if (!config) {
         error('Not logged in. Run: somewhere login');
@@ -62,6 +63,11 @@ export function registerAuth(program: Command) {
           stats: { api_keys: number; projects: number };
         }>('GET', '/auth/whoami');
 
+        if (opts.json) {
+          printJson(r);
+          return;
+        }
+
         const tier = r.user.effective_tier === 'builder' ? 'Builder' : 'Free';
         console.log(`${teal(r.user.email)}  ${dim(`(${tier})`)}`);
         if (r.user.name) info(dim(r.user.name));
@@ -71,6 +77,14 @@ export function registerAuth(program: Command) {
       } catch {
         // Agents gate on `whoami` to validate the token — a stored-but-dead token
         // must NOT report success. Show the cached identity, then exit non-zero.
+        if (opts.json) {
+          printJson({
+            error: 'WHOAMI_FAILED',
+            message: 'Could not fetch account details — token may be expired. Run: somewhere login',
+          });
+          process.exitCode = 1;
+          return;
+        }
         console.log(teal(config.user.email));
         info(dim('Could not fetch account details — token may be expired. Run: somewhere login'));
         process.exitCode = 1;
