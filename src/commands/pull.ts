@@ -4,7 +4,7 @@ import { basename, dirname, join, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 import {
   SCAFFOLD_PACKAGE_FILENAME,
   SCAFFOLD_TSCONFIG_FILENAME,
@@ -34,6 +34,7 @@ export function registerPull(program: Command) {
     .option('--env <env>', 'Environment to pull from (dev or prod)', 'dev')
     .option('--out <dir>', 'Output directory', '.')
     .option('--force', 'Overwrite existing files without prompting')
+    .option('--json', 'Print the raw source response as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const token = getToken();
       const client = new ApiClient(token);
@@ -57,7 +58,7 @@ export function registerPull(program: Command) {
       const outDir = resolve(process.cwd(), String(opts.out));
       if (!existsSync(outDir)) mkdirSync(outDir, { recursive: true });
 
-      const spinner = ora(`Fetching ${envSlot} source...`).start();
+      const spinner = opts.json ? null : ora(`Fetching ${envSlot} source...`).start();
       let body: SourceResponse;
       try {
         body = await client.call<SourceResponse>(
@@ -68,7 +69,7 @@ export function registerPull(program: Command) {
           { timeoutMs: LONG_CALL_TIMEOUT_MS },
         );
       } catch (err) {
-        spinner.fail('Pull failed');
+        spinner?.fail('Pull failed');
         if (err instanceof CliApiError) {
           error(
             `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
@@ -78,10 +79,14 @@ export function registerPull(program: Command) {
         }
         process.exit(1);
       }
-      spinner.stop();
+      spinner?.stop();
 
       const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
       if (total === 0) {
+        if (opts.json) {
+          printJson(body);
+          return;
+        }
         warn(`No files in ${envSlot} for this project.`);
         return;
       }
@@ -110,8 +115,10 @@ export function registerPull(program: Command) {
         writeOne(join('functions', path), content);
       }
 
-      success(`Pulled ${written.length} file${written.length === 1 ? '' : 's'} from ${teal(envSlot)} (v${body.version}) to ${teal(outDir)}`);
-      if (skipped.length > 0) {
+      if (!opts.json) {
+        success(`Pulled ${written.length} file${written.length === 1 ? '' : 's'} from ${teal(envSlot)} (v${body.version}) to ${teal(outDir)}`);
+      }
+      if (skipped.length > 0 && !opts.json) {
         warn(`Skipped ${skipped.length} existing file${skipped.length === 1 ? '' : 's'} (use --force to overwrite):`);
         for (const p of skipped.slice(0, 10)) info(dim(`  ${p}`));
         if (skipped.length > 10) info(dim(`  ...and ${skipped.length - 10} more`));
@@ -123,6 +130,10 @@ export function registerPull(program: Command) {
       // own config, even with --force (that flag is for source files, not
       // local tooling we're adding on top).
       const scaffolded = scaffoldTypecheckFiles(outDir, body.static_files);
+      if (opts.json) {
+        printJson(body);
+        return;
+      }
       if (scaffolded.length) {
         info(dim(`Added ${scaffolded.join(' + ')} for local typechecking.`));
         info(`Run ${teal('somewhere typecheck')} before deploy to catch undefined symbols.`);

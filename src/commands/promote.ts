@@ -3,7 +3,7 @@ import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 interface PromoteResult {
   version: number;
@@ -23,6 +23,7 @@ export function registerPromote(program: Command) {
     .option('-p, --project <id>', 'Project ID (defaults to the linked project)')
     .option('-m, --message <msg>', 'Release notes for this version')
     .option('-y, --yes', 'Skip confirmation prompt')
+    .option('--json', 'Print the raw promote response as JSON')
     .action(async (draftId: string | undefined, opts) => {
       const client = new ApiClient(getToken());
 
@@ -44,22 +45,31 @@ export function registerPromote(program: Command) {
             ? `Promote draft ${teal(draftId)} of ${teal(projectId)} → prod?`
             : `Promote ${teal(projectId)} dev → prod?`,
           initial: true,
+          stdout: opts.json ? process.stderr : undefined,
         });
         if (!ok) {
           // Non-zero: an abort (or auto-declined non-TTY prompt) is not a promote.
+          if (opts.json) {
+            printJson({ error: 'ABORTED', message: 'Aborted.' });
+            process.exit(1);
+          }
           warn('Aborted.');
           process.exit(1);
         }
       }
 
-      const spinner = ora('Promoting...').start();
+      const spinner = opts.json ? null : ora('Promoting...').start();
       try {
         const r = await client.call<PromoteResult>('POST', '/promote', {
           project_id: projectId,
           message: opts.message,
           draft_id: draftId,
         });
-        spinner.stop();
+        spinner?.stop();
+        if (opts.json) {
+          printJson(r);
+          return;
+        }
         success(`Promoted v${r.version} (${r.files_promoted} file${r.files_promoted === 1 ? '' : 's'}${r.has_functions ? ' + functions' : ''})`);
         // Name the preview/draft this version was promoted from, when known —
         // closes the loop on "what exactly went live" at the highest-trust moment.
@@ -78,7 +88,7 @@ export function registerPromote(program: Command) {
         }
         if (opts.message) info(dim(`Notes: ${opts.message}`));
       } catch (err) {
-        spinner.fail('Promote failed');
+        spinner?.fail('Promote failed');
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }

@@ -3,7 +3,7 @@ import { isAbsolute, join, relative, resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { bold, dim, error, green, red, yellow } from '../lib/output.js';
+import { bold, dim, error, green, printJson, red, yellow } from '../lib/output.js';
 import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { compileRoutePattern, isRoutable } from '../local/router.js';
 import {
@@ -19,6 +19,7 @@ interface ExecOptions {
   header: string[];
   path?: string;
   query?: string;
+  json?: boolean;
 }
 
 export function registerExec(program: Command) {
@@ -37,6 +38,7 @@ export function registerExec(program: Command) {
       'URL path for the synthetic request — required for parametric routes like api/sites/[id].ts',
     )
     .option('-q, --query <querystring>', 'Query string to append (a=1&b=2)')
+    .option('--json', 'Print the invocation result as JSON')
     .action(async (file: string, opts: ExecOptions) => {
       try {
         assertNodeSupport();
@@ -116,10 +118,28 @@ export function registerExec(program: Command) {
         const ms = Date.now() - t0;
 
         const status = result.response.status;
+        const text = await result.response.text();
+
+        if (opts.json) {
+          printJson({
+            request: {
+              method,
+              path: `${urlPath}${qs}`,
+            },
+            response: {
+              status,
+              headers: Object.fromEntries(result.response.headers.entries()),
+              body: parseResponseBody(text),
+            },
+            duration_ms: ms,
+            error: serializeDispatchError(result.error),
+          });
+          process.exit(status >= 500 ? 1 : 0);
+        }
+
         const color = status >= 500 ? red : status >= 400 ? yellow : green;
         console.log(`${bold(method)} ${urlPath}${qs} ${color(String(status))} ${dim(`${ms}ms`)}`);
 
-        const text = await result.response.text();
         try {
           console.log(JSON.stringify(JSON.parse(text), null, 2));
         } catch {
@@ -135,4 +155,23 @@ export function registerExec(program: Command) {
         process.exit(1);
       }
     });
+}
+
+function parseResponseBody(text: string): unknown {
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return text;
+  }
+}
+
+function serializeDispatchError(err: unknown): { message: string; stack?: string } | null {
+  if (!err) return null;
+  if (err instanceof Error) {
+    return {
+      message: err.message,
+      stack: err.stack,
+    };
+  }
+  return { message: String(err) };
 }

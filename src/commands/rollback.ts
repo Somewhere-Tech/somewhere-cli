@@ -3,7 +3,7 @@ import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 interface RollbackResult {
   restored_at: string;
@@ -21,6 +21,7 @@ export function registerRollback(program: Command) {
         'before, including its functions. (Requires at least two promotes.)',
     )
     .option('-y, --yes', 'Skip the confirmation prompt')
+    .option('--json', 'Print the raw rollback response as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const client = new ApiClient(getToken());
 
@@ -40,25 +41,34 @@ export function registerRollback(program: Command) {
           name: 'ok',
           message: `Roll ${teal(projectId)} production back to the previous version?`,
           initial: true,
+          stdout: opts.json ? process.stderr : undefined,
         });
         if (!ok) {
           // Non-zero so a script/agent can't mistake an abort (incl. a non-TTY
           // prompt that auto-declines) for a completed rollback.
+          if (opts.json) {
+            printJson({ error: 'ABORTED', message: 'Aborted.' });
+            process.exit(1);
+          }
           warn('Aborted.');
           process.exit(1);
         }
       }
 
-      const spinner = ora('Rolling back...').start();
+      const spinner = opts.json ? null : ora('Rolling back...').start();
       try {
         const r = await client.call<RollbackResult>('POST', '/promote/rollback', {
           project_id: projectId,
         });
-        spinner.stop();
+        spinner?.stop();
+        if (opts.json) {
+          printJson(r);
+          return;
+        }
         success(`Rolled back to v${r.version} (${r.files_restored} file${r.files_restored === 1 ? '' : 's'} restored)`);
         if (r.message) info(dim(`Version notes: ${r.message}`));
       } catch (err) {
-        spinner.fail('Rollback failed');
+        spinner?.fail('Rollback failed');
         if (err instanceof CliApiError) {
           error(`${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`);
         } else {

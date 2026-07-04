@@ -31,6 +31,14 @@ export function info(msg: string) {
   console.log(`  ${msg}`);
 }
 
+export function printJson(value: unknown): void {
+  console.log(JSON.stringify(value ?? null, null, 2));
+}
+
+export function printJsonLine(value: unknown): void {
+  process.stdout.write(`${JSON.stringify(value ?? null)}\n`);
+}
+
 export function heading(msg: string) {
   console.log(`\n${bold(msg)}\n`);
 }

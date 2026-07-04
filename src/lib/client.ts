@@ -266,7 +266,7 @@ export class ApiClient {
     path: string,
     body?: unknown,
     opts?: { timeoutMs?: number },
-  ): Promise<{ status: number; ok: boolean; body: string }> {
+  ): Promise<{ status: number; ok: boolean; body: string; headers: Record<string, string> }> {
     const url = `${API_BASE_URL}${path}`;
     const headers: Record<string, string> = { Authorization: `Bearer ${this.token}` };
     let reqBody: string | undefined;
@@ -294,7 +294,16 @@ export class ApiClient {
         0,
       );
     }
-    return { status: res.status, ok: res.status < 400, body: await res.text() };
+    const responseHeaders: Record<string, string> = {};
+    res.headers.forEach((value, key) => {
+      responseHeaders[key.toLowerCase()] = value;
+    });
+    return {
+      status: res.status,
+      ok: res.status < 400,
+      body: await res.text(),
+      headers: responseHeaders,
+    };
   }
 }
 
