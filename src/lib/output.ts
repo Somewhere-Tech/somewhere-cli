@@ -39,6 +39,10 @@ export function printJsonLine(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value ?? null)}\n`);
 }
 
+export function printJsonError(errorCode: string, message: string): void {
+  printJson({ ok: false, error: errorCode, message });
+}
+
 export function heading(msg: string) {
   console.log(`\n${bold(msg)}\n`);
 }

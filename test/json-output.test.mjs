@@ -24,6 +24,25 @@ function run(args, { cwd = repoRoot, env }) {
   });
 }
 
+function runFollow(args, { cwd = repoRoot, env, stop }) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [distIndex, ...args], {
+      cwd,
+      env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
+    });
+    let stdout = '';
+    let stderr = '';
+    const timeout = setTimeout(() => child.kill('SIGTERM'), 9000);
+    stop(() => setTimeout(() => child.kill('SIGTERM'), 100));
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.on('close', (status, signal) => {
+      clearTimeout(timeout);
+      resolvePromise({ status, signal, stdout, stderr });
+    });
+  });
+}
+
 function writeConfig(home, token = 'smt_json_test') {
   mkdirSync(join(home, '.somewhere'), { recursive: true });
   writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
@@ -47,6 +66,14 @@ function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(payload));
+}
+
+async function closedApiUrl() {
+  const server = createServer((_req, res) => res.end('closed'));
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  await new Promise((resolvePromise) => server.close(resolvePromise));
+  return `http://127.0.0.1:${port}/v1`;
 }
 
 test('deploy --json emits only the raw deploy response object', async () => {
@@ -155,6 +182,131 @@ test('logs --json emits JSONL and maps filters to /logs query params', async () 
     const ageMs = Date.now() - afterMs;
     assert.ok(ageMs >= 14 * 60_000 && ageMs <= 16 * 60_000, `unexpected --since age ${ageMs}`);
   });
+});
+
+test('logs --follow --json suppresses overlapping log IDs across poll cycles', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-logs-follow-home-'));
+  writeConfig(HOME);
+
+  const log1 = {
+    id: 'log_1',
+    level: 'info',
+    message: 'initial',
+    source: 'function',
+    created_at: '2026-07-03T10:00:00.000Z',
+  };
+  const log2 = {
+    id: 'log_2',
+    level: 'info',
+    message: 'second',
+    source: 'function',
+    created_at: '2026-07-03T10:00:01.000Z',
+  };
+  const log3 = {
+    id: 'log_3',
+    level: 'warn',
+    message: 'third',
+    source: 'function',
+    created_at: '2026-07-03T10:00:02.000Z',
+  };
+  const batches = [
+    [log1],
+    [log1, log2],
+    [log2, log3],
+  ];
+  const afters = [];
+  let requests = 0;
+  let stopFollow = () => {};
+
+  await withServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === '/v1/logs') {
+      afters.push(url.searchParams.get('after'));
+      const logs = batches[Math.min(requests, batches.length - 1)];
+      requests += 1;
+      sendJson(res, 200, { ok: true, data: { logs, has_more: false, cursor: null } });
+      if (requests >= batches.length) stopFollow();
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await runFollow(['logs', 'proj_json_logs', '--json', '--follow'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      stop: (fn) => {
+        stopFollow = fn;
+      },
+    });
+
+    assert.ok(requests >= 3, `expected at least three /logs requests; got ${requests}`);
+    assert.equal(result.signal, 'SIGTERM', `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    const lines = result.stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    assert.deepEqual(lines.map((line) => line.id), ['log_1', 'log_2', 'log_3']);
+    assert.equal(new Set(lines.map((line) => line.id)).size, lines.length);
+    assert.deepEqual(afters.slice(1, 3), [log1.created_at, log2.created_at]);
+  });
+});
+
+test('rollback --json emits JSON errors for API failures', async () => {
+  const cases = [
+    {
+      status: 500,
+      error: 'ROLLBACK_FAILED',
+      message: 'Rollback API failed.',
+    },
+    {
+      status: 409,
+      error: 'NO_ROLLBACK_TARGET',
+      message: 'No deploys to roll back to.',
+    },
+  ];
+
+  for (const apiError of cases) {
+    const HOME = mkdtempSync(join(tmpdir(), 'sw-json-rollback-api-home-'));
+    writeConfig(HOME);
+
+    await withServer((req, res) => {
+      if (req.method === 'POST' && req.url === '/v1/promote/rollback') {
+        sendJson(res, apiError.status, {
+          ok: false,
+          error: apiError.error,
+          message: apiError.message,
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    }, async (apiUrl) => {
+      const result = await run(['rollback', 'proj_json_rollback', '--json', '--yes'], {
+        env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      });
+
+      assert.notEqual(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+      assert.deepEqual(JSON.parse(result.stdout), {
+        ok: false,
+        error: apiError.error,
+        message: apiError.message,
+      });
+      assert.equal(result.stderr.trim(), '');
+      assert.doesNotMatch(result.stdout, /Rollback failed|✗/);
+    });
+  }
+});
+
+test('rollback --json emits JSON errors for network failures', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-rollback-network-home-'));
+  writeConfig(HOME);
+  const apiUrl = await closedApiUrl();
+
+  const result = await run(['rollback', 'proj_json_rollback', '--json', '--yes'], {
+    env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+  });
+
+  assert.notEqual(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  const body = JSON.parse(result.stdout);
+  assert.equal(body.ok, false);
+  assert.equal(body.error, 'NETWORK_ERROR');
+  assert.match(body.message, /Could not reach POST .*\/promote\/rollback/);
+  assert.equal(result.stderr.trim(), '');
+  assert.doesNotMatch(result.stdout, /Rollback failed|✗/);
 });
 
 test('whoami --json emits the raw whoami response object', async () => {

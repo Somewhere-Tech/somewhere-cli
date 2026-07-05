@@ -3,7 +3,7 @@ import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 
 interface RollbackResult {
   restored_at: string;
@@ -29,6 +29,10 @@ export function registerRollback(program: Command) {
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
+          if (opts.json) {
+            printJsonError('NO_PROJECT', 'No project specified and no .somewhere.json found.');
+            process.exit(1);
+          }
           error('No project specified and no .somewhere.json found.');
           process.exit(1);
         }
@@ -47,7 +51,7 @@ export function registerRollback(program: Command) {
           // Non-zero so a script/agent can't mistake an abort (incl. a non-TTY
           // prompt that auto-declines) for a completed rollback.
           if (opts.json) {
-            printJson({ error: 'ABORTED', message: 'Aborted.' });
+            printJsonError('ABORTED', 'Aborted.');
             process.exit(1);
           }
           warn('Aborted.');
@@ -69,6 +73,14 @@ export function registerRollback(program: Command) {
         if (r.message) info(dim(`Version notes: ${r.message}`));
       } catch (err) {
         spinner?.fail('Rollback failed');
+        if (opts.json) {
+          if (err instanceof CliApiError) {
+            printJsonError(err.code, err.message);
+          } else {
+            printJsonError('ERROR', err instanceof Error ? err.message : String(err));
+          }
+          process.exit(1);
+        }
         if (err instanceof CliApiError) {
           error(`${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`);
         } else {

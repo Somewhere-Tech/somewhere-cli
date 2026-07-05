@@ -1,9 +1,9 @@
 import { Command } from 'commander';
 import ora from '../lib/spinner.js';
 import prompts from 'prompts';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 
 interface PromoteResult {
   version: number;
@@ -31,6 +31,10 @@ export function registerPromote(program: Command) {
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
+          if (opts.json) {
+            printJsonError('NO_PROJECT', 'No project linked and no --project given. Run `somewhere init` or pass --project <id>.');
+            process.exit(1);
+          }
           error('No project linked and no --project given. Run `somewhere init` or pass --project <id>.');
           process.exit(1);
         }
@@ -50,7 +54,7 @@ export function registerPromote(program: Command) {
         if (!ok) {
           // Non-zero: an abort (or auto-declined non-TTY prompt) is not a promote.
           if (opts.json) {
-            printJson({ error: 'ABORTED', message: 'Aborted.' });
+            printJsonError('ABORTED', 'Aborted.');
             process.exit(1);
           }
           warn('Aborted.');
@@ -89,6 +93,14 @@ export function registerPromote(program: Command) {
         if (opts.message) info(dim(`Notes: ${opts.message}`));
       } catch (err) {
         spinner?.fail('Promote failed');
+        if (opts.json) {
+          if (err instanceof CliApiError) {
+            printJsonError(err.code, err.message);
+          } else {
+            printJsonError('ERROR', err instanceof Error ? err.message : String(err));
+          }
+          process.exit(1);
+        }
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }

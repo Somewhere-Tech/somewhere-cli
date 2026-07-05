@@ -65,10 +65,15 @@ export function registerLogs(program: Command) {
           return;
         }
 
+        const initialLogs = result.logs ?? [];
+        const seenLogKeys = new Set<string>();
+        rememberLogKeys(initialLogs, seenLogKeys);
+        let lastSeen = newestCreatedAt(initialLogs);
+
         if (opts.json) {
-          for (const log of result.logs) printJsonLine(log);
+          for (const log of initialLogs) printJsonLine(log);
         } else {
-          for (const log of result.logs.reverse()) {
+          for (const log of [...initialLogs].reverse()) {
             const time = new Date(log.created_at).toLocaleTimeString();
             const levelStr = formatLevel(log.level);
             console.log(`  ${dim(`[${levelStr}]`)}  ${dim(time)}  ${log.message}`);
@@ -77,9 +82,6 @@ export function registerLogs(program: Command) {
 
         if (opts.follow) {
           if (!opts.json) console.log(dim('\n  Polling for new logs... (Ctrl+C to stop)\n'));
-          let lastSeen = opts.json
-            ? result.logs[0]?.created_at
-            : result.logs[result.logs.length - 1]?.created_at;
 
           const poll = async () => {
             try {
@@ -94,18 +96,18 @@ export function registerLogs(program: Command) {
                 after: lastSeen,
               });
               const freshLogs = fresh.logs ?? [];
+              const unseenLogs = takeUnseenLogs(freshLogs, seenLogKeys);
+              lastSeen = newestCreatedAt(freshLogs, lastSeen);
               if (opts.json) {
-                for (const log of freshLogs) printJsonLine(log);
-                if (freshLogs.length) lastSeen = freshLogs[0]?.created_at ?? lastSeen;
+                for (const log of unseenLogs) printJsonLine(log);
                 return;
               }
-              for (const log of freshLogs.reverse()) {
+              for (const log of [...unseenLogs].reverse()) {
                 const time = new Date(log.created_at).toLocaleTimeString();
                 const levelStr = formatLevel(log.level);
                 console.log(
                   `  ${dim(`[${levelStr}]`)}  ${dim(time)}  ${log.message}`,
                 );
-                lastSeen = log.created_at;
               }
             } catch {}
           };
@@ -152,4 +154,48 @@ function formatLevel(level: string): string {
     default:
       return dim(level);
   }
+}
+
+function logDedupeKey(log: LogRow): string | undefined {
+  if (log.id) return `id:${log.id}`;
+  if (log.created_at && log.level && log.message) {
+    return `fallback:${log.created_at}:${log.level}:${log.message}`;
+  }
+  return undefined;
+}
+
+function rememberLogKeys(logs: LogRow[], seen: Set<string>): void {
+  for (const log of logs) {
+    const key = logDedupeKey(log);
+    if (key) seen.add(key);
+  }
+}
+
+function takeUnseenLogs(logs: LogRow[], seen: Set<string>): LogRow[] {
+  const out: LogRow[] = [];
+  for (const log of logs) {
+    const key = logDedupeKey(log);
+    if (key) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+    }
+    out.push(log);
+  }
+  return out;
+}
+
+function newestCreatedAt(logs: LogRow[], fallback?: string): string | undefined {
+  let newest = fallback;
+  let newestMs = newest ? Date.parse(newest) : Number.NEGATIVE_INFINITY;
+  if (!Number.isFinite(newestMs)) newestMs = Number.NEGATIVE_INFINITY;
+
+  for (const log of logs) {
+    const ms = Date.parse(log.created_at);
+    if (Number.isFinite(ms) && ms > newestMs) {
+      newestMs = ms;
+      newest = log.created_at;
+    }
+  }
+
+  return newest;
 }
