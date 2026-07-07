@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import type { CliConfig, ProjectConfig } from '../types.js';
+import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
 
 const CONFIG_DIR = join(homedir(), '.somewhere');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -72,6 +72,52 @@ export function loadProjectConfig(dir = process.cwd()): ProjectConfig | null {
 
 export function saveProjectConfig(dir: string, config: ProjectConfig): void {
   writeFileSync(join(dir, PROJECT_FILE), JSON.stringify(config, null, 2) + '\n');
+}
+
+export interface ProjectConfigEntry {
+  dir: string;
+  config: ProjectConfig;
+}
+
+export function loadProjectConfigEntry(dir = process.cwd()): ProjectConfigEntry | null {
+  const config = loadProjectConfig(dir);
+  return config ? { dir, config } : null;
+}
+
+export function readProjectDeployState(
+  config: ProjectConfig | null,
+  projectId: string,
+): ProjectDeployState | null {
+  const state = config?.last_deploy;
+  if (!state) return null;
+  if (state.project_id !== projectId) return null;
+  if (!Number.isInteger(state.last_deployed_version)) return null;
+  if (typeof state.at !== 'string' || state.at.length === 0) return null;
+  return state;
+}
+
+export function projectConfigMatchesRef(config: ProjectConfig, ref: string): boolean {
+  return ref === config.project_id || ref === config.subdomain || ref === config.name;
+}
+
+export function saveProjectDeployState(
+  dir: string,
+  projectId: string,
+  version: number,
+  at = new Date().toISOString(),
+): ProjectConfig | null {
+  const config = loadProjectConfig(dir);
+  if (!config || config.project_id !== projectId) return null;
+  const next: ProjectConfig = {
+    ...config,
+    last_deploy: {
+      project_id: projectId,
+      last_deployed_version: version,
+      at,
+    },
+  };
+  saveProjectConfig(dir, next);
+  return next;
 }
 
 /** The self-healing MCP entry every host gets: the stdio bridge reads

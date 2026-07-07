@@ -242,17 +242,20 @@ export class ApiClient {
     if (parsed.ok === true) return parsed.data;
 
     const errBody = parsed as {
+      ok?: false;
       error?: string;
       message?: string;
       data?: Record<string, unknown>;
       hint?: string;
     };
+    const { ok: _ok, error, message, data, hint, ...extra } = errBody;
+    const extraData = Object.keys(extra).length > 0 ? extra : undefined;
     throw new CliApiError(
-      errBody.error ?? 'UNKNOWN',
-      errBody.message ?? 'Unknown error',
+      error ?? 'UNKNOWN',
+      message ?? 'Unknown error',
       res.status,
-      errBody.data,
-      errBody.hint,
+      data ?? extraData,
+      hint,
     );
   }
 

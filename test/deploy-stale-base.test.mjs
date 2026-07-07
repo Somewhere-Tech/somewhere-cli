@@ -1,0 +1,330 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { formatStaleBaseExplanation } from '../dist/commands/deploy.js';
+
+const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
+const distIndex = join(repoRoot, 'dist', 'index.js');
+
+function run(args, { cwd, env }) {
+  return new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [distIndex, ...args], {
+      cwd,
+      env: {
+        ...process.env,
+        ...env,
+        CI: '1',
+        SOMEWHERE_NO_NOTIFICATIONS: '1',
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
+  });
+}
+
+function writeLogin(home, token = 'smt_stale_base') {
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
+    token,
+    user: { email: 'dev@example.com', username: 'dev' },
+  }) + '\n');
+}
+
+function writeTempLogin(home) {
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
+    token: 'smt_temp_stale_base',
+    temporary: true,
+    claim_url: 'https://somewhere.tech/claim?token=swtc_stale_base',
+    user: { email: '', username: '' },
+  }) + '\n');
+}
+
+function writeProject(dir, extra = {}) {
+  writeFileSync(join(dir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_stale_base',
+    name: 'stale-base',
+    subdomain: 'stale-base',
+    ...extra,
+  }, null, 2) + '\n');
+}
+
+function readProject(dir) {
+  return JSON.parse(readFileSync(join(dir, '.somewhere.json'), 'utf8'));
+}
+
+function writeFixture(dir) {
+  writeFileSync(join(dir, 'index.html'), '<html><body>stale base</body></html>\n');
+}
+
+async function withServer(handler, fn) {
+  const server = createServer(handler);
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  try {
+    return await fn(`http://127.0.0.1:${port}/v1`);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+}
+
+function sendJson(res, status, payload) {
+  res.statusCode = status;
+  res.setHeader('Content-Type', 'application/json');
+  res.end(JSON.stringify(payload));
+}
+
+test('stale-base refusal copy names files, source, time, and next steps', () => {
+  const rendered = formatStaleBaseExplanation({
+    current_version: 9,
+    base_version: 7,
+    changed_files: ['index.html', 'about.html'],
+    last_change_source: 'dashboard',
+    last_change_at: '2026-07-07T10:00:00.000Z',
+  }, Date.parse('2026-07-07T12:05:00.000Z'));
+
+  assert.equal(rendered, [
+    'This project changed since your last deploy from this machine — 2 files edited via the dashboard 2 hours ago: index.html, about.html. Your deploy was NOT applied.',
+    'Remote is now v9; this machine last deployed v7.',
+    '',
+    'Next steps:',
+    '  Run `somewhere pull` to bring the latest deployed source into this directory, review it, then deploy again.',
+    '  Run `somewhere deploy --force` to overwrite those remote changes intentionally.',
+  ].join('\n'));
+});
+
+test('deploy writes state, leaves first payload legacy, then sends base_version and source', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-state-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-state-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir);
+  writeFixture(fixtureDir);
+
+  const bodies = [];
+  let version = 12;
+
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        bodies.push(JSON.parse(body));
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            version: version++,
+            files: 1,
+            url: 'https://stale-base.somewhere.tech',
+            has_functions: false,
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+
+    const first = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+    assert.equal('base_version' in bodies[0], false, 'first-ever deploy must stay on the legacy path');
+    assert.equal('source' in bodies[0], false, 'first-ever deploy should not add source without saved state');
+
+    let project = readProject(fixtureDir);
+    assert.deepEqual(project.last_deploy, {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 12,
+      at: project.last_deploy.at,
+    });
+    assert.ok(Number.isFinite(new Date(project.last_deploy.at).getTime()), 'state timestamp should be ISO-like');
+
+    const second = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+    assert.equal(second.status, 0, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.equal(bodies[1].base_version, 12);
+    assert.equal(bodies[1].source, 'cli');
+
+    project = readProject(fixtureDir);
+    assert.equal(project.last_deploy.project_id, 'proj_stale_base');
+    assert.equal(project.last_deploy.last_deployed_version, 13);
+  });
+});
+
+test('409 STALE_BASE renders a refusal instead of falling through to a generic error', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-409-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-409-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  const bodies = [];
+  const changedAt = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        bodies.push(JSON.parse(body));
+        sendJson(res, 409, {
+          error: 'STALE_BASE',
+          current_version: 9,
+          base_version: 7,
+          changed_files: ['index.html', 'about.html'],
+          last_change_source: 'dashboard',
+          last_change_at: changedAt,
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['deploy'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(bodies[0].base_version, 7);
+    assert.equal(bodies[0].source, 'cli');
+    assert.match(
+      result.stderr,
+      /This project changed since your last deploy from this machine — 2 files edited via the dashboard 2 hours ago: index\.html, about\.html\. Your deploy was NOT applied\./,
+    );
+    assert.match(result.stderr, /Run `somewhere pull`/);
+    assert.match(result.stderr, /Run `somewhere deploy --force`/);
+    assert.doesNotMatch(result.stderr, /\[STALE_BASE/);
+  });
+});
+
+test('deploy --force --yes sends force:true with the saved base_version', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-force-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-force-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 4,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 5, files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['deploy', '--force', '--yes', '--json'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(deployBody.base_version, 4);
+    assert.equal(deployBody.source, 'cli');
+    assert.equal(deployBody.force, true);
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 5);
+  });
+});
+
+test('deploy --temporary does not send or update saved stale-base state', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-temp-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-temp-fixture-'));
+  writeTempLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 3,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 9, files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['deploy', '--temporary', '--json'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal('base_version' in deployBody, false);
+    assert.equal('source' in deployBody, false);
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 3);
+  });
+});
+
+test('promote writes the returned version to the linked project state', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-promote-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-promote-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir);
+
+  let promoteBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/promote') {
+        promoteBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 21, files_promoted: 2, has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['promote', '--yes', '--json'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(promoteBody.project_id, 'proj_stale_base');
+    const project = readProject(fixtureDir);
+    assert.equal(project.last_deploy.project_id, 'proj_stale_base');
+    assert.equal(project.last_deploy.last_deployed_version, 21);
+    assert.ok(Number.isFinite(new Date(project.last_deploy.at).getTime()), 'promote state timestamp should be ISO-like');
+  });
+});

@@ -30,6 +30,13 @@ export interface ProjectConfig {
   project_id: string;
   name: string;
   subdomain: string;
+  last_deploy?: ProjectDeployState;
+}
+
+export interface ProjectDeployState {
+  project_id: string;
+  last_deployed_version: number;
+  at: string;
 }
 
 export interface ApiError {
