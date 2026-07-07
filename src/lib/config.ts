@@ -91,13 +91,13 @@ export function readProjectDeployState(
   const state = config?.last_deploy;
   if (!state) return null;
   if (state.project_id !== projectId) return null;
-  if (!Number.isInteger(state.last_deployed_version)) return null;
+  if (!Number.isInteger(state.last_deployed_version) || state.last_deployed_version < 1) return null;
   if (typeof state.at !== 'string' || state.at.length === 0) return null;
   return state;
 }
 
 export function projectConfigMatchesRef(config: ProjectConfig, ref: string): boolean {
-  return ref === config.project_id || ref === config.subdomain || ref === config.name;
+  return ref === config.project_id;
 }
 
 export function saveProjectDeployState(
@@ -106,6 +106,7 @@ export function saveProjectDeployState(
   version: number,
   at = new Date().toISOString(),
 ): ProjectConfig | null {
+  if (!Number.isInteger(version) || version < 1) return null;
   const config = loadProjectConfig(dir);
   if (!config || config.project_id !== projectId) return null;
   const next: ProjectConfig = {

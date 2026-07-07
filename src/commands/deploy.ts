@@ -168,10 +168,14 @@ function formatElapsed(at: string | undefined, nowMs = Date.now()): string {
 function formatChangeSource(source: string | undefined): string {
   const normalized = source?.trim().toLowerCase();
   if (!normalized) return '';
-  if (normalized === 'dashboard' || normalized === 'dashboard-editor') return ' via the dashboard';
-  if (normalized === 'mcp' || normalized === 'agent' || normalized === 'mcp-agent') return ' via an MCP agent';
-  if (normalized === 'cli') return ' via another CLI';
-  return ` via ${normalized.replace(/[_-]/g, ' ')}`;
+  if (['dashboard', 'dashboard-editor', 'editor', 'visual-editor'].includes(normalized)) {
+    return ' via the dashboard editor';
+  }
+  if (['cli', 'somewhere-cli', 'command-line'].includes(normalized)) return ' via the CLI';
+  if (['api', 'public-api', 'rest-api'].includes(normalized)) return ' via the API';
+  if (['mcp', 'agent', 'mcp-agent', 'codex', 'claude'].includes(normalized)) return ' via an MCP agent';
+  if (['worker', 'd1', 'system', 'internal', 'cron'].includes(normalized)) return ' via the platform';
+  return ' via the platform';
 }
 
 function readString(value: unknown): string | undefined {
@@ -427,6 +431,15 @@ export function registerDeploy(program: Command) {
       }
 
       if (opts.force && !opts.yes) {
+        if (!process.stdin.isTTY) {
+          const message = 'Refusing to force deploy without confirmation in a non-interactive shell. Run `somewhere deploy --force --yes` to overwrite remote changes intentionally.';
+          if (opts.json) {
+            printJsonError('CONFIRMATION_REQUIRED', message);
+          } else {
+            error(message);
+          }
+          process.exit(1);
+        }
         const { ok } = await prompts({
           type: 'confirm',
           name: 'ok',
@@ -551,13 +564,15 @@ export function registerDeploy(program: Command) {
         });
 
         spinner?.stop();
-        if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
-          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
-        }
+        const functionErrors = result.function_errors ?? [];
+        const hasFunctionErrors = functionErrors.length > 0;
         if (opts.json) {
           printJson(result);
-          if (result.function_errors && result.function_errors.length > 0) {
+          if (hasFunctionErrors) {
             process.exit(1);
+          }
+          if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
+            saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
           }
           return;
         }
@@ -599,8 +614,8 @@ export function registerDeploy(program: Command) {
 
         // Warnings + function errors must be loud — never let a "success"
         // line hide a partial failure (fail-loudly principle).
-        if (result.function_errors && result.function_errors.length > 0) {
-          for (const fe of result.function_errors) {
+        if (hasFunctionErrors) {
+          for (const fe of functionErrors) {
             const label = typeof fe === 'string' ? fe : (fe.route ?? JSON.stringify(fe));
             const detail = typeof fe === 'string' ? '' : fe.error ? ` — ${fe.error}` : '';
             error(`Function failed: ${label}${detail}`);
@@ -648,8 +663,11 @@ export function registerDeploy(program: Command) {
 
         // Exit non-zero if any function failed to deploy — a CI step that
         // shells out to `somewhere deploy` should fail, not pass green.
-        if (result.function_errors && result.function_errors.length > 0) {
+        if (hasFunctionErrors) {
           process.exit(1);
+        }
+        if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
+          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
         }
       } catch (err) {
         if (err instanceof CliApiError && err.code === 'STALE_BASE') {

@@ -147,7 +147,7 @@ After init, `claude "build me a booking app"` works immediately.
 
 Files under `functions/` (and root-level `api/` and `_lib/`) are deployed as server-side functions.
 
-After each successful linked deploy, the CLI records the deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
+After each successful linked deploy, promote, or pull, the CLI records the current deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
 
 ### Deploy options
 

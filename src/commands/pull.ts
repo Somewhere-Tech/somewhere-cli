@@ -3,7 +3,12 @@ import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
 import { basename, dirname, join, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
-import { getToken, loadProjectConfig } from '../lib/config.js';
+import {
+  getToken,
+  loadProjectConfigEntry,
+  saveProjectDeployState,
+  type ProjectConfigEntry,
+} from '../lib/config.js';
 import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 import {
   SCAFFOLD_PACKAGE_FILENAME,
@@ -38,6 +43,8 @@ export function registerPull(program: Command) {
     .action(async (projectArg: string | undefined, opts) => {
       const token = getToken();
       const client = new ApiClient(token);
+      const linkedProjectEntry = loadProjectConfigEntry();
+      let deployStateEntry: ProjectConfigEntry | null = null;
 
       const envSlot = String(opts.env).toLowerCase();
       if (envSlot !== 'dev' && envSlot !== 'prod') {
@@ -47,12 +54,12 @@ export function registerPull(program: Command) {
 
       let projectId = projectArg;
       if (!projectId) {
-        const config = loadProjectConfig();
-        if (!config) {
+        if (!linkedProjectEntry) {
           error('No project specified and no .somewhere.json found. Pass a project ID or run `somewhere init`.');
           process.exit(1);
         }
-        projectId = config.project_id;
+        projectId = linkedProjectEntry.config.project_id;
+        deployStateEntry = linkedProjectEntry;
       }
 
       const outDir = resolve(process.cwd(), String(opts.out));
@@ -80,6 +87,13 @@ export function registerPull(program: Command) {
         process.exit(1);
       }
       spinner?.stop();
+
+      if (linkedProjectEntry?.config.project_id === body.project_id) {
+        deployStateEntry = linkedProjectEntry;
+      }
+      if (deployStateEntry && Number.isInteger(body.version) && body.version >= 1) {
+        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version);
+      }
 
       const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
       if (total === 0) {
