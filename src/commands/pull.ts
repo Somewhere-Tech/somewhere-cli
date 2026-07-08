@@ -1,9 +1,15 @@
 import { Command } from 'commander';
-import { existsSync, mkdirSync, writeFileSync } from 'node:fs';
-import { basename, dirname, join, resolve } from 'node:path';
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { basename, dirname, join, relative, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
-import { getToken, loadProjectConfig } from '../lib/config.js';
+import {
+  getToken,
+  loadProjectConfigEntry,
+  saveProjectDeployState,
+  type ProjectConfigEntry,
+} from '../lib/config.js';
+import { IGNORE } from '../lib/files.js';
 import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 import {
   SCAFFOLD_PACKAGE_FILENAME,
@@ -38,6 +44,7 @@ export function registerPull(program: Command) {
     .action(async (projectArg: string | undefined, opts) => {
       const token = getToken();
       const client = new ApiClient(token);
+      const linkedProjectEntry = loadProjectConfigEntry();
 
       const envSlot = String(opts.env).toLowerCase();
       if (envSlot !== 'dev' && envSlot !== 'prod') {
@@ -47,12 +54,11 @@ export function registerPull(program: Command) {
 
       let projectId = projectArg;
       if (!projectId) {
-        const config = loadProjectConfig();
-        if (!config) {
+        if (!linkedProjectEntry) {
           error('No project specified and no .somewhere.json found. Pass a project ID or run `somewhere init`.');
           process.exit(1);
         }
-        projectId = config.project_id;
+        projectId = linkedProjectEntry.config.project_id;
       }
 
       const outDir = resolve(process.cwd(), String(opts.out));
@@ -81,16 +87,6 @@ export function registerPull(program: Command) {
       }
       spinner?.stop();
 
-      const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
-      if (total === 0) {
-        if (opts.json) {
-          printJson(body);
-          return;
-        }
-        warn(`No files in ${envSlot} for this project.`);
-        return;
-      }
-
       const written: string[] = [];
       const skipped: string[] = [];
 
@@ -115,6 +111,22 @@ export function registerPull(program: Command) {
         writeOne(join('functions', path), content);
       }
 
+      const removed = reconcileRemovedFiles(outDir, expectedPulledPaths(body), Boolean(opts.force));
+      const deployStateEntry: ProjectConfigEntry | null = loadProjectConfigEntry(outDir);
+      if (
+        skipped.length === 0 &&
+        removed.skipped.length === 0 &&
+        deployStateEntry?.config.project_id === body.project_id &&
+        Number.isInteger(body.version) &&
+        body.version >= 1
+      ) {
+        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version);
+      }
+
+      const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
+      if (total === 0 && !opts.json) {
+        warn(`No files in ${envSlot} for this project.`);
+      }
       if (!opts.json) {
         success(`Pulled ${written.length} file${written.length === 1 ? '' : 's'} from ${teal(envSlot)} (v${body.version}) to ${teal(outDir)}`);
       }
@@ -122,6 +134,14 @@ export function registerPull(program: Command) {
         warn(`Skipped ${skipped.length} existing file${skipped.length === 1 ? '' : 's'} (use --force to overwrite):`);
         for (const p of skipped.slice(0, 10)) info(dim(`  ${p}`));
         if (skipped.length > 10) info(dim(`  ...and ${skipped.length - 10} more`));
+      }
+      if (removed.removed.length > 0 && !opts.json) {
+        info(dim(`Removed ${removed.removed.length} file${removed.removed.length === 1 ? '' : 's'} deleted remotely.`));
+      }
+      if (removed.skipped.length > 0 && !opts.json) {
+        warn(`Skipped removing ${removed.skipped.length} file${removed.skipped.length === 1 ? '' : 's'} deleted remotely (use --force to remove):`);
+        for (const p of removed.skipped.slice(0, 10)) info(dim(`  ${p}`));
+        if (removed.skipped.length > 10) info(dim(`  ...and ${removed.skipped.length - 10} more`));
       }
 
       // Scaffold the two files a local typecheck needs (tsconfig + package.json)
@@ -169,4 +189,55 @@ function scaffoldTypecheckFiles(
   }
 
   return added;
+}
+
+function expectedPulledPaths(body: SourceResponse): Set<string> {
+  const expected = new Set<string>();
+  for (const path of Object.keys(body.static_files)) expected.add(normalizeRelPath(path));
+  for (const path of Object.keys(body.binary_files)) expected.add(normalizeRelPath(path));
+  for (const path of Object.keys(body.functions)) {
+    expected.add(normalizeRelPath(join('functions', path)));
+  }
+  return expected;
+}
+
+function normalizeRelPath(path: string): string {
+  return path.replace(/\\/g, '/');
+}
+
+function reconcileRemovedFiles(
+  outDir: string,
+  expected: Set<string>,
+  force: boolean,
+): { removed: string[]; skipped: string[] } {
+  const removed: string[] = [];
+  const skipped: string[] = [];
+
+  const walk = (dir: string) => {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if (IGNORE.has(entry.name) || entry.name.startsWith('.')) continue;
+      const fullPath = join(dir, entry.name);
+      if (entry.isDirectory()) {
+        walk(fullPath);
+        continue;
+      }
+      if (!entry.isFile()) continue;
+
+      const relPath = normalizeRelPath(relative(outDir, fullPath));
+      if (expected.has(relPath)) continue;
+      if (!force) {
+        skipped.push(relPath);
+        continue;
+      }
+      try {
+        rmSync(fullPath);
+        removed.push(relPath);
+      } catch {
+        skipped.push(relPath);
+      }
+    }
+  };
+
+  walk(outDir);
+  return { removed, skipped };
 }

@@ -1,12 +1,23 @@
 import { Command } from 'commander';
 import { basename, resolve } from 'node:path';
+import prompts from 'prompts';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
-import { getToken, loadConfig, loadProjectConfig, saveConfig, saveProjectConfig } from '../lib/config.js';
+import {
+  getToken,
+  loadConfig,
+  loadProjectConfigEntry,
+  projectConfigMatchesRef,
+  readProjectDeployState,
+  saveConfig,
+  saveProjectConfig,
+  saveProjectDeployState,
+  type ProjectConfigEntry,
+} from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
-import { dim, error, green, info, printJson, red, success, teal, warn, yellow } from '../lib/output.js';
+import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig } from '../types.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
@@ -135,6 +146,102 @@ export function formatRemainingTempTime(expiresAt: string, nowMs = Date.now()): 
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
 }
 
+function plural(count: number, singular: string, pluralWord = `${singular}s`): string {
+  return `${count} ${count === 1 ? singular : pluralWord}`;
+}
+
+function formatElapsed(at: string | undefined, nowMs = Date.now()): string {
+  if (!at) return '';
+  const then = new Date(at).getTime();
+  if (!Number.isFinite(then)) return '';
+  const minutes = Math.max(0, Math.floor((nowMs - then) / 60_000));
+  if (minutes < 1) return ' just now';
+  if (minutes < 60) return ` ${plural(minutes, 'minute')} ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return ` ${plural(hours, 'hour')} ago`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return ` ${plural(days, 'day')} ago`;
+  const months = Math.floor(days / 30);
+  return ` ${plural(months, 'month')} ago`;
+}
+
+function formatChangeSource(source: string | undefined): string {
+  const normalized = source?.trim().toLowerCase();
+  if (!normalized) return '';
+  if (['dashboard', 'dashboard-editor', 'editor', 'visual-editor'].includes(normalized)) {
+    return ' via the dashboard editor';
+  }
+  if (['cli', 'somewhere-cli', 'command-line'].includes(normalized)) return ' via the CLI';
+  if (['mcp', 'agent', 'mcp-agent', 'codex', 'claude'].includes(normalized)) return ' via an MCP agent';
+  if (['api', 'public-api', 'rest-api', 'worker', 'd1', 'system', 'internal', 'cron'].includes(normalized)) {
+    return ' via the platform';
+  }
+  return ' via the platform';
+}
+
+function readString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim().length > 0 ? value : undefined;
+}
+
+function readStringList(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === 'string' && item.length > 0);
+}
+
+export interface StaleBaseDetails {
+  current_version?: number;
+  base_version?: number;
+  changed_files: string[];
+  last_change_source?: string;
+  last_change_at?: string;
+}
+
+export function readStaleBaseDetails(data?: Record<string, unknown>): StaleBaseDetails {
+  const current = data?.current_version;
+  const base = data?.base_version;
+  return {
+    current_version: typeof current === 'number' ? current : undefined,
+    base_version: typeof base === 'number' ? base : undefined,
+    changed_files: readStringList(data?.changed_files),
+    last_change_source: readString(data?.last_change_source),
+    last_change_at: readString(data?.last_change_at),
+  };
+}
+
+export function formatStaleBaseExplanation(
+  details: StaleBaseDetails,
+  nowMs = Date.now(),
+): string {
+  const files = details.changed_files;
+  const source = formatChangeSource(details.last_change_source);
+  const elapsed = formatElapsed(details.last_change_at, nowMs);
+  const fileList = files.slice(0, 10).join(', ');
+  const more = files.length > 10 ? `, and ${files.length - 10} more` : '';
+  const changeSummary = files.length > 0
+    ? `${plural(files.length, 'file')} edited${source}${elapsed}: ${fileList}${more}`
+    : `remote edits${source}${elapsed}`;
+  const versionSummary =
+    details.current_version !== undefined && details.base_version !== undefined
+      ? `Remote is now v${details.current_version}; this machine last deployed v${details.base_version}.`
+      : null;
+
+  return [
+    `This project changed since your last deploy from this machine — ${changeSummary}. Your deploy was NOT applied.`,
+    versionSummary,
+    '',
+    'Next steps:',
+    '  Run `somewhere pull` to bring the latest deployed source into this directory, review it, then deploy again.',
+    '  Run `somewhere deploy --force` to overwrite those remote changes intentionally.',
+  ].filter((line): line is string => line !== null).join('\n');
+}
+
+function findProjectConfigEntry(targetDir: string): ProjectConfigEntry | null {
+  const targetEntry = loadProjectConfigEntry(targetDir);
+  if (targetEntry) return targetEntry;
+  if (targetDir === process.cwd()) return null;
+  return loadProjectConfigEntry();
+}
+
 function hasReusableTempCredential(
   config: CliConfig | null,
   nowMs = Date.now(),
@@ -189,6 +296,11 @@ export function registerDeploy(program: Command) {
       '--temporary',
       'Deploy without an account — creates a temporary 3-hour workspace you can claim later',
     )
+    .option(
+      '--force',
+      'Overwrite remote changes even when this machine last deployed an older version',
+    )
+    .option('--yes', 'Skip confirmation prompts (for --force)')
     .option('--json', 'Print the raw deploy response as JSON')
     .action(async (dir: string | undefined, opts) => {
       const targetDir = resolveTargetDir(dir);
@@ -279,11 +391,13 @@ export function registerDeploy(program: Command) {
         scope = opts.scope;
       }
 
-      let projectId = opts.project;
+      const linkedProjectEntry = findProjectConfigEntry(targetDir);
+      let deployStateEntry: ProjectConfigEntry | null = null;
+      let projectId = opts.project as string | undefined;
       if (!projectId) {
-        const projConfig = loadProjectConfig(targetDir) ?? loadProjectConfig();
-        if (projConfig) {
-          projectId = projConfig.project_id;
+        if (linkedProjectEntry) {
+          projectId = linkedProjectEntry.config.project_id;
+          deployStateEntry = linkedProjectEntry;
         } else if (tempSession) {
           // No `.somewhere.json` and no account to run `somewhere init` —
           // auto-create the project so a temp deploy is a single command.
@@ -311,6 +425,35 @@ export function registerDeploy(program: Command) {
           error(
             'No project linked. Run `somewhere init` or pass --project <id>',
           );
+          process.exit(1);
+        }
+      } else if (linkedProjectEntry && projectConfigMatchesRef(linkedProjectEntry.config, projectId)) {
+        deployStateEntry = linkedProjectEntry;
+      }
+
+      if (opts.force && !opts.yes) {
+        if (!process.stdin.isTTY) {
+          const message = 'Refusing to force deploy without confirmation in a non-interactive shell. Run `somewhere deploy --force --yes` to overwrite remote changes intentionally.';
+          if (opts.json) {
+            printJsonError('CONFIRMATION_REQUIRED', message);
+          } else {
+            error(message);
+          }
+          process.exit(1);
+        }
+        const { ok } = await prompts({
+          type: 'confirm',
+          name: 'ok',
+          message: `Overwrite remote changes for ${teal(projectId)}? This discards edits made outside this machine.`,
+          initial: false,
+          stdout: opts.json ? process.stderr : undefined,
+        });
+        if (!ok) {
+          if (opts.json) {
+            printJsonError('ABORTED', 'Aborted.');
+            process.exit(1);
+          }
+          warn('Aborted.');
           process.exit(1);
         }
       }
@@ -391,6 +534,18 @@ export function registerDeploy(program: Command) {
         // not set so a normal deploy stays the raw-source default.
         const prebuilt = prebuiltOptIn(opts);
         if (prebuilt) body.allow_bundled = true;
+        const deployState =
+          !tempSession && !opts.dryRun && deployStateEntry
+            ? readProjectDeployState(deployStateEntry.config, deployStateEntry.config.project_id)
+            : null;
+        if (deployState) {
+          body.base_version = deployState.last_deployed_version;
+          body.source = 'cli';
+        }
+        if (opts.force) {
+          body.force = true;
+          if (!tempSession) body.source = 'cli';
+        }
 
         if (opts.dryRun) {
           const plan = await client.call<DryRunResult>('POST', '/deploy', body, undefined, {
@@ -410,10 +565,15 @@ export function registerDeploy(program: Command) {
         });
 
         spinner?.stop();
+        const functionErrors = result.function_errors ?? [];
+        const hasFunctionErrors = functionErrors.length > 0;
         if (opts.json) {
           printJson(result);
-          if (result.function_errors && result.function_errors.length > 0) {
+          if (hasFunctionErrors) {
             process.exit(1);
+          }
+          if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
+            saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
           }
           return;
         }
@@ -455,8 +615,8 @@ export function registerDeploy(program: Command) {
 
         // Warnings + function errors must be loud — never let a "success"
         // line hide a partial failure (fail-loudly principle).
-        if (result.function_errors && result.function_errors.length > 0) {
-          for (const fe of result.function_errors) {
+        if (hasFunctionErrors) {
+          for (const fe of functionErrors) {
             const label = typeof fe === 'string' ? fe : (fe.route ?? JSON.stringify(fe));
             const detail = typeof fe === 'string' ? '' : fe.error ? ` — ${fe.error}` : '';
             error(`Function failed: ${label}${detail}`);
@@ -504,10 +664,24 @@ export function registerDeploy(program: Command) {
 
         // Exit non-zero if any function failed to deploy — a CI step that
         // shells out to `somewhere deploy` should fail, not pass green.
-        if (result.function_errors && result.function_errors.length > 0) {
+        if (hasFunctionErrors) {
           process.exit(1);
         }
+        if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
+          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
+        }
       } catch (err) {
+        if (err instanceof CliApiError && err.code === 'STALE_BASE') {
+          spinner?.stop();
+          const details = readStaleBaseDetails(err.data);
+          const message = formatStaleBaseExplanation(details);
+          if (opts.json) {
+            printJson({ ok: false, error: 'STALE_BASE', message, ...(err.data ?? {}) });
+          } else {
+            console.error(message);
+          }
+          process.exit(1);
+        }
         spinner?.fail(opts.dryRun ? 'Dry run failed' : 'Deploy failed');
         // Structured build failures get the full treatment: file:line
         // heading + a code frame rebuilt from the local source (we have the
@@ -532,6 +706,7 @@ export function registerDeploy(program: Command) {
 }
 
 interface DeployResult {
+  version?: number;
   files: string[] | number;
   url: string;
   has_functions: boolean;

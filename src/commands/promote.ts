@@ -2,7 +2,13 @@ import { Command } from 'commander';
 import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
-import { getToken, loadProjectConfig } from '../lib/config.js';
+import {
+  getToken,
+  loadProjectConfigEntry,
+  projectConfigMatchesRef,
+  saveProjectDeployState,
+  type ProjectConfigEntry,
+} from '../lib/config.js';
 import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 
 interface PromoteResult {
@@ -28,9 +34,10 @@ export function registerPromote(program: Command) {
       const client = new ApiClient(getToken());
 
       let projectId = opts.project as string | undefined;
+      const linkedProjectEntry = loadProjectConfigEntry();
+      let deployStateEntry: ProjectConfigEntry | null = null;
       if (!projectId) {
-        const config = loadProjectConfig();
-        if (!config) {
+        if (!linkedProjectEntry) {
           if (opts.json) {
             printJsonError('NO_PROJECT', 'No project linked and no --project given. Run `somewhere init` or pass --project <id>.');
             process.exit(1);
@@ -38,7 +45,10 @@ export function registerPromote(program: Command) {
           error('No project linked and no --project given. Run `somewhere init` or pass --project <id>.');
           process.exit(1);
         }
-        projectId = config.project_id;
+        projectId = linkedProjectEntry.config.project_id;
+        deployStateEntry = linkedProjectEntry;
+      } else if (linkedProjectEntry && projectConfigMatchesRef(linkedProjectEntry.config, projectId)) {
+        deployStateEntry = linkedProjectEntry;
       }
 
       if (!opts.yes) {
@@ -70,6 +80,9 @@ export function registerPromote(program: Command) {
           draft_id: draftId,
         });
         spinner?.stop();
+        if (deployStateEntry) {
+          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, r.version);
+        }
         if (opts.json) {
           printJson(r);
           return;

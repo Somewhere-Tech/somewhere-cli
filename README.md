@@ -43,6 +43,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere deploy` | Deploy current directory to linked project |
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
+| `somewhere deploy --force` | Intentionally overwrite remote changes made since this machine last deployed |
 | `somewhere pull` | Download a project's deployed source + scaffold tsconfig/package.json for local typechecking |
 | `somewhere typecheck` | `tsc --noEmit` over a pulled tree — the "safe to deploy?" gate; catches a dropped import (TS2304) with file:line |
 | `somewhere logs` | Show recent logs |
@@ -146,6 +147,8 @@ After init, `claude "build me a booking app"` works immediately.
 
 Files under `functions/` (and root-level `api/` and `_lib/`) are deployed as server-side functions.
 
+After each successful linked deploy, promote, or pull, the CLI records the current deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
+
 ### Deploy options
 
 | Flag | What it does |
@@ -155,12 +158,15 @@ Files under `functions/` (and root-level `api/` and `_lib/`) are deployed as ser
 | `--dry-run` | Show what would change (added / modified / removed) without deploying |
 | `--replace-functions` | Drop deployed functions not present locally (repo-as-truth; default keeps them) |
 | `--project <id>` | Deploy to a specific project instead of the linked one |
+| `--force` | Overwrite remote changes even when this machine has an older deployed version |
+| `--yes` | Skip the `--force` confirmation prompt |
 
 After a successful deploy the CLI prints a **build log** — the entry chunk, each compiled chunk with its size, each function with its size, and any compiler warnings.
 
 ```bash
 somewhere deploy --dry-run            # preview the diff first
 somewhere deploy --scope functions    # ship a backend fix without touching the site
+somewhere deploy --force --yes        # overwrite remote edits intentionally
 ```
 
 ## Hot reload: `somewhere dev`
