@@ -172,9 +172,10 @@ function formatChangeSource(source: string | undefined): string {
     return ' via the dashboard editor';
   }
   if (['cli', 'somewhere-cli', 'command-line'].includes(normalized)) return ' via the CLI';
-  if (['api', 'public-api', 'rest-api'].includes(normalized)) return ' via the API';
   if (['mcp', 'agent', 'mcp-agent', 'codex', 'claude'].includes(normalized)) return ' via an MCP agent';
-  if (['worker', 'd1', 'system', 'internal', 'cron'].includes(normalized)) return ' via the platform';
+  if (['api', 'public-api', 'rest-api', 'worker', 'd1', 'system', 'internal', 'cron'].includes(normalized)) {
+    return ' via the platform';
+  }
   return ' via the platform';
 }
 

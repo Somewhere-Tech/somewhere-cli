@@ -44,7 +44,6 @@ export function registerPull(program: Command) {
       const token = getToken();
       const client = new ApiClient(token);
       const linkedProjectEntry = loadProjectConfigEntry();
-      let deployStateEntry: ProjectConfigEntry | null = null;
 
       const envSlot = String(opts.env).toLowerCase();
       if (envSlot !== 'dev' && envSlot !== 'prod') {
@@ -59,7 +58,6 @@ export function registerPull(program: Command) {
           process.exit(1);
         }
         projectId = linkedProjectEntry.config.project_id;
-        deployStateEntry = linkedProjectEntry;
       }
 
       const outDir = resolve(process.cwd(), String(opts.out));
@@ -87,13 +85,6 @@ export function registerPull(program: Command) {
         process.exit(1);
       }
       spinner?.stop();
-
-      if (linkedProjectEntry?.config.project_id === body.project_id) {
-        deployStateEntry = linkedProjectEntry;
-      }
-      if (deployStateEntry && Number.isInteger(body.version) && body.version >= 1) {
-        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version);
-      }
 
       const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
       if (total === 0) {
@@ -127,6 +118,16 @@ export function registerPull(program: Command) {
       }
       for (const [path, content] of Object.entries(body.functions)) {
         writeOne(join('functions', path), content);
+      }
+
+      const deployStateEntry: ProjectConfigEntry | null = loadProjectConfigEntry(outDir);
+      if (
+        skipped.length === 0 &&
+        deployStateEntry?.config.project_id === body.project_id &&
+        Number.isInteger(body.version) &&
+        body.version >= 1
+      ) {
+        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version);
       }
 
       if (!opts.json) {

@@ -102,16 +102,18 @@ test('stale-base refusal copy names files, source, time, and next steps', () => 
 });
 
 test('stale-base refusal copy maps internal sources to product-safe language', () => {
-  const rendered = formatStaleBaseExplanation({
-    current_version: 9,
-    base_version: 7,
-    changed_files: ['index.html'],
-    last_change_source: 'worker',
-    last_change_at: '2026-07-07T10:00:00.000Z',
-  }, Date.parse('2026-07-07T10:01:00.000Z'));
+  for (const source of ['worker', 'd1', 'api']) {
+    const rendered = formatStaleBaseExplanation({
+      current_version: 9,
+      base_version: 7,
+      changed_files: ['index.html'],
+      last_change_source: source,
+      last_change_at: '2026-07-07T10:00:00.000Z',
+    }, Date.parse('2026-07-07T10:01:00.000Z'));
 
-  assert.match(rendered, /1 file edited via the platform 1 minute ago: index\.html/);
-  assert.doesNotMatch(rendered, /worker|d1/i);
+    assert.match(rendered, /1 file edited via the platform 1 minute ago: index\.html/);
+    assert.doesNotMatch(rendered, /worker|d1|api/i);
+  }
 });
 
 test('deploy writes state, leaves first payload legacy, then sends base_version and source', async () => {
@@ -216,7 +218,7 @@ test('pull updates last_deploy so the next deploy uses the pulled current versio
     });
   }, async (apiUrl) => {
     const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
-    const pull = await run(['pull', '--json'], { cwd: fixtureDir, env });
+    const pull = await run(['pull', '--force', '--json'], { cwd: fixtureDir, env });
     assert.equal(pull.status, 0, `stdout:\n${pull.stdout}\nstderr:\n${pull.stderr}`);
     assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 9);
 
@@ -224,6 +226,109 @@ test('pull updates last_deploy so the next deploy uses the pulled current versio
     assert.equal(deploy.status, 0, `stdout:\n${deploy.stdout}\nstderr:\n${deploy.stderr}`);
     assert.equal(deployBody.base_version, 9);
     assert.equal(deployBody.source, 'cli');
+  });
+});
+
+test('pull with skipped files does not advance last_deploy', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-pull-skip-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-pull-skip-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  await withServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            project_id: 'proj_stale_base',
+            env: 'dev',
+            version: 9,
+            static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
+            binary_files: {},
+            functions: {},
+            counts: { static_files: 1, binary_files: 0, functions: 0 },
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['pull'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /Skipped 1 existing file/);
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 7);
+    assert.equal(readFileSync(join(fixtureDir, 'index.html'), 'utf8'), '<html><body>stale base</body></html>\n');
+  });
+});
+
+test('pull --out updates only the output directory project state', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-pull-out-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-pull-out-fixture-'));
+  const outDir = join(fixtureDir, 'pulled');
+  mkdirSync(outDir);
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeProject(outDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  await withServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            project_id: 'proj_stale_base',
+            env: 'dev',
+            version: 9,
+            static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
+            binary_files: {},
+            functions: {},
+            counts: { static_files: 1, binary_files: 0, functions: 0 },
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['pull', '--out', outDir, '--json'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 7);
+    assert.equal(readProject(outDir).last_deploy.last_deployed_version, 9);
+    assert.equal(readFileSync(join(outDir, 'index.html'), 'utf8'), '<html><body>remote current</body></html>\n');
   });
 });
 
