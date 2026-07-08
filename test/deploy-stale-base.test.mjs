@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -273,6 +273,113 @@ test('pull with skipped files does not advance last_deploy', async () => {
     assert.match(result.stdout, /Skipped 1 existing file/);
     assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 7);
     assert.equal(readFileSync(join(fixtureDir, 'index.html'), 'utf8'), '<html><body>stale base</body></html>\n');
+  });
+});
+
+test('pull does not advance state when remote-deleted files remain locally', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-pull-delete-skip-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-pull-delete-skip-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFileSync(join(fixtureDir, 'old.html'), '<html><body>deleted remotely</body></html>\n');
+
+  await withServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            project_id: 'proj_stale_base',
+            env: 'dev',
+            version: 9,
+            static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
+            binary_files: {},
+            functions: {},
+            counts: { static_files: 1, binary_files: 0, functions: 0 },
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['pull'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /Skipped removing 1 file deleted remotely/);
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 7);
+    assert.equal(existsSync(join(fixtureDir, 'old.html')), true);
+  });
+});
+
+test('pull --force removes remote deletions before advancing state', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-stale-pull-delete-force-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-pull-delete-force-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>old index</body></html>\n');
+  writeFileSync(join(fixtureDir, 'old.html'), '<html><body>deleted remotely</body></html>\n');
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            project_id: 'proj_stale_base',
+            env: 'dev',
+            version: 9,
+            static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
+            binary_files: {},
+            functions: {},
+            counts: { static_files: 1, binary_files: 0, functions: 0 },
+          },
+        });
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 10, files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+    const pull = await run(['pull', '--force', '--json'], { cwd: fixtureDir, env });
+    assert.equal(pull.status, 0, `stdout:\n${pull.stdout}\nstderr:\n${pull.stderr}`);
+    assert.equal(existsSync(join(fixtureDir, 'old.html')), false);
+    assert.equal(readFileSync(join(fixtureDir, 'index.html'), 'utf8'), '<html><body>remote current</body></html>\n');
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 9);
+
+    const deploy = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+    assert.equal(deploy.status, 0, `stdout:\n${deploy.stdout}\nstderr:\n${deploy.stderr}`);
+    assert.equal(deployBody.base_version, 9);
+    assert.equal('old.html' in deployBody.files, false);
   });
 });
 
