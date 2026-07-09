@@ -10,7 +10,21 @@ import {
   saveMcpConfig,
   saveProjectConfig,
 } from '../lib/config.js';
-import { dim, error, info, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+
+interface InitOptions {
+  name?: string;
+  link?: boolean;
+  project?: string;
+  json?: boolean;
+}
+
+interface LinkProject {
+  id: string;
+  name: string;
+  subdomain: string;
+  slug?: string;
+}
 
 export function registerInit(program: Command) {
   program
@@ -18,13 +32,32 @@ export function registerInit(program: Command) {
     .description('Initialize a somewhere.tech project in the current directory')
     .option('--name <name>', 'Project name (skip prompt)')
     .option('--link', 'Link to an existing project instead of creating one')
-    .action(async (opts) => {
+    .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
+    .option('--json', 'Print the created or linked project as JSON')
+    .action(async (opts: InitOptions) => {
+      if (opts.project && !opts.link) {
+        error('--project requires --link.');
+        process.exit(1);
+      }
+      if (opts.json && opts.link && !opts.project) {
+        error('--project <ref> is required with --link --json.');
+        process.exit(1);
+      }
+      if (opts.json && !opts.link && !opts.name) {
+        error('--name <name> is required with --json.');
+        process.exit(1);
+      }
+
       const token = getToken();
       const client = new ApiClient(token);
       const dir = process.cwd();
 
       const existing = loadProjectConfig(dir);
-      if (existing) {
+      if (existing && !opts.project) {
+        if (opts.json) {
+          error(`This directory is already linked to ${existing.name}.`);
+          process.exit(1);
+        }
         warn(`This directory is already linked to ${teal(existing.name)}`);
         const { overwrite } = await prompts({
           type: 'confirm',
@@ -36,7 +69,12 @@ export function registerInit(program: Command) {
       }
 
       if (opts.link) {
-        await linkExisting(client, dir);
+        try {
+          await linkExisting(client, dir, opts.project, Boolean(opts.json));
+        } catch (err) {
+          error(err instanceof Error ? err.message : String(err));
+          process.exit(1);
+        }
         return;
       }
 
@@ -70,7 +108,7 @@ export function registerInit(program: Command) {
         if (!subdomain) return;
       }
 
-      const spinner = ora('Creating project...').start();
+      const spinner = opts.json ? null : ora('Creating project...').start();
       try {
         const project = await client.call<{
           id: string;
@@ -79,7 +117,18 @@ export function registerInit(program: Command) {
           slug: string;
         }>('POST', '/projects', { name, subdomain });
 
-        spinner.stop();
+        spinner?.stop();
+        if (opts.json) {
+          saveProjectConfig(dir, {
+            project_id: project.id,
+            name: project.name,
+            subdomain: project.subdomain ?? subdomain,
+          });
+          saveMcpConfig(dir);
+          if (!hasGlobalMcpConfig()) saveGlobalMcpConfig();
+          printJson(project);
+          return;
+        }
         success(`Project created: ${teal(project.name)} (draft)`);
 
         saveProjectConfig(dir, {
@@ -99,7 +148,7 @@ export function registerInit(program: Command) {
         console.log('');
         info('Project created. Run claude to start building.');
       } catch (err) {
-        spinner.fail('Failed to create project');
+        spinner?.fail('Failed to create project');
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
       }
@@ -109,27 +158,46 @@ export function registerInit(program: Command) {
 export async function linkExisting(
   client: ApiClient,
   dir: string,
+  projectRef?: string,
+  json = false,
 ) {
-  const spinner = ora('Fetching projects...').start();
+  const spinner = json ? null : ora('Fetching projects...').start();
   const result = await client.call<{
-    projects: Array<{ id: string; name: string; subdomain: string }>;
+    projects: LinkProject[];
   }>('GET', '/projects');
-  spinner.stop();
+  spinner?.stop();
 
   if (!result.projects.length) {
     error('No projects found. Create one first: somewhere project create <name>');
-    return;
+    process.exit(1);
   }
 
-  const { projectId } = await prompts({
-    type: 'select',
-    name: 'projectId',
-    message: 'Select a project to link',
-    choices: result.projects.map((p) => ({
-      title: `${p.name} (${p.subdomain ?? 'no subdomain'})`,
-      value: p.id,
-    })),
-  });
+  let projectId: string | undefined;
+  if (projectRef) {
+    const normalized = projectRef.toLowerCase();
+    const matches = result.projects.filter((project) =>
+      project.id === projectRef ||
+      project.name.toLowerCase() === normalized ||
+      project.slug?.toLowerCase() === normalized ||
+      project.subdomain?.toLowerCase() === normalized
+    );
+    if (matches.length === 0) throw new Error(`Project not found: ${projectRef}`);
+    if (matches.length > 1) {
+      throw new Error(`Multiple projects match "${projectRef}". Pass the project ID instead.`);
+    }
+    projectId = matches[0].id;
+  } else {
+    const selected = await prompts({
+      type: 'select',
+      name: 'projectId',
+      message: 'Select a project to link',
+      choices: result.projects.map((p) => ({
+        title: `${p.name} (${p.subdomain ?? 'no subdomain'})`,
+        value: p.id,
+      })),
+    });
+    projectId = selected.projectId;
+  }
 
   if (!projectId) return;
 
@@ -139,15 +207,20 @@ export async function linkExisting(
     name: project.name,
     subdomain: project.subdomain,
   });
-  success(`.somewhere.json linked to ${teal(project.name)}`);
+  if (!json) success(`.somewhere.json linked to ${teal(project.name)}`);
 
   saveMcpConfig(dir);
 
   if (!hasGlobalMcpConfig()) {
     saveGlobalMcpConfig();
-    success('~/.claude.json updated — Claude Code MCP connected');
+    if (!json) success('~/.claude.json updated — Claude Code MCP connected');
+  }
+
+  if (json) {
+    printJson(project);
+    return;
   }
 
   console.log('');
-  info('Project created. Run claude to start building.');
+  info('Project linked. Run claude to start building.');
 }

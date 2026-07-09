@@ -2,6 +2,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from '
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
+import { error } from './output.js';
 
 const CONFIG_DIR = join(homedir(), '.somewhere');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
@@ -48,13 +49,13 @@ export function getToken(): string {
   // "Not logged in" message, which would send a dev to `somewhere login`
   // when they never signed up in the first place.
   if (config?.temporary && config.temp_expires_at && new Date(config.temp_expires_at).getTime() <= Date.now()) {
-    console.error(
+    error(
       'Temporary session expired. Run somewhere deploy --temporary for a new one, or somewhere login to keep your work.',
     );
     process.exit(1);
   }
   if (!config?.token) {
-    console.error('Not logged in. Run: somewhere login');
+    error('Not logged in. Run: somewhere login');
     process.exit(1);
   }
   return config.token;

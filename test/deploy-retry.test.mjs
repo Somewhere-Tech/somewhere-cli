@@ -9,10 +9,12 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
+const sourceIndex = join(repoRoot, 'src', 'index.ts');
 
 function run(args, { cwd = repoRoot, env }) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [distIndex, ...args], {
+    const sourceRunner = process.env.SOMEWHERE_TEST_SOURCE_RUNNER;
+    const child = spawn(sourceRunner ?? process.execPath, sourceRunner ? [sourceIndex, ...args] : [distIndex, ...args], {
       cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });

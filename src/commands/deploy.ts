@@ -632,7 +632,10 @@ export function registerDeploy(program: Command) {
           }
         }
         if (result.warnings && result.warnings.length > 0) {
-          for (const w of result.warnings) warn(w);
+          const buildWarnings = warningsInBuildLog(result.build_log);
+          for (const w of result.warnings) {
+            if (!buildWarnings.has(normalizeWarning(w))) warn(w);
+          }
         }
 
         if (tempSession) {
@@ -696,7 +699,7 @@ export function registerDeploy(program: Command) {
         // heading + a code frame rebuilt from the local source (we have the
         // files the server compiled — this is where the CLI beats a remote
         // log dump).
-        if (isBuildError(err) && renderBuildError(err, targetDir)) {
+        if (!opts.json && isBuildError(err) && renderBuildError(err, targetDir)) {
           process.exit(1);
         }
         // Always show the error code + HTTP status — "Project not found"
@@ -723,6 +726,18 @@ interface DeployResult {
   warnings?: string[];
   preserved_functions?: string[];
   function_errors?: Array<{ route?: string; error?: string } | string>;
+}
+
+function normalizeWarning(value: string): string {
+  return value.replace(/^warning:\s*/i, '').trim();
+}
+
+function warningsInBuildLog(buildLog: string[] | undefined): Set<string> {
+  const warnings = new Set<string>();
+  for (const line of buildLog ?? []) {
+    if (/^warning:\s*/i.test(line.trim())) warnings.add(normalizeWarning(line));
+  }
+  return warnings;
 }
 
 interface DryRunResult {

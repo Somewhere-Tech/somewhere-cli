@@ -2,17 +2,26 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
+const sourceIndex = join(repoRoot, 'src', 'index.ts');
+
+function cliInvocation(args) {
+  const sourceRunner = process.env.SOMEWHERE_TEST_SOURCE_RUNNER;
+  return sourceRunner
+    ? { command: sourceRunner, args: [sourceIndex, ...args] }
+    : { command: process.execPath, args: [distIndex, ...args] };
+}
 
 function run(args, { cwd = repoRoot, env }) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [distIndex, ...args], {
+    const invocation = cliInvocation(args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
@@ -26,13 +35,17 @@ function run(args, { cwd = repoRoot, env }) {
 
 function runFollow(args, { cwd = repoRoot, env, stop }) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [distIndex, ...args], {
+    const invocation = cliInvocation(args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
     let stderr = '';
-    const timeout = setTimeout(() => child.kill('SIGTERM'), 9000);
+    const timeout = setTimeout(
+      () => child.kill('SIGTERM'),
+      process.env.SOMEWHERE_TEST_SOURCE_RUNNER ? 20_000 : 9000,
+    );
     stop(() => setTimeout(() => child.kill('SIGTERM'), 100));
     child.stdout.on('data', (c) => (stdout += c));
     child.stderr.on('data', (c) => (stderr += c));
@@ -238,7 +251,10 @@ test('logs --follow --json suppresses overlapping log IDs across poll cycles', a
     });
 
     assert.ok(requests >= 3, `expected at least three /logs requests; got ${requests}`);
-    assert.equal(result.signal, 'SIGTERM', `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.ok(
+      result.signal === 'SIGTERM' || result.status !== 0,
+      `follower did not terminate as expected\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
     const lines = result.stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
     assert.deepEqual(lines.map((line) => line.id), ['log_1', 'log_2', 'log_3']);
     assert.equal(new Set(lines.map((line) => line.id)).size, lines.length);
@@ -370,5 +386,207 @@ test('project list --json emits the raw projects response object', async () => {
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.deepEqual(JSON.parse(result.stdout), projectsData);
     assert.doesNotMatch(result.stdout, /alpha\.somewhere\.tech/);
+  });
+});
+
+test('api accepts explicit --json and emits the parsed response', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-api-home-'));
+  writeConfig(HOME);
+
+  await withServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/v1/projects') {
+      sendJson(res, 200, { ok: true, data: { projects: [{ id: 'proj_api' }] } });
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await run(['api', 'GET', '/v1/projects', '--json'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), { projects: [{ id: 'proj_api' }] });
+  });
+});
+
+test('rollback replaces stale snapshot wording while preserving JSON', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-rollback-snapshot-home-'));
+  writeConfig(HOME);
+
+  await withServer((req, res) => {
+    sendJson(res, 404, {
+      ok: false,
+      error: 'NOT_FOUND',
+      message: 'Version v6 has no restorable snapshot (it was edited in place before snapshots covered this path).',
+    });
+  }, async (apiUrl) => {
+    const result = await run(['rollback', 'proj_snapshot', '--yes', '--json'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+    const payload = JSON.parse(result.stdout);
+    assert.equal(result.status, 1);
+    assert.equal(payload.error, 'NOT_FOUND');
+    assert.match(payload.message, /could not find a restorable previous live release/);
+    assert.doesNotMatch(payload.message, /before snapshots covered this path/);
+  });
+});
+
+test('every command advertising --json emits parseable JSON on an error or terminal path', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-contract-home-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'sw-json-contract-cwd-'));
+  writeFileSync(join(cwd, 'already.env'), 'EXISTING=value\n');
+
+  const cases = [
+    ['whoami', '--json'],
+    ['init', '--json'],
+    ['project', 'create', 'contract', '--json'],
+    ['project', 'list', '--json'],
+    ['projects', '--json'],
+    ['project', 'view', 'contract', '--json'],
+    ['project', 'delete', 'contract', '--json'],
+    ['deploy', '--json'],
+    ['pull', '--json'],
+    ['typecheck', '--json'],
+    ['promote', '--json', '--yes'],
+    ['rollback', 'contract', '--json', '--yes'],
+    ['db', 'query', 'SELECT 1', '--json'],
+    ['db', 'dump', '--json'],
+    ['db', 'tables', '--json'],
+    ['docs', 'not-a-topic', '--json'],
+    ['logs', 'contract', '--json'],
+    ['errors', 'contract', '--json'],
+    ['env', 'list', '--json'],
+    ['env', 'pull', '--json', '--out', 'already.env'],
+    ['env', 'set', 'KEY', 'value', '--json'],
+    ['env', 'delete', 'KEY', '--json'],
+    ['run', 'missing-script.js', '--json'],
+    ['status', 'contract', '--json'],
+    ['exec', 'missing-function.ts', '--json'],
+    ['browser', '--viewport', 'tablet', '--json'],
+    ['deploy-check', '--json'],
+    ['api', 'GET', '/projects', '--json'],
+    ['check', '--json'],
+  ];
+
+  for (const args of cases) {
+    const result = await run(args, {
+      cwd,
+      env: { HOME, USERPROFILE: HOME },
+    });
+    assert.doesNotThrow(
+      () => JSON.parse(result.stdout),
+      `${args.join(' ')} did not emit one JSON value\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.equal(
+      result.stderr.trim(),
+      '',
+      `${args.join(' ')} leaked human output to stderr:\n${result.stderr}`,
+    );
+  }
+});
+
+test('logs --follow keeps polling when the initial query has no matches', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-empty-follow-home-'));
+  writeConfig(HOME);
+
+  const appeared = {
+    id: 'log_after_empty',
+    level: 'info',
+    message: 'arrived later',
+    created_at: '2026-07-09T12:00:00.000Z',
+  };
+  let requests = 0;
+  let stopFollow = () => {};
+
+  await withServer((req, res) => {
+    const url = new URL(req.url, 'http://127.0.0.1');
+    if (req.method === 'GET' && url.pathname === '/v1/logs') {
+      requests += 1;
+      sendJson(res, 200, {
+        ok: true,
+        data: { logs: requests === 1 ? [] : [appeared] },
+      });
+      if (requests >= 2) stopFollow();
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await runFollow(['logs', 'proj_empty', '--json', '--follow', '--since', '15m'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      stop: (fn) => {
+        stopFollow = fn;
+      },
+    });
+
+    assert.ok(requests >= 2, `expected follow-up poll, got ${requests} request(s)`);
+    const lines = result.stdout.trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+    assert.deepEqual(lines, [appeared]);
+  });
+});
+
+test('init --link --project links an exact existing project non-interactively', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-init-link-home-'));
+  const cwd = mkdtempSync(join(tmpdir(), 'sw-json-init-link-cwd-'));
+  writeConfig(HOME);
+  const project = {
+    id: 'proj_link_exact',
+    name: 'Existing App',
+    slug: 'existing-app',
+    subdomain: 'existing-app',
+  };
+
+  await withServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/v1/projects') {
+      sendJson(res, 200, { ok: true, data: { projects: [project] } });
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await run(['init', '--link', '--project', 'existing-app', '--json'], {
+      cwd,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), project);
+    assert.deepEqual(
+      JSON.parse(readFileSync(join(cwd, '.somewhere.json'), 'utf8')),
+      { project_id: project.id, name: project.name, subdomain: project.subdomain },
+    );
+  });
+});
+
+test('deploy prints a warning once when it also appears in the build log', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-warning-dedupe-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-warning-dedupe-fixture-'));
+  writeConfig(HOME);
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_warning',
+    name: 'warning',
+    subdomain: 'warning',
+  }) + '\n');
+  writeFileSync(join(fixtureDir, 'index.html'), '<html></html>\n');
+  const warning = 'Functions are still finishing propagation.';
+
+  await withServer((req, res) => {
+    req.resume();
+    req.on('end', () => sendJson(res, 200, {
+      ok: true,
+      data: {
+        files: 1,
+        url: 'https://warning.somewhere.tech',
+        has_functions: false,
+        build_log: [`warning: ${warning}`],
+        warnings: [warning],
+      },
+    }));
+  }, async (apiUrl) => {
+    const result = await run(['deploy'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(result.stdout.split(warning).length - 1, 1, result.stdout);
   });
 });

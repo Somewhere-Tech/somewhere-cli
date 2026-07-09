@@ -27,6 +27,10 @@ export async function runCheck(
 ): Promise<number> {
   const d = bindDeps(deps);
   if (!specArg) {
+    if (opts.json) {
+      d.log(JSON.stringify({ ok: false, error: 'PACKAGE_REQUIRED', message: 'A package name is required.' }, null, 2));
+      return 3;
+    }
     d.errLog('Usage: somewhere check <package>[@version] [--json]');
     return 3;
   }
@@ -36,6 +40,14 @@ export async function runCheck(
   try {
     version = await d.resolveVersion(spec.name, spec.version);
   } catch (err) {
+    if (opts.json) {
+      d.log(JSON.stringify({
+        ok: false,
+        error: 'PACKAGE_RESOLUTION_FAILED',
+        message: `Could not resolve ${spec.name}: ${msg(err)}`,
+      }, null, 2));
+      return 3;
+    }
     d.errLog(`Could not resolve ${spec.name}: ${msg(err)}`);
     return 3;
   }
@@ -45,6 +57,16 @@ export async function runCheck(
     verdict = await d.getVerdict(spec.name, version);
   } catch (err) {
     const rl = err instanceof VerdictUnavailable && err.rateLimited;
+    if (opts.json) {
+      d.log(JSON.stringify({
+        ok: false,
+        error: rl ? 'RATE_LIMITED' : 'VERDICT_UNAVAILABLE',
+        message: rl
+          ? `Rate limited while checking ${spec.name}. Wait a moment and retry.`
+          : `Could not verify ${spec.name}@${version}: ${msg(err)}`,
+      }, null, 2));
+      return 3;
+    }
     d.errLog(
       rl
         ? `${yellow('⚠')} Rate limited — couldn't check ${spec.name}. Wait a moment and retry.`
