@@ -15,6 +15,7 @@ import { bold, dim, error, green, info, red, success, teal, warn, yellow } from 
 import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
+import { showProjectNotices } from '../lib/project-notices.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -131,6 +132,7 @@ async function runLocalRuntime(opts: { project?: string; port?: string; check?: 
 
   const token = getToken();
   const client = new ApiClient(token);
+  await showProjectNotices(client, projectId);
   const spinner = ora('Loading project context (env keys, scopes, routes)...').start();
   try {
     installLoader(cwd);
@@ -181,6 +183,7 @@ async function runHotDeploy(opts: { project?: string }) {
     projectId = config.project_id;
     subdomain = config.subdomain;
   }
+  await showProjectNotices(client, projectId);
 
   // Initial full sync to the PREVIEW slot (preview: true). Writes only the
   // owner-gated dev slot — never prod, never a version bump or history entry.
@@ -386,6 +389,7 @@ async function runLegacyExec(cmdParts: string[]) {
     process.exit(1);
   }
 
+  await showProjectNotices(client, config.project_id);
   const spinner = ora('Loading project context from somewhere.tech...').start();
   try {
     const result = await client.call<{ keys?: Array<{ key: string }>; vars?: Array<{ key: string }> }>(
