@@ -103,14 +103,23 @@ export function registerProject(program: Command) {
     .action(async (nameOrId: string, opts) => {
       const client = new ApiClient(getToken());
       const promptStdout = opts.json ? process.stderr : undefined;
+      let project: ProjectDeleteTarget;
+      try {
+        project = await resolveDeleteTarget(client, nameOrId);
+      } catch (err) {
+        renderDeleteError(err, opts.json);
+        process.exit(1);
+      }
+
+      const projectName = project.name?.trim() || nameOrId;
       const { confirm } = await prompts({
         type: 'text',
         name: 'confirm',
-        message: `This will permanently delete "${nameOrId}" and all its data.\n  Type the project name to confirm`,
+        message: `This will permanently delete "${projectName}" and all its data.\n  Type the project name to confirm`,
         stdout: promptStdout,
       });
 
-      if (confirm !== nameOrId) {
+      if (confirm !== projectName) {
         if (opts.json) {
           printJson({ error: 'ABORTED', message: 'Name did not match. Aborted.' });
           process.exit(1);
@@ -121,38 +130,14 @@ export function registerProject(program: Command) {
 
       const spinner = opts.json ? null : ora('Requesting deletion...').start();
       try {
-        await client.call(
-          'POST',
-          `/projects/${encodeURIComponent(nameOrId)}/request-delete`,
-        );
-        if (spinner) {
-          spinner.text = 'Confirmation code sent to your email. Enter it below.';
-          spinner.stop();
-        }
-
-        const { code } = await prompts({
-          type: 'text',
-          name: 'code',
-          message: 'Confirmation code (from email)',
-          stdout: promptStdout,
-        });
-
-        if (!code) {
-          if (opts.json) {
-            printJson({ error: 'ABORTED', message: 'No code entered. Aborted.' });
-            process.exit(1);
-          }
-          error('No code entered. Aborted.');
-          process.exit(1);
-        }
-
-        const delSpinner = opts.json ? null : ora('Deleting...').start();
+        const code = await requestDeleteConfirmationCode(client, project.id);
+        if (spinner) spinner.text = 'Deleting...';
         const deleted = await client.call(
           'DELETE',
-          `/projects/${encodeURIComponent(nameOrId)}`,
+          `/projects/${encodeURIComponent(project.id)}`,
           { code },
         );
-        delSpinner?.stop();
+        spinner?.stop();
         if (opts.json) {
           printJson(deleted);
           return;
@@ -160,10 +145,106 @@ export function registerProject(program: Command) {
         success('Deleted.');
       } catch (err) {
         spinner?.stop();
-        error(err instanceof Error ? err.message : String(err));
+        renderDeleteError(err, opts.json);
         process.exit(1);
       }
     });
+}
+
+interface ProjectDeleteTarget {
+  id: string;
+  name?: string | null;
+  subdomain?: string | null;
+  slug?: string | null;
+  is_owner?: boolean;
+}
+
+interface ProjectListForDelete {
+  projects: ProjectDeleteTarget[];
+}
+
+async function resolveDeleteTarget(client: ApiClient, ref: string): Promise<ProjectDeleteTarget> {
+  try {
+    return await client.call<ProjectDeleteTarget>(
+      'GET',
+      `/projects/${encodeURIComponent(ref)}`,
+    );
+  } catch (err) {
+    if (!(err instanceof CliApiError) || err.statusCode !== 404) throw err;
+  }
+
+  const listed = await client.call<ProjectListForDelete>(
+    'GET',
+    '/projects',
+    undefined,
+    { q: ref, fields: 'compact' },
+  );
+  const refLower = ref.toLowerCase();
+  const exact = listed.projects.filter((p) =>
+    p.id === ref ||
+    p.name?.toLowerCase() === refLower ||
+    p.subdomain?.toLowerCase() === refLower ||
+    p.slug?.toLowerCase() === refLower
+  );
+
+  if (exact.length === 1) return exact[0];
+  if (exact.length > 1) {
+    throw new CliApiError(
+      'AMBIGUOUS_PROJECT',
+      `Multiple projects match "${ref}". Delete by project ID or subdomain instead.`,
+      400,
+    );
+  }
+  throw new CliApiError('PROJECT_NOT_FOUND', 'Project not found.', 404);
+}
+
+async function requestDeleteConfirmationCode(client: ApiClient, projectId: string): Promise<string> {
+  try {
+    await client.call(
+      'DELETE',
+      `/projects/${encodeURIComponent(projectId)}`,
+      {},
+    );
+  } catch (err) {
+    if (err instanceof CliApiError && err.code === 'CONFIRMATION_REQUIRED') {
+      const code = err.data?.code;
+      if (typeof code === 'string' && code.trim()) return code.trim();
+      throw new CliApiError(
+        'CONFIRMATION_REQUIRED',
+        `${err.message} The server did not include a confirmation code.`,
+        err.statusCode,
+        err.data,
+        err.hint,
+      );
+    }
+    throw err;
+  }
+
+  throw new CliApiError(
+    'DELETE_CONFIRMATION_MISSING',
+    'The server did not require a delete confirmation code, so the CLI refused to continue.',
+    500,
+  );
+}
+
+function renderDeleteError(err: unknown, json?: boolean): void {
+  if (err instanceof CliApiError) {
+    if (json) {
+      printJson({
+        ok: false,
+        error: err.code,
+        message: err.message,
+        ...(err.data ? { data: err.data } : {}),
+        ...(err.hint ? { hint: err.hint } : {}),
+      });
+      return;
+    }
+    error(
+      `${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`,
+    );
+    return;
+  }
+  error(err instanceof Error ? err.message : String(err));
 }
 
 async function listProjects(opts: { json?: boolean } = {}) {
