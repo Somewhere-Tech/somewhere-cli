@@ -73,20 +73,29 @@ export function registerRollback(program: Command) {
         if (r.message) info(dim(`Version notes: ${r.message}`));
       } catch (err) {
         spinner?.fail('Rollback failed');
+        const message = rollbackErrorMessage(err);
         if (opts.json) {
           if (err instanceof CliApiError) {
-            printJsonError(err.code, err.message);
+            printJsonError(err.code, message);
           } else {
-            printJsonError('ERROR', err instanceof Error ? err.message : String(err));
+            printJsonError('ERROR', message);
           }
           process.exit(1);
         }
         if (err instanceof CliApiError) {
-          error(`${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`);
+          error(`${message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`);
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(message);
         }
         process.exit(1);
       }
     });
+}
+
+function rollbackErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  if (err instanceof CliApiError && /no restorable snapshot/i.test(message)) {
+    return 'Rollback is unavailable because the platform could not find a restorable previous live release. No changes were made. Redeploy the source you want live, or try another recorded release.';
+  }
+  return message;
 }

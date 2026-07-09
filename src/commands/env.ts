@@ -97,7 +97,6 @@ export function registerEnv(program: Command) {
 
       const outPath = resolve(process.cwd(), String(opts.out));
       if (existsSync(outPath) && !opts.force && opts.json) {
-        printJson(result);
         error(`${opts.out} exists. Pass --force to overwrite in --json mode.`);
         process.exit(1);
       }

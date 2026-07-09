@@ -1,5 +1,13 @@
 type Style = (value: string) => string;
 
+let jsonOutputMode = false;
+let jsonErrorWritten = false;
+
+export function setJsonOutputMode(enabled: boolean): void {
+  jsonOutputMode = enabled;
+  jsonErrorWritten = false;
+}
+
 const useColor = (): boolean =>
   Boolean(process.stdout.isTTY && !process.env.NO_COLOR);
 
@@ -20,6 +28,10 @@ export function success(msg: string) {
 }
 
 export function error(msg: string) {
+  if (jsonOutputMode) {
+    if (!jsonErrorWritten) printJsonError('CLI_ERROR', stripAnsi(msg));
+    return;
+  }
   console.error(`${red('✗')} ${msg}`);
 }
 
@@ -40,7 +52,12 @@ export function printJsonLine(value: unknown): void {
 }
 
 export function printJsonError(errorCode: string, message: string): void {
+  jsonErrorWritten = true;
   printJson({ ok: false, error: errorCode, message });
+}
+
+export function stripAnsi(value: string): string {
+  return value.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '');
 }
 
 export function heading(msg: string) {

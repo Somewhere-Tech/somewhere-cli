@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { ApiClient } from '../lib/client.js';
 import { getToken } from '../lib/config.js';
-import { error } from '../lib/output.js';
+import { error, printJson } from '../lib/output.js';
 
 export function registerApi(program: Command) {
   program
@@ -9,7 +9,12 @@ export function registerApi(program: Command) {
     .description('Make a raw API call (adds auth automatically)')
     .option('-d, --data <json>', 'JSON body')
     .option('--raw', 'Print the response body as-is without JSON-parsing — for non-JSON endpoints (e.g. a SQL db dump); a 200 non-JSON body is not treated as an error')
+    .option('--json', 'Print parsed JSON (the default; accepted for automation consistency)')
     .action(async (method: string, path: string, opts) => {
+      if (opts.raw && opts.json) {
+        error('--raw and --json cannot be used together.');
+        process.exit(1);
+      }
       const client = new ApiClient(getToken());
       let body: unknown;
       if (opts.data) {
@@ -39,17 +44,11 @@ export function registerApi(program: Command) {
 
       try {
         const result = await client.call(method.toUpperCase(), apiPath, body);
-        console.log(JSON.stringify(result, null, 2));
+        printJson(result);
       } catch (err) {
         if (err instanceof Error && 'code' in err) {
           const apiErr = err as Error & { code: string; statusCode: number };
-          console.error(
-            JSON.stringify(
-              { error: apiErr.code, message: apiErr.message, status: apiErr.statusCode },
-              null,
-              2,
-            ),
-          );
+          printJson({ ok: false, error: apiErr.code, message: apiErr.message, status: apiErr.statusCode });
         } else {
           error(String(err));
         }

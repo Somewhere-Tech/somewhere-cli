@@ -53,6 +53,16 @@ interface TscInvocation {
   via: TypecheckResult['via'];
 }
 
+export function npxTscInvocation(
+  platform: NodeJS.Platform = process.platform,
+): TscInvocation {
+  return {
+    command: platform === 'win32' ? 'npx.cmd' : 'npx',
+    args: ['-y', '-p', 'typescript', 'tsc'],
+    via: 'npx',
+  };
+}
+
 /** Locate a runnable tsc. Never throws — npx is the always-available fallback. */
 function resolveTsc(projectDir: string): TscInvocation {
   const projectBin = join(
@@ -78,8 +88,7 @@ function resolveTsc(projectDir: string): TscInvocation {
     // not resolvable from here — fall through to npx
   }
 
-  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
-  return { command: npx, args: ['-y', 'typescript', 'tsc'], via: 'npx' };
+  return npxTscInvocation();
 }
 
 /**

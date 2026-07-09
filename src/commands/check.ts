@@ -161,11 +161,13 @@ export function registerCheck(program: Command) {
         Object.keys(collected.binaryFiles).length;
 
       const isRun = opts.run !== undefined;
-      const spinner = ora(
-        isRun
-          ? `Compiling ${totalFiles} files + running ${opts.run} (server-side)...`
-          : `Dry-compiling ${totalFiles} files on the platform...`,
-      ).start();
+      const spinner = opts.json
+        ? null
+        : ora(
+          isRun
+            ? `Compiling ${totalFiles} files + running ${opts.run} (server-side)...`
+            : `Dry-compiling ${totalFiles} files on the platform...`,
+        ).start();
 
       try {
         if (isRun) {
@@ -183,7 +185,7 @@ export function registerCheck(program: Command) {
             undefined,
             { timeoutMs: LONG_CALL_TIMEOUT_MS },
           );
-          spinner.stop();
+          spinner?.stop();
 
           if (opts.json) {
             console.log(JSON.stringify(r, null, 2));
@@ -209,7 +211,7 @@ export function registerCheck(program: Command) {
           undefined,
           { timeoutMs: LONG_CALL_TIMEOUT_MS },
         );
-        spinner.stop();
+        spinner?.stop();
 
         if (opts.json) {
           console.log(JSON.stringify(r, null, 2));
@@ -235,11 +237,11 @@ export function registerCheck(program: Command) {
           `Server-side check clean (real platform compiler) — safe to deploy. ${dim(`(${totalFiles} files, ${formatBytes(sourceBytes(collected))})`)}`,
         );
       } catch (err) {
-        spinner.fail(isRun ? 'Check run failed' : 'Check failed');
+        spinner?.fail(isRun ? 'Check run failed' : 'Check failed');
         // The server may answer a compile failure with a thrown BUILD_ERROR
         // (same payload as /deploy) instead of errors-as-data — render it the
         // same way, with a local code frame.
-        if (isBuildError(err) && renderBuildError(err, targetDir)) {
+        if (!opts.json && isBuildError(err) && renderBuildError(err, targetDir)) {
           process.exit(1);
         }
         if (err instanceof CliApiError) {

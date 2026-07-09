@@ -11,8 +11,13 @@ npm install -g @somewhere-tech/cli
 Or run directly:
 
 ```bash
-npx @somewhere-tech/cli init
+npx -y -p @somewhere-tech/cli@latest somewhere init
 ```
+
+The explicit `-p` form is required because this package intentionally ships
+multiple executables (`somewhere`, `sw`, `swpx`, and `swpm`). The shorthand
+`npx @somewhere-tech/cli ...` cannot choose between them. The equivalent npm
+form is `npm exec --yes --package=@somewhere-tech/cli@latest -- somewhere init`.
 
 ## Quick start
 

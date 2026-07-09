@@ -54,7 +54,7 @@ export function registerStatus(program: Command) {
         }
       } catch (err) {
         projectError = err instanceof Error ? err.message : String(err);
-        error(`Project: ${projectError}`);
+        if (!opts.json) error(`Project: ${projectError}`);
         process.exitCode = 1; // a failed status must not report success to a script
       }
 

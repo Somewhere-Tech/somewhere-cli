@@ -59,16 +59,19 @@ export function registerLogs(program: Command) {
           logs: LogRow[];
         }>('GET', '/logs', undefined, query);
 
-        if (!result.logs?.length) {
-          if (opts.json) return;
-          console.log(dim('  No logs yet.'));
+        const initialLogs = result.logs ?? [];
+        if (initialLogs.length === 0 && !opts.follow) {
+          if (opts.json) {
+            console.log('[]');
+          } else {
+            console.log(dim('  No matching logs yet.'));
+          }
           return;
         }
 
-        const initialLogs = result.logs ?? [];
         const seenLogKeys = new Set<string>();
         rememberLogKeys(initialLogs, seenLogKeys);
-        let lastSeen = newestCreatedAt(initialLogs);
+        let lastSeen = newestCreatedAt(initialLogs, after);
 
         if (opts.json) {
           for (const log of initialLogs) printJsonLine(log);

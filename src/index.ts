@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { Command } from 'commander';
+import { Command, CommanderError } from 'commander';
 import { registerAuth } from './commands/auth.js';
 import { registerInit } from './commands/init.js';
 import { registerLink } from './commands/link.js';
@@ -28,6 +28,7 @@ import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
 import { collectNotices } from './lib/notify/index.js';
+import { printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -37,6 +38,14 @@ const program = new Command()
   .name('somewhere')
   .description('CLI for somewhere.tech')
   .version(pkg.version);
+
+const passThroughCommand = process.argv[2] === 'npx' || process.argv[2] === 'npm';
+const jsonOutputRequested = !passThroughCommand && process.argv.includes('--json');
+setJsonOutputMode(jsonOutputRequested);
+if (jsonOutputRequested) {
+  program.exitOverride();
+  program.configureOutput({ writeErr: () => {} });
+}
 
 // Required so the npx/npm pass-through commands can forward unknown flags to the
 // wrapped tool (passThroughOptions). Only affects program-level option ordering
@@ -83,4 +92,15 @@ collectNotices(process.argv)
     if (notices.length) process.on('exit', () => process.stderr.write('\n' + notices.join('\n') + '\n'));
   })
   .catch(() => {});
-program.parse();
+try {
+  await program.parseAsync();
+} catch (err) {
+  if (jsonOutputRequested && err instanceof CommanderError) {
+    if (err.code !== 'commander.helpDisplayed' && err.code !== 'commander.version') {
+      printJsonError('USAGE_ERROR', stripAnsi(err.message.replace(/^error:\s*/i, '')));
+      process.exitCode = err.exitCode || 1;
+    }
+  } else {
+    throw err;
+  }
+}

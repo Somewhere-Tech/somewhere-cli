@@ -3,8 +3,23 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { parseTscOutput, runTypecheck } from '../dist/lib/typecheck.js';
-import { buildScaffoldTsconfig } from '../dist/lib/scaffold.js';
+const typecheckModule = process.env.SOMEWHERE_TEST_SOURCE
+  ? '../src/lib/typecheck.ts'
+  : '../dist/lib/typecheck.js';
+const scaffoldModule = process.env.SOMEWHERE_TEST_SOURCE
+  ? '../src/lib/scaffold.ts'
+  : '../dist/lib/scaffold.js';
+const { npxTscInvocation, parseTscOutput, runTypecheck } = await import(typecheckModule);
+const { buildScaffoldTsconfig } = await import(scaffoldModule);
+
+test('npx fallback installs the typescript package before invoking tsc', () => {
+  assert.deepEqual(npxTscInvocation('linux'), {
+    command: 'npx',
+    args: ['-y', '-p', 'typescript', 'tsc'],
+    via: 'npx',
+  });
+  assert.equal(npxTscInvocation('win32').command, 'npx.cmd');
+});
 
 test('parseTscOutput extracts file:line:col, code, message', () => {
   const out = [
