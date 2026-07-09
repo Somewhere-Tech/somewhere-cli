@@ -1,7 +1,7 @@
 import { Command } from 'commander';
 import { basename, resolve } from 'node:path';
 import prompts from 'prompts';
-import ora from '../lib/spinner.js';
+import ora, { type Ora } from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import {
@@ -56,6 +56,9 @@ const NEXT_ROUTER_FILE_PATTERN =
 const NEXT_APP_WARNING =
   "somewhere.tech serves static files + serverless functions, not SSR — Next.js apps don't run here. " +
   'Port API routes to functions/ handlers, or start from a Vite React app; the platform compiles raw JSX/TSX on deploy.';
+const DEPLOY_HEARTBEAT_MS = 30_000;
+const DEPLOY_MAX_ATTEMPTS = 2;
+const RETRYABLE_DEPLOY_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
 
 export function isNextAppShapeSignal(signal: string): boolean {
   return signal.startsWith(`${NEXT_APP_SIGNAL_PREFIX} (`);
@@ -548,8 +551,11 @@ export function registerDeploy(program: Command) {
         }
 
         if (opts.dryRun) {
-          const plan = await client.call<DryRunResult>('POST', '/deploy', body, undefined, {
-            timeoutMs: LONG_CALL_TIMEOUT_MS,
+          const plan = await callDeployWithRetry<DryRunResult>(client, body, {
+            spinner,
+            json: Boolean(opts.json),
+            dryRun: true,
+            baseText: spinner?.text ?? 'Checking deploy...',
           });
           spinner?.stop();
           if (opts.json) {
@@ -560,8 +566,11 @@ export function registerDeploy(program: Command) {
           return;
         }
 
-        const result = await client.call<DeployResult>('POST', '/deploy', body, undefined, {
-          timeoutMs: LONG_CALL_TIMEOUT_MS,
+        const result = await callDeployWithRetry<DeployResult>(client, body, {
+          spinner,
+          json: Boolean(opts.json),
+          dryRun: false,
+          baseText: spinner?.text ?? 'Deploying...',
         });
 
         spinner?.stop();
@@ -732,6 +741,89 @@ interface DryRunResult {
     modified: string[];
   } | null;
   warnings?: string[];
+}
+
+interface DeployRetryOptions {
+  spinner: Ora | null;
+  json: boolean;
+  dryRun: boolean;
+  baseText: string;
+}
+
+async function callDeployWithRetry<T>(
+  client: ApiClient,
+  body: Record<string, unknown>,
+  opts: DeployRetryOptions,
+): Promise<T> {
+  for (let attempt = 1; attempt <= DEPLOY_MAX_ATTEMPTS; attempt++) {
+    const startedAt = Date.now();
+    const stopHeartbeat = startDeployHeartbeat(opts, attempt, startedAt);
+    try {
+      return await client.call<T>('POST', '/deploy', body, undefined, {
+        timeoutMs: deployTimeoutMs(),
+      });
+    } catch (err) {
+      if (attempt >= DEPLOY_MAX_ATTEMPTS || !isRetryableDeployError(err)) throw err;
+      if (!opts.json) {
+        opts.spinner?.stop();
+        warn(
+          `${opts.dryRun ? 'Deploy check' : 'Deploy'} ${retryReason(err)} after ${formatDeployElapsed(Date.now() - startedAt)}; retrying once.`,
+        );
+        opts.spinner?.start(`${opts.baseText} (retry 2/2)`);
+      }
+    } finally {
+      stopHeartbeat();
+    }
+  }
+
+  throw new CliApiError('DEPLOY_RETRY_EXHAUSTED', 'Deploy retry exhausted.', 0);
+}
+
+function deployTimeoutMs(): number {
+  const raw = process.env.SOMEWHERE_DEPLOY_TIMEOUT_MS;
+  if (!raw) return LONG_CALL_TIMEOUT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : LONG_CALL_TIMEOUT_MS;
+}
+
+function isRetryableDeployError(err: unknown): boolean {
+  return err instanceof CliApiError && RETRYABLE_DEPLOY_CODES.has(err.code);
+}
+
+function retryReason(err: unknown): string {
+  if (!(err instanceof CliApiError)) return 'failed';
+  if (err.code === 'TIMEOUT') return 'timed out';
+  if (err.code === 'SERVER_SLOW') return 'stalled waiting for the server';
+  if (err.code === 'NETWORK_ERROR') return 'lost the connection';
+  return 'failed';
+}
+
+function startDeployHeartbeat(
+  opts: DeployRetryOptions,
+  attempt: number,
+  startedAt: number,
+): () => void {
+  if (opts.json) return () => {};
+
+  const timer = setInterval(() => {
+    const elapsed = formatDeployElapsed(Date.now() - startedAt);
+    const retry = attempt > 1 ? ' (retry 2/2)' : '';
+    if (process.stderr.isTTY && opts.spinner) {
+      opts.spinner.text = `${opts.baseText}${retry} — still running after ${elapsed}`;
+    } else {
+      console.error(`${opts.dryRun ? 'Deploy check' : 'Deploy'} still running after ${elapsed}${retry}...`);
+    }
+  }, DEPLOY_HEARTBEAT_MS);
+
+  return () => clearInterval(timer);
+}
+
+function formatDeployElapsed(ms: number): string {
+  const totalSeconds = Math.max(1, Math.round(ms / 1000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return seconds === 0 ? `${minutes}m` : `${minutes}m ${seconds}s`;
 }
 
 // Platform-generated slot artifacts. They live in the deployed slot but are

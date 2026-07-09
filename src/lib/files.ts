@@ -1,4 +1,4 @@
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
 
 // Directories / files never uploaded. Mirrors the deploy collector.
@@ -53,37 +53,44 @@ export interface CollectedFiles {
  *  applying the same path remapping the deploy command uses. */
 export function collectFiles(baseDir: string): CollectedFiles {
   const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {}, skipped: [] };
-  walk(baseDir, baseDir, out);
+  const ignore = loadDeployIgnore(baseDir);
+  walk(baseDir, baseDir, out, ignore);
   return out;
 }
 
-function walk(baseDir: string, currentDir: string, out: CollectedFiles) {
+function walk(baseDir: string, currentDir: string, out: CollectedFiles, ignore: DeployIgnoreMatcher) {
   for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
-    if (IGNORE.has(entry.name) || entry.name.startsWith('.')) continue;
-
     const fullPath = join(currentDir, entry.name);
+    const relPath = toDeployPath(relative(baseDir, fullPath));
+    if (
+      IGNORE.has(entry.name) ||
+      entry.name.startsWith('.') ||
+      ignore.ignores(relPath, entry.isDirectory())
+    ) {
+      continue;
+    }
+
     // Symlinks are neither isFile() nor isDirectory() (lstat), so they'd fall
     // through silently — record and skip (we never follow them: they can escape
     // the project root).
     if (entry.isSymbolicLink()) {
-      out.skipped.push({ path: relative(baseDir, fullPath), reason: 'symlink (not followed)' });
+      out.skipped.push({ path: relPath, reason: 'symlink (not followed)' });
       continue;
     }
     if (entry.isDirectory()) {
-      walk(baseDir, fullPath, out);
+      walk(baseDir, fullPath, out, ignore);
       continue;
     }
     if (!entry.isFile()) continue;
     const size = statSync(fullPath).size;
     if (size > MAX_FILE_SIZE) {
       out.skipped.push({
-        path: relative(baseDir, fullPath),
+        path: relPath,
         reason: `${formatBytes(size)} exceeds the ${formatBytes(MAX_FILE_SIZE)} per-file limit`,
       });
       continue;
     }
 
-    const relPath = relative(baseDir, fullPath);
     classifyInto(out, baseDir, relPath);
   }
 }
@@ -101,17 +108,20 @@ export function classifyKey(relPath: string): { kind: FileKind; key: string } {
   // DEPLOY_BLANK_PAGE. Normalize here: the single chokepoint every collector
   // (deploy, check, dev live-sync) routes its keys through. Disk reads still use
   // the original path via join(), which is win32-safe.
-  relPath = relPath.replace(/\\/g, '/');
+  relPath = toDeployPath(relPath);
   if (relPath.startsWith('functions/')) {
     return { kind: 'function', key: relPath.slice('functions/'.length) };
   }
   if (isFunctionPath(relPath)) {
     return { kind: 'function', key: relPath };
   }
-  if (isBinaryPath(relPath)) {
-    return { kind: 'binary', key: relPath };
+  const staticPath = relPath.startsWith('public/')
+    ? relPath.slice('public/'.length)
+    : relPath;
+  if (isBinaryPath(staticPath)) {
+    return { kind: 'binary', key: staticPath };
   }
-  return { kind: 'static', key: relPath };
+  return { kind: 'static', key: staticPath };
 }
 
 /** Read one file off disk and place it in the right bucket of `out`. */
@@ -131,4 +141,118 @@ export function formatBytes(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function toDeployPath(p: string): string {
+  return p.replace(/\\/g, '/').replace(/^\/+/, '');
+}
+
+interface DeployIgnoreRule {
+  negate: boolean;
+  directoryOnly: boolean;
+  anchored: boolean;
+  hasSlash: boolean;
+  regex: RegExp;
+}
+
+class DeployIgnoreMatcher {
+  constructor(private readonly rules: DeployIgnoreRule[]) {}
+
+  ignores(relPath: string, isDirectory: boolean): boolean {
+    let ignored = false;
+    const normalized = toDeployPath(relPath);
+    for (const rule of this.rules) {
+      if (!matchesIgnoreRule(rule, normalized, isDirectory)) continue;
+      ignored = !rule.negate;
+    }
+    return ignored;
+  }
+}
+
+function loadDeployIgnore(baseDir: string): DeployIgnoreMatcher {
+  const rules: DeployIgnoreRule[] = [];
+  for (const fileName of ['.gitignore', '.somewhereignore']) {
+    const path = join(baseDir, fileName);
+    if (!existsSync(path)) continue;
+    const lines = readFileSync(path, 'utf8').split(/\r?\n/);
+    for (const raw of lines) {
+      const rule = parseIgnoreRule(raw);
+      if (rule) rules.push(rule);
+    }
+  }
+  return new DeployIgnoreMatcher(rules);
+}
+
+function parseIgnoreRule(raw: string): DeployIgnoreRule | null {
+  let pattern = raw.trim();
+  if (!pattern || pattern.startsWith('#')) return null;
+
+  let escapedLeadingMarker = false;
+  if (pattern.startsWith('\\#') || pattern.startsWith('\\!')) {
+    pattern = pattern.slice(1);
+    escapedLeadingMarker = true;
+  }
+
+  const negate = !escapedLeadingMarker && pattern.startsWith('!');
+  if (negate) pattern = pattern.slice(1).trim();
+  if (!pattern) return null;
+
+  pattern = pattern.replace(/\\/g, '/');
+  const anchored = pattern.startsWith('/');
+  pattern = pattern.replace(/^\/+/, '');
+  const directoryOnly = pattern.endsWith('/');
+  pattern = pattern.replace(/\/+$/, '');
+  if (!pattern) return null;
+
+  const hasSlash = pattern.includes('/');
+  return {
+    negate,
+    directoryOnly,
+    anchored,
+    hasSlash,
+    regex: globToRegExp(pattern),
+  };
+}
+
+function matchesIgnoreRule(
+  rule: DeployIgnoreRule,
+  relPath: string,
+  isDirectory: boolean,
+): boolean {
+  if (rule.directoryOnly && !isDirectory) return false;
+  if (rule.anchored || rule.hasSlash) return rule.regex.test(relPath);
+  return relPath.split('/').some((segment) => rule.regex.test(segment));
+}
+
+function globToRegExp(pattern: string): RegExp {
+  let source = '^';
+  for (let i = 0; i < pattern.length; i++) {
+    const ch = pattern[i];
+    if (ch === '*') {
+      const next = pattern[i + 1];
+      if (next === '*') {
+        if (pattern[i + 2] === '/') {
+          source += '(?:.*/)?';
+          i += 2;
+        } else {
+          source += '.*';
+          i++;
+        }
+      } else {
+        source += '[^/]*';
+      }
+      continue;
+    }
+    if (ch === '?') {
+      source += '[^/]';
+      continue;
+    }
+    source += escapeRegExp(ch);
+  }
+  source += '$';
+  return new RegExp(source);
+}
+
+function escapeRegExp(ch: string): string {
+  return /[\\^$+?.()|[\]{}]/.test(ch) ? `\\${ch}` : ch;
 }
