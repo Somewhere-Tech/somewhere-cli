@@ -15,6 +15,7 @@ test('scaffold tsconfig is valid JSON with the lenient knobs', () => {
   assert.equal(co.noImplicitAny, false);
   assert.equal(co.jsx, 'react-jsx');
   assert.equal(co.moduleResolution, 'bundler');
+  assert.deepEqual(cfg.include, ['**/*']);
 });
 
 test('scaffold package.json carries provided deps and is private', () => {
@@ -22,6 +23,7 @@ test('scaffold package.json carries provided deps and is private', () => {
   assert.equal(pkg.private, true);
   assert.equal(pkg.name, 'my-app');
   assert.deepEqual(pkg.dependencies, { zod: '^3.22.0' });
+  assert.deepEqual(pkg.devDependencies, { typescript: '5.9.3' });
 });
 
 test('sanitizePackageName lowercases and strips unsafe chars', () => {

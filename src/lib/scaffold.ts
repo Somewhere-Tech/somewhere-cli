@@ -14,6 +14,8 @@
  * tsconfig.json / package.json keeps it untouched.
  */
 
+import { TYPECHECK_TYPESCRIPT_VERSION } from './typecheck-version.js';
+
 export const SCAFFOLD_TSCONFIG_FILENAME = 'tsconfig.json';
 export const SCAFFOLD_PACKAGE_FILENAME = 'package.json';
 
@@ -43,7 +45,9 @@ export function buildScaffoldTsconfig(): string {
       forceConsistentCasingInFileNames: true,
       noEmit: true,
     },
-    include: ['.'],
+    // TypeScript 5.9.3 and 7.1-dev both returned TS18003 for a fresh Vite
+    // src/main.tsx when this was the bare directory string ".".
+    include: ['**/*'],
     exclude: ['node_modules', 'dist', 'build'],
   };
   return JSON.stringify(config, null, 2) + '\n';
@@ -67,6 +71,9 @@ export function buildScaffoldPackageJson(
     // Scaffolded by `somewhere pull` for local typechecking. Your deployed
     // dependency versions live on the platform; this mirrors them when known.
     dependencies: deps,
+    devDependencies: {
+      typescript: TYPECHECK_TYPESCRIPT_VERSION,
+    },
   };
   return JSON.stringify(pkg, null, 2) + '\n';
 }
