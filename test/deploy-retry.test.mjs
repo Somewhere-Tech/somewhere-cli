@@ -108,3 +108,88 @@ test('deploy retries once after a timeout-class upload failure', async () => {
     assert.match(result.stdout, /Live at https:\/\/retry\.somewhere\.tech/);
   });
 });
+
+test('deploy prints determinate progress while a healthy upload is still running', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-deploy-progress-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-deploy-progress-fixture-'));
+  writeConfig(HOME);
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_progress',
+    name: 'progress',
+    subdomain: 'progress',
+  }) + '\n');
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>progress</body></html>\n');
+
+  await withServer((req, res) => {
+    if (req.method === 'GET') {
+      sendJson(res, 200, { ok: true, data: { project_id: 'proj_progress', notices: [] } });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/v1/deploy') {
+      setTimeout(() => sendJson(res, 200, {
+        ok: true,
+        data: { files: 1, url: 'https://progress.somewhere.tech', has_functions: false },
+      }), 140);
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await run(['deploy'], {
+      cwd: fixtureDir,
+      env: {
+        HOME,
+        USERPROFILE: HOME,
+        SOMEWHERE_API_URL: apiUrl,
+        SOMEWHERE_DEPLOY_TIMEOUT_MS: '500',
+        SOMEWHERE_DEPLOY_HEARTBEAT_MS: '40',
+      },
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stderr, /Deploy still running after 1s/);
+    assert.match(result.stdout, /Live at https:\/\/progress\.somewhere\.tech/);
+  });
+});
+
+test('deploy --json times out with one structured error and retry guidance', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-deploy-timeout-json-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-deploy-timeout-json-fixture-'));
+  writeConfig(HOME);
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_timeout_json',
+    name: 'timeout-json',
+    subdomain: 'timeout-json',
+  }) + '\n');
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>timeout</body></html>\n');
+  let deployCalls = 0;
+
+  await withServer((req, res) => {
+    if (req.method === 'GET') {
+      sendJson(res, 200, { ok: true, data: { project_id: 'proj_timeout_json', notices: [] } });
+      return;
+    }
+    if (req.method === 'POST' && req.url === '/v1/deploy') {
+      deployCalls += 1;
+      setTimeout(() => sendJson(res, 200, { ok: true, data: {} }), 300);
+      return;
+    }
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+  }, async (apiUrl) => {
+    const result = await run(['deploy', '--json'], {
+      cwd: fixtureDir,
+      env: {
+        HOME,
+        USERPROFILE: HOME,
+        SOMEWHERE_API_URL: apiUrl,
+        SOMEWHERE_DEPLOY_TIMEOUT_MS: '60',
+      },
+    });
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, '');
+    assert.equal(deployCalls, 2);
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.error, 'TIMEOUT');
+    assert.match(payload.message, /check `somewhere status` before retrying/i);
+  });
+});

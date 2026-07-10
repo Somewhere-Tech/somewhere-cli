@@ -23,6 +23,10 @@ interface LocalNoticeState {
   shown: Record<string, string>;
 }
 
+// Notices are optional context on the deploy path. They must never consume the
+// normal API timeout budget before deploy progress even starts.
+const PROJECT_NOTICE_TIMEOUT_MS = 3_000;
+
 export interface ShowProjectNoticeOptions {
   now?: number;
   statePath?: string;
@@ -69,6 +73,9 @@ export async function showProjectNotices(
     const response = await client.call<ProjectNoticeResponse>(
       'GET',
       `/projects/${encodeURIComponent(projectRef)}/notices`,
+      undefined,
+      undefined,
+      { timeoutMs: PROJECT_NOTICE_TIMEOUT_MS },
     );
     const state = readState(statePath);
     const unseen = response.notices.filter((notice) => state.shown[`${response.project_id}:${notice.id}`] !== day);

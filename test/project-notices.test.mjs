@@ -67,3 +67,16 @@ test('CLI stays silent after the project runtime has picked up the fix', async (
   assert.deepEqual(shown, []);
   assert.deepEqual(lines, []);
 });
+
+test('project notice lookup uses a short non-blocking timeout budget', async () => {
+  let callArgs;
+  const client = {
+    async call(...args) {
+      callArgs = args;
+      return { project_id: 'project-current', notices: [] };
+    },
+  };
+  await showProjectNotices(client, 'project-current');
+  assert.equal(callArgs[0], 'GET');
+  assert.equal(callArgs[4].timeoutMs, 3000);
+});

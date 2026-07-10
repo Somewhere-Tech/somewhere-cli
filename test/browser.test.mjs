@@ -40,7 +40,7 @@ const { port } = server.address();
 process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${port}`;
 
 const { ApiClient } = await import('../dist/lib/client.js');
-const { buildBrowserBody, formatBrowserReport, browserExitCode } = await import(
+const { buildBrowserBody, formatBrowserReport, browserExitCode, normalizeBrowserVerdict } = await import(
   '../dist/commands/browser.js'
 );
 
@@ -57,6 +57,15 @@ test('buildBrowserBody: a non-URL positional becomes `project_id`', () => {
 test('buildBrowserBody: falls back to the linked project when no target', () => {
   assert.deepEqual(buildBrowserBody(undefined, {}, 'linked-proj'), {
     project_id: 'linked-proj',
+  });
+});
+
+test('buildBrowserBody: an explicit URL stays in EYES mode in a linked directory', () => {
+  assert.deepEqual(buildBrowserBody('https://third-party.test/docs', {}, 'linked-proj'), {
+    url: 'https://third-party.test/docs',
+  });
+  assert.deepEqual(buildBrowserBody(undefined, { url: 'https://third-party.test/docs' }, 'linked-proj'), {
+    url: 'https://third-party.test/docs',
   });
 });
 
@@ -222,6 +231,17 @@ test('browserExitCode: clean pass is 0; a failed request or page error is 1', ()
   assert.equal(browserExitCode({ passed: true, page_errors: [{ message: 'boom' }] }), 1);
   // Console errors alone are advisory — they don't fail the gate.
   assert.equal(browserExitCode({ passed: true, console_errors: ['noise'] }), 0);
+});
+
+test('normalizeBrowserVerdict makes passed agree with an unhealthy exit', () => {
+  const result = normalizeBrowserVerdict({
+    passed: true,
+    failed_requests: [{ status: 404, url: 'https://example.com/missing' }],
+    console_errors: ['resource failed'],
+  });
+  assert.equal(result.passed, false);
+  assert.equal(browserExitCode(result), 1);
+  assert.equal(normalizeBrowserVerdict({ passed: true, console_errors: ['advisory'] }).passed, true);
 });
 
 test.after(() => server.close());

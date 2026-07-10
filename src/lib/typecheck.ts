@@ -5,7 +5,7 @@
  *
  * tsc resolution order (first that exists wins):
  *   1. the project's own node_modules/.bin/tsc (if they ran `npm install`)
- *   2. the typescript shipped with this CLI (always present — it's our build dep)
+ *   2. the CLI checkout's TypeScript during development/tests (a devDependency)
  *   3. `npx -y typescript` as a last resort
  */
 import { spawn } from 'node:child_process';
@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { TYPECHECK_TYPESCRIPT_VERSION } from './typecheck-version.js';
 
 export interface TypeError {
   file: string;
@@ -30,10 +31,11 @@ export interface TypeError {
  *   TS2307  Cannot find module 'X' or its corresponding type declarations
  *   TS7016  Could not find a declaration file for module 'X' (implicit any)
  *   TS2306  File is not a module
+ *   TS2875  JSX runtime package can't be resolved locally
  * This is intentional and bounded: TS2304 (undefined name — the dropped-import
  * bug we're chasing) is NOT in this set and is always reported.
  */
-const UNRESOLVED_DEP_CODES = new Set(['TS2307', 'TS7016', 'TS2306']);
+const UNRESOLVED_DEP_CODES = new Set(['TS2307', 'TS7016', 'TS2306', 'TS2875']);
 
 export interface TypecheckResult {
   /** true = no type errors. */
@@ -58,7 +60,7 @@ export function npxTscInvocation(
 ): TscInvocation {
   return {
     command: platform === 'win32' ? 'npx.cmd' : 'npx',
-    args: ['-y', '-p', 'typescript', 'tsc'],
+    args: ['-y', '-p', `typescript@${TYPECHECK_TYPESCRIPT_VERSION}`, 'tsc'],
     via: 'npx',
   };
 }
@@ -75,8 +77,9 @@ function resolveTsc(projectDir: string): TscInvocation {
     return { command: projectBin, args: [], via: 'project' };
   }
 
-  // The typescript bundled with this CLI. createRequire from this module
-  // resolves the dependency we declare in our own package.json.
+  // TypeScript is a CLI devDependency, so this resolves in a source checkout
+  // and tests. Published installs omit devDependencies and use the pinned npx
+  // fallback below unless the project has its own compiler.
   try {
     const require = createRequire(import.meta.url);
     // typescript ships bin/tsc (a Node script). Resolve its package dir.
