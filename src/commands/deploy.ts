@@ -267,7 +267,7 @@ interface TempSession {
 export function registerDeploy(program: Command) {
   program
     .command('deploy [dir]')
-    .description('Deploy the current directory to the linked project')
+    .description('Deploy the current directory (anonymous automatically when logged out)')
     .option(
       '--project <ref>',
       'Project to deploy to — accepts the project UUID, slug, or subdomain (all three resolve server-side)',
@@ -298,7 +298,7 @@ export function registerDeploy(program: Command) {
     )
     .option(
       '--temporary',
-      'Deploy without an account — creates a temporary 3-hour workspace you can claim later',
+      'Explicitly deploy to a temporary 3-hour workspace (automatic when logged out)',
     )
     .option(
       '--force',
@@ -310,25 +310,14 @@ export function registerDeploy(program: Command) {
       const targetDir = resolveTargetDir(dir);
       const storedConfig = loadConfig();
 
-      // Discovery hint (tsk_35674c33): an agent/dev with no stored credential
-      // and no --temporary gets pointed at the no-login path instead of the
-      // old bare "Not logged in" exit. Plain console.log (no error styling,
-      // no spinner) and exit 0 are BOTH deliberate — this isn't a failure,
-      // it's how a first-time caller discovers --temporary exists. A non-zero
-      // exit here would make CI/agent tooling treat "you could deploy without
-      // an account" as a broken command.
-      if (!storedConfig?.token && !opts.temporary) {
-        if (opts.json) {
-          printJson({
-            message: 'No account found. To deploy without logging in, rerun with --temporary.',
-            docs_command: 'somewhere docs start',
-          });
-          process.exit(0);
-        }
-        console.log('No account found. To deploy without logging in, rerun with --temporary.');
-        console.log('Everything you can run without an account: somewhere docs start');
-        process.exit(0);
-      }
+      // Anonymous deploy is the default first-touch path. A caller with no
+      // saved credential should get a live app from `somewhere deploy`, not a
+      // successful no-op that asks them to discover and rerun a hidden flag.
+      // Stored temporary sessions follow the same path so every redeploy keeps
+      // relaying its claim URL and expiry without requiring --temporary again.
+      const useTemporary = Boolean(
+        opts.temporary || !storedConfig?.token || storedConfig.temporary,
+      );
 
       // Resolved below: present only for a temp (minted or reused) session,
       // never for a normal login — gates both project auto-create and the
@@ -336,7 +325,7 @@ export function registerDeploy(program: Command) {
       let tempSession: TempSession | undefined;
 
       let token: string;
-      if (opts.temporary) {
+      if (useTemporary) {
         if (storedConfig?.token && !storedConfig.temporary) {
           // Already have a real account — --temporary would be a downgrade,
           // so ignore it rather than silently minting a throwaway workspace
@@ -369,6 +358,7 @@ export function registerDeploy(program: Command) {
             tempSession = {
               claimUrl: account.claim_url,
               ttlSeconds: account.ttl_seconds,
+              expiresAt: account.expires_at,
               reused: false,
             };
           } catch (err) {
@@ -580,7 +570,15 @@ export function registerDeploy(program: Command) {
         const functionErrors = result.function_errors ?? [];
         const hasFunctionErrors = functionErrors.length > 0;
         if (opts.json) {
-          printJson(result);
+          if (tempSession) {
+            printJson({
+              url: result.url,
+              claim_url: tempSession.claimUrl,
+              expires_at: tempSession.expiresAt ?? null,
+            });
+          } else {
+            printJson(result);
+          }
           if (hasFunctionErrors) {
             process.exit(1);
           }
@@ -645,27 +643,21 @@ export function registerDeploy(program: Command) {
         }
 
         if (tempSession) {
-          // Agent-relay success message (tsk_35674c33): every temp deploy,
-          // minted or silently reused, ends with this block so the claim path
-          // is never missed. Reused sessions report the absolute account clock
-          // instead of re-promising a fresh 3 hours.
+          // Every anonymous deploy ends with stable, machine-scannable labels.
+          // The absolute server expiry avoids making a reused credential look
+          // like it received a fresh three-hour window.
           const remaining = tempSession.reused && tempSession.expiresAt
             ? formatRemainingTempTime(tempSession.expiresAt)
             : null;
-          if (remaining) {
-            success(`Live at ${teal(result.url)}`);
-            info(`This temporary workspace expires in ${remaining} — claiming keeps ALL projects under it.`);
+          success(`Live URL: ${teal(result.url)}`);
+          info(`Claim URL: ${teal(tempSession.claimUrl)}`);
+          if (tempSession.expiresAt) {
+            info(`Expires at: ${tempSession.expiresAt}${remaining ? ` (${remaining} remaining)` : ''}`);
           } else {
             const hours = formatTtlHours(tempSession.ttlSeconds);
-            success(`Live at ${teal(result.url)} — yours for ${hours} hour${hours === 1 ? '' : 's'}.`);
+            info(`Expires: about ${hours} hour${hours === 1 ? '' : 's'} after the temporary session was created`);
           }
-          info(`To keep it: ${teal(tempSession.claimUrl)}`);
-          info("Claiming connects the Somewhere MCP so your agent can manage this project's");
-          info('database, email, and cron directly next time.');
-          // Additive pointer (tsk_497b7eeb). Next thing a fresh agent needs is
-          // the anonymous capability map (tables via `somewhere db query`,
-          // logs, redeploys) — `docs start` is that map, no account required.
-          info('What else works without an account: somewhere docs start');
+          info(`Next step: ${teal('somewhere login')} to keep it.`);
         } else {
           success(`Live at ${teal(result.url)}`);
         }

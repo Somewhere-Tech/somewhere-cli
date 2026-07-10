@@ -13,7 +13,7 @@ export interface CliConfig {
    *  can't be obtained, instead of falling back to the real tool. Overridable
    *  per-invocation by --enforce / --no-enforce / SWPX_ENFORCE. */
   enforce?: boolean;
-  /** True when `token` is a `--temporary` no-login credential (tsk_35674c33)
+  /** True when `token` is a temporary no-login credential (tsk_35674c33)
    *  rather than a real account login. Distinguishes the two so getToken()
    *  can give temp-aware expiry messaging and deploy can reuse/re-mint
    *  instead of ever prompting `somewhere login`. */

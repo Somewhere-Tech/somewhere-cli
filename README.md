@@ -11,13 +11,12 @@ npm install -g @somewhere-tech/cli
 Or run directly:
 
 ```bash
-npx -y -p @somewhere-tech/cli@latest somewhere init
+npx somewhere-cli deploy
 ```
 
-The explicit `-p` form is required because this package intentionally ships
-multiple executables (`somewhere`, `sw`, `swpx`, and `swpm`). The shorthand
-`npx @somewhere-tech/cli ...` cannot choose between them. The equivalent npm
-form is `npm exec --yes --package=@somewhere-tech/cli@latest -- somewhere init`.
+From a project folder, that single command deploys anonymously when no account
+is configured and prints the live URL, claim URL, and expiry. The scoped package
+name works too: `npx @somewhere-tech/cli deploy`.
 
 ## Quick start
 

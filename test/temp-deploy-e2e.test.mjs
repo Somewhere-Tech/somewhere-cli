@@ -128,17 +128,19 @@ function run(args, env) {
   });
 }
 
-test('deploy --temporary — mint, auto-create project, claim relay, then silent reuse', async () => {
+test('deploy while logged out — mint, auto-create project, claim relay, then silent reuse', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-home-'));
   const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-fixture-'));
   writeFileSync(join(fixtureDir, 'index.html'), '<html><body>hi</body></html>\n');
 
   const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
 
-  const first = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
+  const first = await run(['deploy'], { cwd: fixtureDir, env });
   assert.equal(first.status, 0, `expected exit 0, got ${first.status}\nstdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
-  assert.match(first.stdout, /Live at/);
-  assert.match(first.stdout, /To keep it:/);
+  assert.match(first.stdout, /Live URL:/);
+  assert.match(first.stdout, /Claim URL:/);
+  assert.match(first.stdout, /Expires at:/);
+  assert.match(first.stdout, /Next step: somewhere login to keep it\./);
   assert.ok(first.stdout.includes('https://somewhere.tech/claim?token=swtc_e2e'), 'claim URL present in stdout');
 
   const configPath = join(HOME, '.somewhere', 'config.json');
@@ -160,12 +162,12 @@ test('deploy --temporary — mint, auto-create project, claim relay, then silent
   // Second run in the SAME window (same HOME, same fixture dir with
   // .somewhere.json already present) must reuse the cached credential AND
   // the linked project silently — no second temp-create, no second project.
-  const second = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
+  const second = await run(['deploy'], { cwd: fixtureDir, env });
   assert.equal(second.status, 0, `expected exit 0, got ${second.status}\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
-  assert.match(second.stdout, /Live at/);
-  assert.doesNotMatch(second.stdout, /yours for 3 hours/);
-  assert.match(second.stdout, /This temporary workspace expires in \d+h \d+m — claiming keeps ALL projects under it\./);
-  assert.match(second.stdout, /To keep it:/);
+  assert.match(second.stdout, /Live URL:/);
+  assert.match(second.stdout, /Expires at: .* \(\d+h \d+m remaining\)/);
+  assert.match(second.stdout, /Claim URL:/);
+  assert.match(second.stdout, /Next step: somewhere login to keep it\./);
 
   assert.equal(tempCreateCalls, 1, 'still exactly ONE temp-create total — silent reuse');
   assert.equal(projectsCalls, 1, 'still exactly ONE project create total — .somewhere.json was reused');
@@ -197,27 +199,31 @@ test('deploy --temporary reuses old temp configs without temp_expires_at and kee
   });
 
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.match(result.stdout, /Live at .*yours for 3 hours/);
+  assert.match(result.stdout, /Live URL:/);
+  assert.match(result.stdout, /Expires: about 3 hours after the temporary session was created/);
   assert.match(result.stdout, /https:\/\/somewhere\.tech\/claim\?token=swtc_old/);
   assert.equal(tempCreateCalls, beforeTempCreateCalls, 'missing temp_expires_at falls back without minting a new temp session');
 });
 
-test('deploy (no --temporary) with no stored credential prints the discovery hint and exits 0', async () => {
+test('deploy --json with no stored credential deploys and emits the anonymous contract', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-home-nohint-'));
   const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-fixture-nohint-'));
   writeFileSync(join(fixtureDir, 'index.html'), '<html></html>\n');
 
-  const result = await run(['deploy'], {
+  const result = await run(['deploy', '--json'], {
     cwd: fixtureDir,
     env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
   });
 
   assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.equal(
-    result.stdout,
-    'No account found. To deploy without logging in, rerun with --temporary.\n' +
-      'Everything you can run without an account: somewhere docs start\n',
-  );
+  const config = JSON.parse(readFileSync(join(HOME, '.somewhere', 'config.json'), 'utf8'));
+  const project = JSON.parse(readFileSync(join(fixtureDir, '.somewhere.json'), 'utf8'));
+  assert.deepEqual(JSON.parse(result.stdout), {
+    url: `https://${project.subdomain}.somewhere.tech`,
+    claim_url: 'https://somewhere.tech/claim?token=swtc_e2e',
+    expires_at: config.temp_expires_at,
+  });
+  assert.equal(result.stderr, '');
 });
 
 test.after(() => server.close());

@@ -1,6 +1,6 @@
 /** No-login deploy path (tsk_35674c33): mint a short-lived, unauthenticated
  *  developer credential gated by client-side proof-of-work instead of a
- *  signup. This is the whole "auth" for `somewhere deploy --temporary` — see
+ *  signup. This is the whole "auth" for logged-out `somewhere deploy` — see
  *  src/commands/deploy.ts for how the minted credential is cached/reused and
  *  wired into the normal deploy flow. */
 

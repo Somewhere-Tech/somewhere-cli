@@ -13,7 +13,7 @@ const DOCS_BASE = process.env.SOMEWHERE_DOCS_BASE?.replace(/\/$/, '') || 'https:
 const TOPICS: Record<string, { path: string; blurb: string }> = {
   start: {
     path: '/start.txt',
-    blurb: 'Anonymous quickstart — deploy with no account (--temporary), app shape, what works, how to keep it',
+    blurb: 'Anonymous quickstart — one-command deploy with no account, app shape, what works, how to keep it',
   },
   docs: {
     path: '/docs.txt',
