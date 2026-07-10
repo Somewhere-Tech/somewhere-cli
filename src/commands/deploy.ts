@@ -19,6 +19,7 @@ import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig } from '../types.js';
+import { showProjectNotices } from '../lib/project-notices.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
 // `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
@@ -434,6 +435,8 @@ export function registerDeploy(program: Command) {
         deployStateEntry = linkedProjectEntry;
       }
 
+      await showProjectNotices(client, projectId);
+
       if (opts.force && !opts.yes) {
         if (!process.stdin.isTTY) {
           const message = 'Refusing to force deploy without confirmation in a non-interactive shell. Run `somewhere deploy --force --yes` to overwrite remote changes intentionally.';
@@ -637,6 +640,9 @@ export function registerDeploy(program: Command) {
             if (!buildWarnings.has(normalizeWarning(w))) warn(w);
           }
         }
+        if (result.runtime_fixes && result.runtime_fixes.length > 0) {
+          for (const fix of result.runtime_fixes) success(fix.message);
+        }
 
         if (tempSession) {
           // Agent-relay success message (tsk_35674c33): every temp deploy,
@@ -726,6 +732,7 @@ interface DeployResult {
   warnings?: string[];
   preserved_functions?: string[];
   function_errors?: Array<{ route?: string; error?: string } | string>;
+  runtime_fixes?: Array<{ notice_id: string; title: string; message: string }>;
 }
 
 function normalizeWarning(value: string): string {
