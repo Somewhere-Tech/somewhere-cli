@@ -712,9 +712,13 @@ export function registerDeploy(program: Command) {
         // with no code/status left a customer unable to tell auth from
         // routing from payload failures (pfb_70e9d140c5a0).
         if (err instanceof CliApiError) {
-          error(
-            `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
-          );
+          if (opts.json) {
+            printJsonError(err.code, err.message);
+          } else {
+            error(
+              `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
+            );
+          }
         } else {
           error(err instanceof Error ? err.message : String(err));
         }
@@ -835,9 +839,16 @@ function startDeployHeartbeat(
     } else {
       console.error(`${opts.dryRun ? 'Deploy check' : 'Deploy'} still running after ${elapsed}${retry}...`);
     }
-  }, DEPLOY_HEARTBEAT_MS);
+  }, deployHeartbeatMs());
 
   return () => clearInterval(timer);
+}
+
+function deployHeartbeatMs(): number {
+  const raw = process.env.SOMEWHERE_DEPLOY_HEARTBEAT_MS;
+  if (!raw) return DEPLOY_HEARTBEAT_MS;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : DEPLOY_HEARTBEAT_MS;
 }
 
 function formatDeployElapsed(ms: number): string {
