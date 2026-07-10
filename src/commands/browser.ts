@@ -100,7 +100,10 @@ export function buildBrowserBody(
   const body: Record<string, unknown> = {};
 
   const url = opts.url ?? (looksLikeUrl(target) ? target : undefined);
-  const project = opts.project ?? (!looksLikeUrl(target) ? target : undefined) ?? linkedProject;
+  // A URL is an explicit EYES-mode target. Do not let an unrelated linked
+  // project silently turn it into origin-locked VERIFY mode. An explicit
+  // --project still wins when the caller intentionally supplies both.
+  const project = opts.project ?? (url ? undefined : target ?? linkedProject);
   if (url) body.url = url;
   if (project) body.project_id = project;
 
@@ -136,6 +139,12 @@ export function browserExitCode(r: BrowserResult): number {
   if ((r.failed_requests?.length ?? 0) > 0) return 1;
   if ((r.page_errors?.length ?? 0) > 0) return 1;
   return 0;
+}
+
+/** Make the response verdict agree with the command's health/exit contract. */
+export function normalizeBrowserVerdict(r: BrowserResult): BrowserResult {
+  if (browserExitCode(r) === 0 || r.passed === false) return r;
+  return { ...r, passed: false };
 }
 
 function signalText(e: unknown): string {
@@ -345,6 +354,8 @@ export function registerBrowser(program: Command) {
         }
         process.exit(1);
       }
+
+      r = normalizeBrowserVerdict(r);
 
       if (opts.json) {
         console.log(JSON.stringify(r, null, 2));

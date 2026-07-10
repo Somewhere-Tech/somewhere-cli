@@ -133,6 +133,52 @@ test('deploy --json emits only the raw deploy response object', async () => {
   });
 });
 
+test('browser --json reports an unhealthy linked-directory URL as EYES passed:false', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-browser-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-json-browser-fixture-'));
+  writeConfig(HOME);
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_linked_browser',
+    name: 'linked-browser',
+    subdomain: 'linked-browser',
+  }) + '\n');
+  let browserBody = null;
+
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/browser/test') {
+        browserBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            passed: true,
+            final_url: 'https://third-party.test/missing',
+            console_errors: ['resource failed'],
+            page_errors: [],
+            failed_requests: [{ status: 404, url: 'https://third-party.test/missing.js' }],
+          },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['browser', 'https://third-party.test/missing', '--json'], {
+      cwd: fixtureDir,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+
+    assert.equal(result.status, 1);
+    assert.equal(result.stderr, '');
+    assert.deepEqual(browserBody, { url: 'https://third-party.test/missing' });
+    const payload = JSON.parse(result.stdout);
+    assert.equal(payload.passed, false);
+    assert.equal(payload.failed_requests.length, 1);
+  });
+});
+
 test('logs --json emits JSONL and maps filters to /logs query params', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-logs-home-'));
   writeConfig(HOME);
