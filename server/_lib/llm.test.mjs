@@ -6,6 +6,7 @@ import {
   descriptionMatch,
   buildSummaryPrompt,
   summarize,
+  SUMMARY_MODEL,
 } from './llm.mjs';
 
 test('buildDescriptionMatchPrompt — fills the spec template', () => {
@@ -118,10 +119,12 @@ test('buildSummaryPrompt — includes author reputation + every signal', () => {
 test('summarize — returns narrative + match from parsed structured output', async () => {
   let seen;
   const sw = { ai: { chat: async (args) => { seen = args; return { parsed: { summary: 'Looks fine — reputable author.', match: true } }; } } };
-  const r = await summarize(sw, { package: 'p', version: '1', capabilities: [], mal: [] }, { provider: 'openai', model: 'gpt-5.4-mini' });
+  const r = await summarize(sw, { package: 'p', version: '1', capabilities: [], mal: [] });
   assert.equal(r.summary, 'Looks fine — reputable author.');
   assert.equal(r.description_match, 'match');
   assert.equal(seen.provider, 'openai');
+  assert.equal(SUMMARY_MODEL, 'gpt-5.6-luna');
+  assert.equal(seen.model, 'gpt-5.6-luna');
   assert.equal(seen.service_tier, 'flex', 'openai uses the flex tier');
   assert.ok(seen.response_schema, 'openai gets response_schema');
 });

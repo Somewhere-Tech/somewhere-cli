@@ -110,7 +110,7 @@ export async function descriptionMatch(sw, pkg, { provider = DEFAULT_PROVIDER, m
 // ---------------------------------------------------------------------------
 
 export const SUMMARY_PROVIDER = 'openai';
-export const SUMMARY_MODEL = 'gpt-5.4-mini';
+export const SUMMARY_MODEL = 'gpt-5.6-luna';
 
 const SUMMARY_SYSTEM =
   'You are a security-savvy engineer assessing an npm package for a developer about to install it. ' +
@@ -168,7 +168,7 @@ export function buildSummaryPrompt(s) {
 
 /** Generate the narrative + match for one package. Returns
  *  { summary, description_match } or null on failure (degrade, never block).
- *  Uses gpt-5.4-mini on the flex tier (~half price, fine for batch backfill). */
+ *  Uses gpt-5.6-luna on the flex tier (~half price, fine for batch backfill). */
 export async function summarize(sw, signals, { provider = SUMMARY_PROVIDER, model = SUMMARY_MODEL, maxTokens = 600 } = {}) {
   const { system, user } = buildSummaryPrompt(signals);
   const req = { provider, model, system, messages: [{ role: 'user', content: user }], max_tokens: maxTokens };
