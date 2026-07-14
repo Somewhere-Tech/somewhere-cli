@@ -35,6 +35,13 @@ const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
 
     if (req.url === '/keys/cli-pair/refresh') {
+      if (mode === 'slow-refresh') {
+        setTimeout(() => {
+          res.statusCode = 503;
+          res.end(JSON.stringify({ ok: false, error: 'LATE', message: 'too late' }));
+        }, 200);
+        return;
+      }
       if (mode === 'bad-refresh') {
         res.statusCode = 401;
         res.end(JSON.stringify({ ok: false, error: 'INVALID_REFRESH_TOKEN', message: 'gone' }));
@@ -118,6 +125,20 @@ test('expired/revoked refresh token surfaces a clear re-login message', async ()
       err.code === 'SESSION_EXPIRED' &&
       /somewhere login/.test(err.message),
   );
+});
+
+test('a caller timeout also bounds the refresh request', async () => {
+  mode = 'slow-refresh';
+  requests.length = 0;
+  seedConfig('smt_old', 'smtr_old');
+
+  const client = new ApiClient('smt_old');
+  const startedAt = Date.now();
+  await assert.rejects(
+    () => client.call('GET', '/whoami', undefined, undefined, { timeoutMs: 50 }),
+    (err) => err instanceof CliApiError && err.code === 'TIMEOUT',
+  );
+  assert.ok(Date.now() - startedAt < 500, 'refresh must honor the caller timeout');
 });
 
 test.after(() => server.close());
