@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.24.0
+
+### Security
+
+- `tsk_f7ba3b57` — credential-at-rest hardening. Config is now written atomically at `0600` (a pre-existing world-readable `~/.somewhere/config.json` is tightened on every write, not just on create). `logout` now revokes the session server-side (best-effort) in addition to removing the local token.
+
+### Breaking
+
+- `tsk_f7ba3b57` — `auth set <token>` no longer accepts the token as a positional argument (it was visible in the process table to other local users). Provide the token via the `SOMEWHERE_TOKEN` environment variable or stdin: `printf %s "$TOKEN" | somewhere auth set`.
+
 ## 0.23.1
 
 ### Fixed
