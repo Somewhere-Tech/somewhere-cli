@@ -243,7 +243,7 @@ function wrap(text: string, width = 76): string[] {
 /** Full single-package output: the LLM narrative as the headline (when present),
  *  the checklist as the receipts, the GitHub link, and a state-specific footer
  *  (how to override on a stop; the malware warning + safe versions on a block). */
-export function renderVerdict(v: Verdict): string[] {
+export function renderVerdict(v: Verdict, npxCommand = `npx ${v.package}`): string[] {
   const out = [`${mark(v.verdict)} ${v.package}@${v.version}`];
 
   // The narrative is the judgment — show it first, in prose, so a glance decides.
@@ -266,7 +266,7 @@ export function renderVerdict(v: Verdict): string[] {
     }
     out.push(`  ${red('Confirmed malware. Do not install.')}`);
   } else if (action === 'stop') {
-    out.push(`  ${dim(`Run npx ${v.package} to proceed unverified.`)}`);
+    out.push(`  ${dim(`Run ${npxCommand} to proceed unverified.`)}`);
   }
   return out;
 }

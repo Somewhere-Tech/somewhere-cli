@@ -20,6 +20,56 @@ import type { Verdict } from './types.js';
 /** npm's own install aliases (including its built-in typo aliases). */
 const INSTALL_SUBS = new Set(['install', 'i', 'in', 'ins', 'add', 'ci', 'isntall']);
 
+/** Common npm config flags whose value may be a separate argv token. npm exposes
+ *  the complete schema through its private @npmcli/config package, which would be
+ *  too large and unstable to ship in this wrapper. Keep the global/path/network/
+ *  workspace flags that users realistically put before a command here; `--x=y`
+ *  forms need no entry because the value is already in the same token. */
+const NPM_VALUE_FLAGS = new Set([
+  '--audit-level',
+  '--auth-type',
+  '--before',
+  '--ca',
+  '--cache',
+  '--cafile',
+  '--cert',
+  '--cpu',
+  '--depth',
+  '--fetch-retries',
+  '--fetch-retry-factor',
+  '--fetch-retry-maxtimeout',
+  '--fetch-retry-mintimeout',
+  '--fetch-timeout',
+  '--globalconfig',
+  '--https-proxy',
+  '--include',
+  '--install-strategy',
+  '--key',
+  '--libc',
+  '--local-address',
+  '--location',
+  '--loglevel',
+  '--logs-dir',
+  '--maxsockets',
+  '--node-options',
+  '--noproxy',
+  '--omit',
+  '--otp',
+  '--prefix',
+  '--proxy',
+  '--registry',
+  '--replace-registry-host',
+  '--save-prefix',
+  '--scope',
+  '--script-shell',
+  '--tag',
+  '--userconfig',
+  '--workspace',
+  '-C',
+  '-L',
+  '-w',
+]);
+
 export interface SwpmOutcome {
   exitCode: number;
   action: 'ran' | 'blocked' | 'passthrough' | 'fallback';
@@ -28,6 +78,32 @@ export interface SwpmOutcome {
 interface PkgRef {
   package: string;
   version: string;
+}
+
+interface NpmPositional {
+  index: number;
+  value: string;
+}
+
+/** Return npm's positional tokens while consuming the separate values of the
+ *  common config flags above. This is enough to distinguish
+ *  `--prefix /x install evil` as command `install`, package `evil`. */
+function npmPositionals(args: string[]): NpmPositional[] {
+  const out: NpmPositional[] = [];
+  let positionalOnly = false;
+  for (let i = 0; i < args.length; i++) {
+    const value = args[i];
+    if (!positionalOnly && value === '--') {
+      positionalOnly = true;
+      continue;
+    }
+    if (!positionalOnly && value.startsWith('-')) {
+      if (!value.includes('=') && NPM_VALUE_FLAGS.has(value) && i + 1 < args.length) i++;
+      continue;
+    }
+    out.push({ index: i, value });
+  }
+  return out;
 }
 
 function alignVerdicts(toCheck: PkgRef[], verdicts: Verdict[]): Verdict[] {
@@ -49,13 +125,11 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   const enforce = deps.enforce ?? resolveEnforce(args);
   const clean = stripEnforceFlags(args);
 
-  // npm accepts config flags (and a `--` terminator) BEFORE the subcommand, so the
-  // command is the first non-flag token, not necessarily clean[0]. Keying off
-  // clean[0] let `swpm -g install evil` / `swpm -- install evil` skip the gate
-  // silently. (Residual: a value-flag whose value precedes the sub, e.g.
-  // `swpm --prefix /x install`, can still hide it — needs npm's flag schema.)
-  const subIdx = clean.findIndex((a) => !a.startsWith('-'));
-  const sub = subIdx === -1 ? undefined : clean[subIdx];
+  // npm accepts config flags (and a `--` terminator) before the subcommand. Parse
+  // their common separate-value forms so a flag value cannot hide an install.
+  const positionals = npmPositionals(clean);
+  const subIdx = positionals[0]?.index ?? -1;
+  const sub = positionals[0]?.value;
   if (!sub || !INSTALL_SUBS.has(sub)) {
     return { exitCode: await d.runReal('npm', clean), action: 'passthrough' };
   }
@@ -71,7 +145,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   };
   const causeOf = (err: unknown) => (err instanceof Error ? err.message : String(err));
 
-  const explicit = clean.slice(subIdx + 1).filter((a) => !a.startsWith('-'));
+  const explicit = positionals.slice(1).map((arg) => arg.value);
   let toCheck: PkgRef[] = [];
   let directCount = 0;
   try {

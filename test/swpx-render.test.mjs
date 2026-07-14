@@ -73,6 +73,14 @@ test('renderVerdict — flagged package: the red/yellow stands out, with the ove
   );
 });
 
+test('renderVerdict — override footer preserves the full npx invocation', () => {
+  const v = { package: 'lakebed', version: '1.0.0', verdict: 'unverified' };
+  assert.match(
+    lines(renderVerdict(v, 'npx lakebed login')),
+    /Run npx lakebed login to proceed unverified\.$/,
+  );
+});
+
 test('renderVerdict — blocked: advisory row + safe versions + malware footer', () => {
   const v = {
     package: '@ctrl/tinycolor',

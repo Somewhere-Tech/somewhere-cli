@@ -66,7 +66,7 @@ test('swpx — verified delegates to npx with original args', async () => {
   assert.equal(r.action, 'ran');
   assert.equal(r.exitCode, 0);
   assert.deepEqual(runReal.calls, [{ cmd: 'npx', args: ['create-next-app', 'my-app'] }]);
-  assert.match(cap.errText(), /^✓ create-next-app@15\.2\.0/);
+  assert.match(cap.errText(), /^✓ Verified — running npx create-next-app my-app\n✓ create-next-app@15\.2\.0/);
 });
 
 test('swpx — blocked refuses, never runs npx', async () => {
@@ -85,10 +85,10 @@ test('swpx — blocked refuses, never runs npx', async () => {
   assert.match(cap.errText(), /Confirmed malware\. Do not install\./);
 });
 
-test('swpx — unverified stops with evidence, never runs npx', async () => {
+test('swpx — unverified stops with evidence and preserves passthrough args in the npx hint', async () => {
   const cap = capture();
   const runReal = spyRun(0);
-  const r = await runSwpx(['foo'], {
+  const r = await runSwpx(['foo', 'login'], {
     ...cap,
     resolveVersion: async () => '2.1.0',
     getVerdict: async () => UNVERIFIED,
@@ -99,7 +99,7 @@ test('swpx — unverified stops with evidence, never runs npx', async () => {
   assert.equal(runReal.calls.length, 0);
   assert.match(cap.errText(), /⚠ foo@2\.1\.0/);
   assert.match(cap.errText(), /✖ Minified \(unreadable\)/);
-  assert.match(cap.errText(), /Run npx foo to proceed unverified\./);
+  assert.match(cap.errText(), /Run npx foo login to proceed unverified\./);
 });
 
 test('swpx — verdict unavailable falls back to npx (gate not wall)', async () => {
@@ -399,6 +399,24 @@ test('swpm — flags before the subcommand still gate (no silent passthrough)', 
   assert.equal(runReal.calls.length, 0); // did NOT silently passthrough to npm
 });
 
+test('swpm — a separate --prefix value before install cannot bypass the gate', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const resolved = [];
+  const r = await runSwpm(['--prefix', '/x', 'install', '@ctrl/tinycolor@4.1.1'], {
+    ...cap,
+    resolveVersion: async (name) => {
+      resolved.push(name);
+      return '4.1.1';
+    },
+    getVerdictBatch: async () => [BLOCKED],
+    runReal,
+  });
+  assert.deepEqual(resolved, ['@ctrl/tinycolor']);
+  assert.equal(r.action, 'blocked');
+  assert.equal(runReal.calls.length, 0);
+});
+
 test('swpx — an unrecognized verdict level stops, never runs', async () => {
   const cap = capture();
   const runReal = spyRun(0);
@@ -439,6 +457,26 @@ test('swpx — grades the --package value, not the positional command', async ()
     runReal,
   });
   assert.equal(graded, '@ctrl/tinycolor'); // graded the --package target, not "tinycolor"
+  assert.equal(r.action, 'blocked');
+  assert.equal(runReal.calls.length, 0);
+});
+
+test('swpx — grades every repeated --package value before running', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const graded = [];
+  const r = await runSwpx(['-p', 'safe-pkg@1', '--package=@ctrl/tinycolor@4.1.1', 'tool'], {
+    ...cap,
+    resolveVersion: async (name) => (name === 'safe-pkg' ? '1.0.0' : '4.1.1'),
+    getVerdict: async (name, version) => {
+      graded.push(name);
+      return name === 'safe-pkg'
+        ? { package: name, version, verdict: 'verified' }
+        : BLOCKED;
+    },
+    runReal,
+  });
+  assert.deepEqual(graded.sort(), ['@ctrl/tinycolor', 'safe-pkg']);
   assert.equal(r.action, 'blocked');
   assert.equal(runReal.calls.length, 0);
 });

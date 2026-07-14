@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { isNewer } from '../dist/lib/notify/providers/update.js';
-import { collectNotices } from '../dist/lib/notify/index.js';
+import { collectNotices, notificationsAllowed } from '../dist/lib/notify/index.js';
 
 test('isNewer — basic precedence', () => {
   assert.equal(isNewer('1.0.1', '1.0.0'), true);
@@ -32,4 +32,9 @@ test('collectNotices — central gate: silent on non-interactive output', async 
   // — this is the contract that keeps notices out of agent/piped/safety output.
   const out = await collectNotices(['node', 'sw', 'whoami']);
   assert.deepEqual(out, []);
+});
+
+test('notificationsAllowed — update is silent even on an interactive terminal', () => {
+  assert.equal(notificationsAllowed(['node', 'somewhere', 'update'], true, {}), false);
+  assert.equal(notificationsAllowed(['node', 'somewhere', 'status'], true, {}), true);
 });
