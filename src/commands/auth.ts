@@ -1,4 +1,6 @@
 import { Command } from 'commander';
+import { readFileSync } from 'node:fs';
+import prompts from 'prompts';
 import open from '../lib/open.js';
 import ora, { type Ora } from '../lib/spinner.js';
 import { browserLogin } from '../lib/auth.js';
@@ -15,7 +17,23 @@ import {
   saveGlobalMcpConfig,
 } from '../lib/config.js';
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
-import { dim, error, info, printJson, success, teal } from '../lib/output.js';
+import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+
+async function readAuthToken(): Promise<string> {
+  const envToken = process.env.SOMEWHERE_TOKEN?.trim();
+  if (envToken) return envToken;
+
+  if (!process.stdin.isTTY) {
+    return readFileSync(0, 'utf8').trim();
+  }
+
+  const response = await prompts({
+    type: 'password',
+    name: 'token',
+    message: 'Token',
+  });
+  return typeof response.token === 'string' ? response.token.trim() : '';
+}
 
 async function loginAction(opts: { legacy?: boolean }): Promise<void> {
   if (opts.legacy) {
@@ -34,9 +52,39 @@ export function registerAuth(program: Command) {
 
   program
     .command('logout')
-    .description('Remove stored credentials')
-    .action(() => {
-      clearConfig();
+    .description('Revoke and remove stored credentials')
+    .action(async () => {
+      const config = loadConfig();
+      const clearOnInterrupt = () => {
+        try {
+          clearConfig();
+        } finally {
+          process.exit(130);
+        }
+      };
+      const clearOnTermination = () => {
+        try {
+          clearConfig();
+        } finally {
+          process.exit(143);
+        }
+      };
+      process.once('SIGINT', clearOnInterrupt);
+      process.once('SIGTERM', clearOnTermination);
+      try {
+        if (config) {
+          const client = new ApiClient(config.token);
+          await client.call('POST', '/auth/cli-logout', {
+            refresh_token: config.refresh_token,
+          }, undefined, { timeoutMs: 5_000 });
+        }
+      } catch {
+        warn('Server revocation could not be confirmed; local credentials will still be removed.');
+      } finally {
+        process.off('SIGINT', clearOnInterrupt);
+        process.off('SIGTERM', clearOnTermination);
+        clearConfig();
+      }
       success('Logged out. Token removed from ~/.somewhere/config.json');
     });
 
@@ -102,11 +150,17 @@ export function registerAuth(program: Command) {
     .action(loginAction);
 
   auth
-    .command('set <token>')
-    .description('Save an smt_ token directly (no browser flow)')
-    .action(async (token: string) => {
+    .command('set')
+    .description('Save an smt_ token from SOMEWHERE_TOKEN or stdin (no browser flow)')
+    .allowExcessArguments(false)
+    .showHelpAfterError(
+      'Do not pass tokens as arguments: they are visible in the process table. ' +
+      'Use `printf %s "$SOMEWHERE_TOKEN" | somewhere auth set` or set SOMEWHERE_TOKEN.',
+    )
+    .action(async () => {
+      const token = await readAuthToken();
       if (!token.startsWith('smt_')) {
-        error('Token must start with smt_');
+        error('Token must be provided via SOMEWHERE_TOKEN or stdin and start with smt_');
         process.exit(1);
       }
       // Verify the token works before persisting it.

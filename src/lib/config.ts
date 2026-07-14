@@ -1,4 +1,17 @@
-import { existsSync, mkdirSync, readFileSync, writeFileSync, unlinkSync } from 'node:fs';
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
@@ -10,7 +23,10 @@ const CLAUDE_CONFIG_PATH = join(homedir(), '.claude.json');
 const PROJECT_FILE = '.somewhere.json';
 
 function ensureDir() {
-  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true });
+  if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
+  // mkdir/write modes are creation-only. Tighten an existing directory before
+  // placing credentials inside it so another local user cannot traverse it.
+  chmodSync(CONFIG_DIR, 0o700);
 }
 
 export function loadConfig(): CliConfig | null {
@@ -24,7 +40,27 @@ export function loadConfig(): CliConfig | null {
 
 export function saveConfig(config: CliConfig): void {
   ensureDir();
-  writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n', { mode: 0o600 });
+  const tempPath = join(CONFIG_DIR, `.config-${randomUUID()}.tmp`);
+  let fd: number | null = null;
+  try {
+    // Replacing the inode avoids exposing new credentials through an already-
+    // open descriptor to a loose old file and never follows config.json links.
+    fd = openSync(
+      tempPath,
+      constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
+      0o600,
+    );
+    writeFileSync(fd, JSON.stringify(config, null, 2) + '\n');
+    fchmodSync(fd, 0o600);
+    closeSync(fd);
+    fd = null;
+    renameSync(tempPath, CONFIG_PATH);
+    chmodSync(CONFIG_PATH, 0o600);
+    chmodSync(CONFIG_DIR, 0o700);
+  } finally {
+    if (fd !== null) closeSync(fd);
+    if (existsSync(tempPath)) unlinkSync(tempPath);
+  }
 }
 
 export function clearConfig(): void {

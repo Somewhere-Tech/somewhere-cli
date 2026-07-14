@@ -66,7 +66,7 @@ export class ApiClient {
       return await this.request<T>(method, path, body, query, opts);
     } catch (err) {
       if (!(err instanceof CliApiError) || err.code !== 'API_KEY_EXPIRED') throw err;
-      const refreshed = await this.refreshAccessKey();
+      const refreshed = await this.refreshAccessKey(opts?.timeoutMs);
       // refreshAccessKey now THROWS a clear re-login error when it can't refresh
       // (no refresh token, or a dead one); a false return is only the rare
       // malformed-refresh-response case, where the original expired-key error is
@@ -86,7 +86,7 @@ export class ApiClient {
    *  the fix instead of seeing a bare expired-key 401. Returns false only for a
    *  malformed refresh response, where the caller surfaces the original
    *  API_KEY_EXPIRED. */
-  private async refreshAccessKey(): Promise<boolean> {
+  private async refreshAccessKey(timeoutMs?: number): Promise<boolean> {
     const config = loadConfig();
     const refreshToken = config?.refresh_token;
     if (!refreshToken) {
@@ -114,6 +114,8 @@ export class ApiClient {
         'POST',
         '/keys/cli-pair/refresh',
         { refresh_token: refreshToken },
+        undefined,
+        timeoutMs === undefined ? undefined : { timeoutMs },
       );
     } catch (err) {
       if (err instanceof CliApiError && err.code === 'INVALID_REFRESH_TOKEN') {
