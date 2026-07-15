@@ -94,23 +94,31 @@ function runPinnedNpm(
   });
 }
 
-/** Real installer used by production and the isolated positive test. It first
- * validates the authenticated shrinkwrap, then makes npm prove the locked graph
- * with an ignore-scripts `npm ci`, and only then performs the global install. */
+/** Real installer used by production and the isolated positive test. The
+ * authenticated tarball contains its entire locked production closure, so the
+ * final install can consume those same bytes with networking disabled. */
 export async function installVerifiedTarball(
   tarballPath: string,
   tempDir: string,
   release: OfficialRelease,
 ): Promise<void> {
-  const packageDir = join(tempDir, 'locked-package');
+  const packageDir = join(tempDir, 'authenticated-package');
+  const cacheDir = join(tempDir, 'empty-cache');
   const userConfigPath = join(tempDir, 'user-npmrc');
   const globalConfigPath = join(tempDir, 'global-npmrc');
   writeFileSync(userConfigPath, '', { mode: 0o600 });
   writeFileSync(globalConfigPath, '', { mode: 0o600 });
 
   await verifyLockedArtifact(tarballPath, packageDir, release);
-  runPinnedNpm(['ci', '--omit=dev'], packageDir, userConfigPath, globalConfigPath);
-  runPinnedNpm(['install', '--global', tarballPath], tempDir, userConfigPath, globalConfigPath);
+  // Do not trust a path merely because it was verified earlier. Re-hash the
+  // private on-disk artifact immediately before handing that same path to npm.
+  verifyTarballIntegrity(readFileSync(tarballPath), release.integrity);
+  runPinnedNpm(
+    ['install', '--global', '--offline', `--cache=${cacheDir}`, tarballPath],
+    tempDir,
+    userConfigPath,
+    globalConfigPath,
+  );
 }
 
 async function fetchJson(fetchImpl: FetchUpdate, url: string, label: string): Promise<unknown> {

@@ -13,7 +13,7 @@ const IN_TOTO_STATEMENT = 'https://in-toto.io/Statement/v1';
 const GITHUB_WORKFLOW_BUILD_TYPE = 'https://slsa-framework.github.io/github-actions-buildtypes/workflow/v1';
 const GITHUB_HOSTED_BUILDER = 'https://github.com/actions/runner/github-hosted';
 const GITHUB_ACTIONS_ISSUER = 'https://token.actions.githubusercontent.com';
-const SIGSTORE_NODE_RANGE = '^20.17.0 || >=22.9.0';
+const SIGSTORE_NODE_RANGE = '>=22.19.0';
 const MAX_LOCKFILE_BYTES = 5 * 1024 * 1024;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const GITHUB_REPOSITORY_ID = '1209689641';
@@ -166,7 +166,7 @@ function findSlsaBundle(body: unknown): { bundle: SigstoreBundle; envelope: Obje
 export function assertUpdateVerificationRuntime(nodeVersion = process.versions.node): void {
   if (!semver.satisfies(nodeVersion, SIGSTORE_NODE_RANGE)) {
     throw new Error(
-      `Update verification needs Node 20.17+ or Node 22.9+; current runtime is Node ${nodeVersion}. ` +
+      `Update verification needs Node 22.19+; current runtime is Node ${nodeVersion}. ` +
       'Please upgrade Node, then re-run `somewhere update`',
     );
   }
@@ -274,6 +274,17 @@ function sameStringMap(left: Record<string, string>, right: Record<string, strin
   return JSON.stringify(normalize(left)) === JSON.stringify(normalize(right));
 }
 
+function stringArray(value: unknown, label: string): string[] {
+  if (!Array.isArray(value) || value.some((entry) => typeof entry !== 'string')) {
+    throw new Error(`the verified artifact has an invalid ${label}`);
+  }
+  return value;
+}
+
+function sameStringSet(left: string[], right: string[]): boolean {
+  return JSON.stringify([...new Set(left)].sort()) === JSON.stringify([...new Set(right)].sort());
+}
+
 function verifyOfficialDependencySource(resolved: string, integrity: string): void {
   let url: URL;
   try {
@@ -292,10 +303,91 @@ function verifyOfficialDependencySource(resolved: string, integrity: string): vo
   sha512Digest(integrity);
 }
 
+function expectedPackageName(lockPath: string): string {
+  const marker = 'node_modules/';
+  const index = lockPath.lastIndexOf(marker);
+  const name = index === -1 ? '' : lockPath.slice(index + marker.length);
+  if (!/^(?:@[^/]+\/[^/]+|[^/]+)$/.test(name)) {
+    throw new Error(`the authenticated dependency lock has an invalid package path: ${lockPath}`);
+  }
+  return name;
+}
+
+function resolveLockedDependency(
+  packages: ObjectMap,
+  parentPath: string,
+  dependency: string,
+): { path: string; entry: ObjectMap } | undefined {
+  let base = parentPath;
+  while (true) {
+    const candidate = base ? `${base}/node_modules/${dependency}` : `node_modules/${dependency}`;
+    const entry = packages[candidate];
+    if (isObject(entry) && entry.dev !== true) return { path: candidate, entry };
+    const parentMarker = base.lastIndexOf('/node_modules/');
+    if (parentMarker === -1) {
+      if (base === '') return undefined;
+      base = '';
+    } else {
+      base = base.slice(0, parentMarker);
+    }
+  }
+}
+
+function installedDependencyMap(entry: ObjectMap): Record<string, string> {
+  const dependencies = stringMap(entry.dependencies, 'dependency map');
+  const optional = stringMap(entry.optionalDependencies, 'optional dependency map');
+  const peers = stringMap(entry.peerDependencies, 'peer dependency map');
+  const peerMeta = isObject(entry.peerDependenciesMeta) ? entry.peerDependenciesMeta : {};
+  for (const peer of Object.keys(peers)) {
+    const meta = peerMeta[peer];
+    if (isObject(meta) && meta.optional === true) delete peers[peer];
+  }
+  return { ...dependencies, ...optional, ...peers };
+}
+
+function verifyReachableClosure(packages: ObjectMap, root: ObjectMap): void {
+  const productionPaths = Object.entries(packages)
+    .filter(([path, entry]) => path !== '' && isObject(entry) && entry.dev !== true)
+    .map(([path]) => path);
+  const queue: Array<{ path: string; entry: ObjectMap }> = [];
+  const visited = new Set<string>();
+
+  for (const dependency of Object.keys(installedDependencyMap(root))) {
+    const resolved = resolveLockedDependency(packages, '', dependency);
+    if (!resolved) throw new Error(`the authenticated dependency lock omits ${dependency}`);
+    queue.push(resolved);
+  }
+
+  while (queue.length > 0) {
+    const current = queue.shift();
+    if (!current || visited.has(current.path)) continue;
+    visited.add(current.path);
+    for (const [dependency, range] of Object.entries(installedDependencyMap(current.entry))) {
+      const resolved = resolveLockedDependency(packages, current.path, dependency);
+      if (!resolved) {
+        throw new Error(`the authenticated dependency lock omits ${dependency} required by ${current.path}`);
+      }
+      const resolvedVersion = resolved.entry.version;
+      const validRange = semver.validRange(range);
+      if (
+        validRange &&
+        (typeof resolvedVersion !== 'string' || !semver.satisfies(resolvedVersion, validRange, { includePrerelease: true }))
+      ) {
+        throw new Error(`the authenticated dependency lock substitutes ${dependency} required by ${current.path}`);
+      }
+      queue.push(resolved);
+    }
+  }
+
+  const unreachable = productionPaths.filter((path) => !visited.has(path));
+  if (unreachable.length > 0) {
+    throw new Error(`the authenticated dependency lock contains an unreachable package: ${unreachable[0]}`);
+  }
+}
+
 /** Validate the publishable lock carried inside the authenticated tarball.
- * npm ci below provides the graph-consistency check; this preflight guarantees
- * every production package npm may fetch is pinned to the official registry by
- * a sha512 digest before npm sees the archive. */
+ * Every reachable production package must be integrity-pinned and marked as
+ * bundled, so the final install never needs registry resolution. */
 export function validateLockedClosure(
   manifestValue: unknown,
   lockValue: unknown,
@@ -316,12 +408,24 @@ export function validateLockedClosure(
     throw new Error('the authenticated dependency lock has no matching root package');
   }
   const manifestDependencies = stringMap(manifestValue.dependencies, 'package dependency map');
+  const manifestOptional = stringMap(manifestValue.optionalDependencies, 'package optional dependency map');
   const lockedDependencies = stringMap(root.dependencies, 'root dependency lock');
-  if (!sameStringMap(manifestDependencies, lockedDependencies)) {
+  const lockedOptional = stringMap(root.optionalDependencies, 'root optional dependency lock');
+  if (
+    !sameStringMap(manifestDependencies, lockedDependencies) ||
+    !sameStringMap(manifestOptional, lockedOptional)
+  ) {
     throw new Error('the authenticated dependency lock does not match package.json');
   }
 
-  for (const dependency of Object.keys(manifestDependencies)) {
+  const directDependencies = Object.keys({ ...manifestDependencies, ...manifestOptional });
+  const manifestBundles = stringArray(manifestValue.bundledDependencies, 'bundled dependency list');
+  const lockedBundles = stringArray(root.bundleDependencies, 'root bundled dependency lock');
+  if (!sameStringSet(manifestBundles, directDependencies) || !sameStringSet(lockedBundles, directDependencies)) {
+    throw new Error('the verified artifact does not bundle every direct production dependency');
+  }
+
+  for (const dependency of directDependencies) {
     const direct = lockValue.packages[`node_modules/${dependency}`];
     if (!isObject(direct) || direct.dev === true) {
       throw new Error(`the authenticated dependency lock omits ${dependency}`);
@@ -342,12 +446,35 @@ export function validateLockedClosure(
     ) {
       throw new Error(`the authenticated dependency lock leaves ${path} unpinned`);
     }
+    if (entryValue.inBundle !== true) {
+      throw new Error(`the authenticated dependency lock leaves ${path} outside the signed artifact`);
+    }
     verifyOfficialDependencySource(entryValue.resolved, entryValue.integrity);
   }
+  verifyReachableClosure(lockValue.packages, root);
 }
 
-/** Extract only the manifest + shrinkwrap from an already hash-verified tarball
- * and validate its authenticated dependency closure. */
+function bundledManifestLockPath(tarPath: string): string | undefined {
+  const prefix = 'package/';
+  const suffix = '/package.json';
+  if (!tarPath.startsWith(prefix) || !tarPath.endsWith(suffix)) return undefined;
+  const directory = tarPath.slice(prefix.length, -suffix.length);
+  if (!directory.startsWith('node_modules/')) return undefined;
+  const parts = directory.split('/');
+  let index = 0;
+  while (index < parts.length) {
+    if (parts[index] !== 'node_modules') return undefined;
+    index += 1;
+    if (index >= parts.length) return undefined;
+    if (parts[index].startsWith('@')) index += 2;
+    else index += 1;
+  }
+  return index === parts.length ? directory : undefined;
+}
+
+/** Validate the shrinkwrap and every bundled package manifest from an already
+ * hash-verified tarball. The tarball digest authenticates both the lock's
+ * integrity pins and the exact bundled bytes installed later. */
 export async function verifyLockedArtifact(
   tarballPath: string,
   extractionDir: string,
@@ -388,4 +515,56 @@ export async function verifyLockedArtifact(
     throw new Error(`the verified artifact has no readable npm-shrinkwrap dependency lock: ${message(cause)}`);
   }
   validateLockedClosure(manifest, lock, release);
+
+  if (!isObject(lock) || !isObject(lock.packages)) {
+    throw new Error('the verified artifact has no usable dependency lock');
+  }
+  const expectedBundles = new Map<string, ObjectMap>();
+  for (const [lockPath, entry] of Object.entries(lock.packages)) {
+    if (lockPath !== '' && isObject(entry) && entry.dev !== true) expectedBundles.set(lockPath, entry);
+  }
+
+  const seenBundles = new Set<string>();
+  await extractTar({
+    file: tarballPath,
+    cwd: extractionDir,
+    strip: 1,
+    strict: true,
+    filter: (tarPath, entry) => {
+      const lockPath = bundledManifestLockPath(tarPath);
+      if (!lockPath) return false;
+      const expected = expectedBundles.get(lockPath);
+      if (!expected) throw new Error(`the verified artifact bundles an unexpected dependency: ${lockPath}`);
+      const type = 'type' in entry ? entry.type : entry.isFile() ? 'File' : 'Unsupported';
+      if (
+        (type !== 'File' && type !== 'OldFile') ||
+        entry.size > MAX_MANIFEST_BYTES ||
+        seenBundles.has(lockPath)
+      ) {
+        throw new Error(`the verified artifact has an unsafe ${tarPath} entry`);
+      }
+      seenBundles.add(lockPath);
+      return true;
+    },
+  });
+
+  for (const [lockPath, entry] of expectedBundles) {
+    if (!seenBundles.has(lockPath)) {
+      throw new Error(`the verified artifact omits bundled dependency ${lockPath}`);
+    }
+    let bundledManifest: unknown;
+    try {
+      const bundledPath = join(extractionDir, ...lockPath.split('/'), 'package.json');
+      bundledManifest = JSON.parse(readFileSync(bundledPath, 'utf8')) as unknown;
+    } catch (cause) {
+      throw new Error(`the verified artifact has an unreadable bundled dependency ${lockPath}: ${message(cause)}`);
+    }
+    if (
+      !isObject(bundledManifest) ||
+      bundledManifest.name !== expectedPackageName(lockPath) ||
+      bundledManifest.version !== entry.version
+    ) {
+      throw new Error(`the bundled dependency ${lockPath} does not match the authenticated lock`);
+    }
+  }
 }

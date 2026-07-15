@@ -3,6 +3,8 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  copyFileSync,
+  cpSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -12,8 +14,13 @@ import {
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import test from 'node:test';
+import semver from 'semver';
 import { installVerifiedTarball, runUpdate } from '../dist/commands/update.js';
-import { validateLockedClosure, verifyPublishedProvenance } from '../dist/lib/update-security.js';
+import {
+  validateLockedClosure,
+  verifyLockedArtifact,
+  verifyPublishedProvenance,
+} from '../dist/lib/update-security.js';
 
 const PACKAGE = '@somewhere-tech/cli';
 const REGISTRY = 'https://registry.npmjs.org';
@@ -171,7 +178,7 @@ test('unsupported Node refuses clearly before tarball download or install', asyn
         tarballUrl: releaseMetadata.versions[version].dist.tarball,
         attestationUrl,
       }),
-      /Update verification needs Node 20\.17\+ or Node 22\.9\+.*Please upgrade Node, then re-run `somewhere update`/,
+      /Update verification needs Node 22\.19\+.*Please upgrade Node, then re-run `somewhere update`/,
     );
 
     const code = await runUpdate({}, {
@@ -241,17 +248,28 @@ test('authenticated dependency closure rejects unpinned and non-official package
     tarballUrl: `${REGISTRY}/@somewhere-tech/cli/-/cli-${version}.tgz`,
     attestationUrl: `${REGISTRY}/-/npm/v1/attestations/@somewhere-tech%2fcli@${version}`,
   };
-  const manifest = { name: PACKAGE, version, dependencies: { kleur: '4.1.5' } };
+  const manifest = {
+    name: PACKAGE,
+    version,
+    dependencies: { kleur: '4.1.5' },
+    bundledDependencies: ['kleur'],
+  };
   const lock = {
     name: PACKAGE,
     version,
     lockfileVersion: 3,
     packages: {
-      '': { name: PACKAGE, version, dependencies: { kleur: '4.1.5' } },
+      '': {
+        name: PACKAGE,
+        version,
+        dependencies: { kleur: '4.1.5' },
+        bundleDependencies: ['kleur'],
+      },
       'node_modules/kleur': {
         version: '4.1.5',
         resolved: `${REGISTRY}/kleur/-/kleur-4.1.5.tgz`,
         integrity: integrity(Buffer.from('kleur fixture')),
+        inBundle: true,
       },
     },
   };
@@ -271,19 +289,53 @@ test('authenticated dependency closure rejects unpinned and non-official package
   );
 });
 
-test('the release artifact declares and validates its authenticated dependency lock', () => {
+test('the release artifact bundles its complete authenticated dependency lock', async () => {
   const manifest = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8'));
   const lock = JSON.parse(readFileSync(new URL('../npm-shrinkwrap.json', import.meta.url), 'utf8'));
   assert.equal(manifest.files.includes('npm-shrinkwrap.json'), true);
-  validateLockedClosure(manifest, lock, {
-    version: manifest.version,
-    integrity: integrity(Buffer.from('packaging gate')),
-    tarballUrl: `${REGISTRY}/@somewhere-tech/cli/-/cli-${manifest.version}.tgz`,
-    attestationUrl: `${REGISTRY}/-/npm/v1/attestations/@somewhere-tech%2fcli@${manifest.version}`,
-  });
+  const root = mkdtempSync(join(tmpdir(), 'somewhere-packaging-test-'));
+  const prefix = join(root, 'prefix');
+  const operationDir = join(root, 'operation');
+  const previousPrefix = process.env.NPM_CONFIG_PREFIX;
+  const previousRegistry = process.env.NPM_CONFIG_REGISTRY;
+  try {
+    const packed = JSON.parse(execFileSync(
+      'npm',
+      ['pack', '--ignore-scripts', '--json', `--pack-destination=${root}`],
+      { cwd: new URL('..', import.meta.url), encoding: 'utf8' },
+    ));
+    const tarballPath = join(root, packed[0].filename);
+    const productionNames = new Set(Object.entries(lock.packages)
+      .filter(([path, entry]) => path !== '' && entry.dev !== true)
+      .map(([path]) => path.match(/node_modules\/(?:@[^/]+\/[^/]+|[^/]+)$/)?.[0].slice('node_modules/'.length)));
+    productionNames.delete(undefined);
+    assert.deepEqual(new Set(packed[0].bundled), productionNames);
+    mkdirSync(operationDir);
+    process.env.NPM_CONFIG_PREFIX = prefix;
+    process.env.NPM_CONFIG_REGISTRY = 'http://127.0.0.1:48731/';
+    await installVerifiedTarball(tarballPath, operationDir, {
+      version: manifest.version,
+      integrity: integrity(readFileSync(tarballPath)),
+      tarballUrl: `${REGISTRY}/@somewhere-tech/cli/-/cli-${manifest.version}.tgz`,
+      attestationUrl: `${REGISTRY}/-/npm/v1/attestations/@somewhere-tech%2fcli@${manifest.version}`,
+    });
+    const installedManifest = JSON.parse(readFileSync(
+      join(prefix, 'lib', 'node_modules', PACKAGE, 'package.json'),
+      'utf8',
+    ));
+    assert.equal(installedManifest.version, manifest.version);
+    assert.match(
+      execFileSync(join(prefix, 'bin', 'somewhere'), ['--version'], { encoding: 'utf8' }),
+      new RegExp(manifest.version.replaceAll('.', '\\.')),
+    );
+  } finally {
+    restoreEnvironment('NPM_CONFIG_PREFIX', previousPrefix);
+    restoreEnvironment('NPM_CONFIG_REGISTRY', previousRegistry);
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
-test('real isolated installer installs and executes an integrity-locked dependency closure', async () => {
+test('real isolated install rejects substitution/TOCTOU and executes only the signed closure', async () => {
   const root = mkdtempSync(join(tmpdir(), 'somewhere-update-test-'));
   const fixtureDir = join(root, 'fixture');
   const binDir = join(fixtureDir, 'bin');
@@ -302,6 +354,18 @@ test('real isolated installer installs and executes an integrity-locked dependen
     return [path, entry];
   }));
   const promptsVersion = lockedClosure['node_modules/prompts'].version;
+  const pinnedSemver = {
+    version: '7.6.3',
+    resolved: `${REGISTRY}/semver/-/semver-7.6.3.tgz`,
+    integrity: 'sha512-oVekP1cKtI+CTDvHWYFUcMtsK/00wmAEfyqKfNdARm8u1wNVhSgaX7A8d4UuIlUI5e84iEwOhs7ZPYRmzU9U6A==',
+    inBundle: true,
+    license: 'ISC',
+    bin: { semver: 'bin/semver.js' },
+    engines: { node: '>=10' },
+  };
+  const newerSemver = repositoryLock.packages['node_modules/semver'].version;
+  assert.equal(semver.gt(newerSemver, pinnedSemver.version), true);
+  assert.equal(semver.satisfies(newerSemver, '^7.6.0'), true);
 
   mkdirSync(binDir, { recursive: true });
   mkdirSync(operationDir, { recursive: true });
@@ -311,7 +375,8 @@ test('real isolated installer installs and executes an integrity-locked dependen
     type: 'module',
     bin: { somewhere: 'bin/somewhere.js' },
     files: ['bin', 'npm-shrinkwrap.json'],
-    dependencies: { prompts: promptsVersion },
+    dependencies: { prompts: promptsVersion, semver: '^7.6.0' },
+    bundledDependencies: ['prompts', 'semver'],
     scripts: {
       preinstall: 'node -e "process.exit(93)"',
       postinstall: 'node -e "process.exit(94)"',
@@ -327,9 +392,11 @@ test('real isolated installer installs and executes an integrity-locked dependen
         name: PACKAGE,
         version,
         bin: { somewhere: 'bin/somewhere.js' },
-        dependencies: { prompts: promptsVersion },
+        dependencies: { prompts: promptsVersion, semver: '^7.6.0' },
+        bundleDependencies: ['prompts', 'semver'],
       },
       ...lockedClosure,
+      'node_modules/semver': pinnedSemver,
     },
   };
   writeFileSync(join(fixtureDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
@@ -338,23 +405,60 @@ test('real isolated installer installs and executes an integrity-locked dependen
   writeFileSync(
     binPath,
     '#!/usr/bin/env node\nimport prompts from "prompts";\n' +
+      'import { createRequire } from "node:module";\n' +
       'if (typeof prompts !== "function") process.exit(95);\n' +
+      'const require = createRequire(import.meta.url);\n' +
+      'if (require("semver/package.json").version !== "7.6.3") process.exit(96);\n' +
       'console.log("fixture dependency closure executed");\n',
   );
   chmodSync(binPath, 0o755);
 
   try {
-    const packed = JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json'], {
+    execFileSync('npm', ['ci', '--ignore-scripts', '--audit=false', '--fund=false'], {
+      cwd: fixtureDir,
+      stdio: 'inherit',
+    });
+    const packFixture = () => JSON.parse(execFileSync('npm', ['pack', '--ignore-scripts', '--json'], {
       cwd: fixtureDir,
       encoding: 'utf8',
     }));
-    const tarballPath = join(fixtureDir, packed[0].filename);
+    const packed = packFixture();
+    const packedPath = join(fixtureDir, packed[0].filename);
+    const tarballPath = join(root, 'authenticated-cli.tgz');
+    copyFileSync(packedPath, tarballPath);
     const release = {
       version,
       integrity: integrity(readFileSync(tarballPath)),
       tarballUrl: `${REGISTRY}/@somewhere-tech/cli/-/cli-${version}.tgz`,
       attestationUrl: `${REGISTRY}/-/npm/v1/attestations/@somewhere-tech%2fcli@${version}`,
     };
+
+    writeFileSync(binPath, `${readFileSync(binPath, 'utf8')}// swapped after verification\n`);
+    const swappedPack = packFixture();
+    const swappedPath = join(fixtureDir, swappedPack[0].filename);
+    mkdirSync(join(root, 'swapped-operation'));
+    await assert.rejects(
+      installVerifiedTarball(swappedPath, join(root, 'swapped-operation'), release),
+      /downloaded update does not match its published integrity digest/,
+    );
+
+    const poisonDir = join(root, 'poisoned-transitive');
+    mkdirSync(poisonDir);
+    execFileSync(
+      'npm',
+      ['install', '--ignore-scripts', '--audit=false', '--fund=false', '--no-save', 'kleur@4.1.5'],
+      { cwd: poisonDir, stdio: 'inherit' },
+    );
+    rmSync(join(fixtureDir, 'node_modules', 'kleur'), { recursive: true, force: true });
+    cpSync(join(poisonDir, 'node_modules', 'kleur'), join(fixtureDir, 'node_modules', 'kleur'), {
+      recursive: true,
+    });
+    const substitutedPack = packFixture();
+    const substitutedPath = join(fixtureDir, substitutedPack[0].filename);
+    await assert.rejects(
+      verifyLockedArtifact(substitutedPath, join(root, 'substituted-operation'), release),
+      /does not match the authenticated lock/,
+    );
 
     process.env.NPM_CONFIG_PREFIX = prefix;
     process.env.NPM_CONFIG_REGISTRY = 'http://127.0.0.1:48731/';
@@ -367,12 +471,13 @@ test('real isolated installer installs and executes an integrity-locked dependen
       'utf8',
     ));
     assert.equal(installedManifest.version, version);
-    for (const dependency of ['prompts', 'kleur', 'sisteransi']) {
+    for (const dependency of ['prompts', 'kleur', 'sisteransi', 'semver']) {
       const installedDependency = JSON.parse(readFileSync(
         join(prefix, 'lib', 'node_modules', PACKAGE, 'node_modules', dependency, 'package.json'),
         'utf8',
       ));
       assert.equal(typeof installedDependency.version, 'string');
+      if (dependency === 'semver') assert.equal(installedDependency.version, pinnedSemver.version);
     }
     const output = execFileSync(join(prefix, 'bin', 'somewhere'), [], { encoding: 'utf8' });
     assert.match(output, /fixture dependency closure executed/);

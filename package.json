@@ -44,7 +44,7 @@
     "test:e2e-local": "node scripts/e2e-local.mjs"
   },
   "engines": {
-    "node": "^20.17.0 || >=22.9.0"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -56,6 +56,16 @@
     "tar": "7.5.20",
     "undici": "^8.4.1"
   },
+  "bundledDependencies": [
+    "@modelcontextprotocol/sdk",
+    "chokidar",
+    "commander",
+    "prompts",
+    "semver",
+    "sigstore",
+    "tar",
+    "undici"
+  ],
   "devDependencies": {
     "@types/node": "^22.19.21",
     "@types/prompts": "^2.4.0",
