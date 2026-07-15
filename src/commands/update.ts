@@ -1,5 +1,20 @@
-import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { spawn } from 'node:child_process';
+import { randomBytes } from 'node:crypto';
+import {
+  closeSync,
+  constants,
+  createReadStream,
+  fstatSync,
+  mkdtempSync,
+  openSync,
+  readFileSync,
+  readSync,
+  rmSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -51,57 +66,182 @@ function currentVersion(): string {
   }
 }
 
-function pinnedNpmEnvironment(userConfigPath: string, globalConfigPath: string): NodeJS.ProcessEnv {
+function pinnedNpmEnvironment(
+  ambientEnvironment: NodeJS.ProcessEnv,
+  userConfigPath: string,
+  globalConfigPath: string,
+  registry: string,
+  proxy: string,
+): NodeJS.ProcessEnv {
+  const prefix = ambientEnvironment.NPM_CONFIG_PREFIX ?? Object.entries(ambientEnvironment)
+    .find(([key]) => key.toLowerCase() === 'npm_config_prefix')?.[1];
   const env = Object.fromEntries(
-    Object.entries(process.env).filter(([key]) =>
-      !/^npm_config_/i.test(key) || /^npm_config_prefix$/i.test(key)),
+    Object.entries(ambientEnvironment).filter(([key]) => !/^npm_config_/i.test(key)),
   );
   return {
     ...env,
-    NPM_CONFIG_REGISTRY: OFFICIAL_NPM_REGISTRY,
+    ...(prefix ? { NPM_CONFIG_PREFIX: prefix } : {}),
+    NPM_CONFIG_REGISTRY: registry,
     NPM_CONFIG_USERCONFIG: userConfigPath,
     NPM_CONFIG_GLOBALCONFIG: globalConfigPath,
     NPM_CONFIG_IGNORE_SCRIPTS: 'true',
     NPM_CONFIG_AUDIT: 'false',
     NPM_CONFIG_FUND: 'false',
+    NPM_CONFIG_UPDATE_NOTIFIER: 'false',
+    NPM_CONFIG_PROXY: proxy,
+    NPM_CONFIG_HTTPS_PROXY: proxy,
+    NPM_CONFIG_NOPROXY: '127.0.0.1,localhost',
+    HTTP_PROXY: proxy,
+    HTTPS_PROXY: proxy,
+    ALL_PROXY: proxy,
+    http_proxy: proxy,
+    https_proxy: proxy,
+    all_proxy: proxy,
+    NO_PROXY: '127.0.0.1,localhost',
+    no_proxy: '127.0.0.1,localhost',
   };
 }
 
-function runPinnedNpm(
+async function runPinnedNpm(
   args: string[],
   cwd: string,
+  ambientEnvironment: NodeJS.ProcessEnv,
   userConfigPath: string,
   globalConfigPath: string,
-): void {
+  registry: string,
+  proxy: string,
+): Promise<void> {
   const npmCommand = process.platform === 'win32' ? 'npm.cmd' : 'npm';
   const pinnedArgs = [
     ...args,
     '--ignore-scripts',
     '--audit=false',
     '--fund=false',
+    '--update-notifier=false',
     '--package-lock=true',
     '--legacy-peer-deps=false',
-    `--registry=${OFFICIAL_NPM_REGISTRY}`,
-    `--@somewhere-tech:registry=${OFFICIAL_NPM_REGISTRY}`,
+    `--registry=${registry}`,
+    `--@somewhere-tech:registry=${registry}`,
     `--userconfig=${userConfigPath}`,
     `--globalconfig=${globalConfigPath}`,
   ];
-  execFileSync(npmCommand, pinnedArgs, {
-    cwd,
-    env: pinnedNpmEnvironment(userConfigPath, globalConfigPath),
-    shell: process.platform === 'win32',
-    stdio: 'inherit',
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(npmCommand, pinnedArgs, {
+      cwd,
+      env: pinnedNpmEnvironment(ambientEnvironment, userConfigPath, globalConfigPath, registry, proxy),
+      shell: process.platform === 'win32',
+      stdio: 'inherit',
+    });
+    child.once('error', reject);
+    child.once('exit', (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`npm install failed${signal ? ` with signal ${signal}` : ` with exit code ${code ?? 'unknown'}`}`));
+    });
   });
 }
 
-/** Real installer used by production and the isolated positive test. The
- * authenticated tarball contains its entire locked production closure, so the
- * final install can consume those same bytes with networking disabled. */
+const MAX_UPDATE_BYTES = 128 * 1024 * 1024;
+
+function openAuthenticatedArtifact(tarballPath: string): { fd: number; size: number } {
+  const fd = openSync(tarballPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  try {
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_UPDATE_BYTES) {
+      throw new Error('the downloaded update artifact is not a usable regular file');
+    }
+    // The original pathname is never used again. Removing it makes a later
+    // replacement a different inode while this descriptor retains the bytes
+    // that will be verified and streamed to npm.
+    unlinkSync(tarballPath);
+    return { fd, size: stat.size };
+  } catch (cause) {
+    closeSync(fd);
+    throw cause;
+  }
+}
+
+function readOpenArtifact(fd: number, size: number): Buffer {
+  const bytes = Buffer.allocUnsafe(size);
+  let offset = 0;
+  while (offset < size) {
+    const count = readSync(fd, bytes, offset, size - offset, offset);
+    if (count === 0) throw new Error('the downloaded update artifact ended while being verified');
+    offset += count;
+  }
+  return bytes;
+}
+
+interface ArtifactServer {
+  artifactUrl: string;
+  registryUrl: string;
+  proxyUrl: string;
+  assertNoUnexpectedRequests(): void;
+  close(): Promise<void>;
+}
+
+async function serveOpenArtifact(fd: number, size: number): Promise<ArtifactServer> {
+  const token = randomBytes(32).toString('hex');
+  const artifactPath = `/${token}.tgz`;
+  const unexpected: string[] = [];
+  const server = createServer((request, response) => {
+    if ((request.method === 'GET' || request.method === 'HEAD') && request.url === artifactPath) {
+      response.writeHead(200, {
+        'Content-Type': 'application/octet-stream',
+        'Content-Length': String(size),
+        'Cache-Control': 'no-store',
+      });
+      if (request.method === 'HEAD') {
+        response.end();
+        return;
+      }
+      const stream = createReadStream('', { fd, autoClose: false, start: 0, end: size - 1 });
+      stream.once('error', (cause) => response.destroy(cause));
+      stream.pipe(response);
+      return;
+    }
+    unexpected.push(`${request.method ?? 'UNKNOWN'} ${request.url ?? ''}`);
+    response.writeHead(403, { Connection: 'close' });
+    response.end('network access denied during authenticated update install');
+  });
+  server.on('connect', (request, socket) => {
+    unexpected.push(`CONNECT ${request.url ?? ''}`);
+    socket.end('HTTP/1.1 403 Forbidden\r\nConnection: close\r\n\r\n');
+  });
+  await new Promise<void>((resolve, reject) => {
+    const onError = (cause: Error) => reject(cause);
+    server.once('error', onError);
+    server.listen(0, '127.0.0.1', () => {
+      server.off('error', onError);
+      resolve();
+    });
+  });
+  const address = server.address() as AddressInfo;
+  const origin = `http://127.0.0.1:${address.port}`;
+  return {
+    artifactUrl: `${origin}${artifactPath}`,
+    registryUrl: `${origin}/registry/`,
+    proxyUrl: `${origin}/denied-proxy`,
+    assertNoUnexpectedRequests: () => {
+      if (unexpected.length > 0) {
+        throw new Error(`npm attempted network access outside the authenticated artifact: ${unexpected[0]}`);
+      }
+    },
+    close: () => new Promise<void>((resolve, reject) => {
+      server.close((cause) => cause ? reject(cause) : resolve());
+    }),
+  };
+}
+
+/** Real installer used by production and the isolated positive test. It opens
+ * and unlinks the downloaded tarball once, then uses only that descriptor for
+ * integrity, closure inspection, and the one loopback byte stream npm may
+ * consume. Registry/proxy traffic is denied and treated as a failed update. */
 export async function installVerifiedTarball(
   tarballPath: string,
   tempDir: string,
   release: OfficialRelease,
 ): Promise<void> {
+  const ambientEnvironment = { ...process.env };
   const packageDir = join(tempDir, 'authenticated-package');
   const cacheDir = join(tempDir, 'empty-cache');
   const userConfigPath = join(tempDir, 'user-npmrc');
@@ -109,16 +249,26 @@ export async function installVerifiedTarball(
   writeFileSync(userConfigPath, '', { mode: 0o600 });
   writeFileSync(globalConfigPath, '', { mode: 0o600 });
 
-  await verifyLockedArtifact(tarballPath, packageDir, release);
-  // Do not trust a path merely because it was verified earlier. Re-hash the
-  // private on-disk artifact immediately before handing that same path to npm.
-  verifyTarballIntegrity(readFileSync(tarballPath), release.integrity);
-  runPinnedNpm(
-    ['install', '--global', '--offline', `--cache=${cacheDir}`, tarballPath],
-    tempDir,
-    userConfigPath,
-    globalConfigPath,
-  );
+  const { fd, size } = openAuthenticatedArtifact(tarballPath);
+  let artifactServer: ArtifactServer | undefined;
+  try {
+    verifyTarballIntegrity(readOpenArtifact(fd, size), release.integrity);
+    await verifyLockedArtifact(fd, packageDir, release);
+    artifactServer = await serveOpenArtifact(fd, size);
+    await runPinnedNpm(
+      ['install', '--global', `--cache=${cacheDir}`, artifactServer.artifactUrl],
+      tempDir,
+      ambientEnvironment,
+      userConfigPath,
+      globalConfigPath,
+      artifactServer.registryUrl,
+      artifactServer.proxyUrl,
+    );
+    artifactServer.assertNoUnexpectedRequests();
+  } finally {
+    if (artifactServer) await artifactServer.close();
+    closeSync(fd);
+  }
 }
 
 async function fetchJson(fetchImpl: FetchUpdate, url: string, label: string): Promise<unknown> {

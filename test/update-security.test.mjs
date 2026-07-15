@@ -3,10 +3,12 @@ import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
 import {
   chmodSync,
+  closeSync,
   copyFileSync,
   cpSync,
   mkdirSync,
   mkdtempSync,
+  openSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -335,7 +337,7 @@ test('the release artifact bundles its complete authenticated dependency lock', 
   }
 });
 
-test('real isolated install rejects substitution/TOCTOU and executes only the signed closure', async () => {
+test('real isolated install survives a post-verification pathname swap and executes only the signed closure', async () => {
   const root = mkdtempSync(join(tmpdir(), 'somewhere-update-test-'));
   const fixtureDir = join(root, 'fixture');
   const binDir = join(fixtureDir, 'bin');
@@ -346,6 +348,10 @@ test('real isolated install rejects substitution/TOCTOU and executes only the si
   const previousRegistry = process.env.NPM_CONFIG_REGISTRY;
   const previousPackageLock = process.env.NPM_CONFIG_PACKAGE_LOCK;
   const previousLegacyPeers = process.env.NPM_CONFIG_LEGACY_PEER_DEPS;
+  const previousPath = process.env.PATH;
+  const previousSwapSource = process.env.SOMEWHERE_SWAP_SOURCE;
+  const previousSwapTarget = process.env.SOMEWHERE_SWAP_TARGET;
+  const previousRealNpm = process.env.SOMEWHERE_REAL_NPM;
   const repositoryLock = JSON.parse(readFileSync(new URL('../npm-shrinkwrap.json', import.meta.url), 'utf8'));
   const closurePaths = ['node_modules/prompts', 'node_modules/kleur', 'node_modules/sisteransi'];
   const lockedClosure = Object.fromEntries(closurePaths.map((path) => {
@@ -433,7 +439,7 @@ test('real isolated install rejects substitution/TOCTOU and executes only the si
       attestationUrl: `${REGISTRY}/-/npm/v1/attestations/@somewhere-tech%2fcli@${version}`,
     };
 
-    writeFileSync(binPath, `${readFileSync(binPath, 'utf8')}// swapped after verification\n`);
+    writeFileSync(binPath, '#!/usr/bin/env node\nconsole.log("malicious swapped artifact executed");\n');
     const swappedPack = packFixture();
     const swappedPath = join(fixtureDir, swappedPack[0].filename);
     mkdirSync(join(root, 'swapped-operation'));
@@ -455,16 +461,38 @@ test('real isolated install rejects substitution/TOCTOU and executes only the si
     });
     const substitutedPack = packFixture();
     const substitutedPath = join(fixtureDir, substitutedPack[0].filename);
-    await assert.rejects(
-      verifyLockedArtifact(substitutedPath, join(root, 'substituted-operation'), release),
-      /does not match the authenticated lock/,
+    const substitutedFd = openSync(substitutedPath, 'r');
+    try {
+      await assert.rejects(
+        verifyLockedArtifact(substitutedFd, join(root, 'substituted-operation'), release),
+        /does not match the authenticated lock/,
+      );
+    } finally {
+      closeSync(substitutedFd);
+    }
+
+    const wrapperDir = join(root, 'npm-wrapper');
+    const wrapperPath = join(wrapperDir, 'npm');
+    const realNpm = execFileSync('which', ['npm'], { encoding: 'utf8' }).trim();
+    mkdirSync(wrapperDir);
+    writeFileSync(
+      wrapperPath,
+      '#!/bin/sh\n/bin/cp "$SOMEWHERE_SWAP_SOURCE" "$SOMEWHERE_SWAP_TARGET"\n' +
+        'exec "$SOMEWHERE_REAL_NPM" "$@"\n',
     );
+    chmodSync(wrapperPath, 0o755);
 
     process.env.NPM_CONFIG_PREFIX = prefix;
     process.env.NPM_CONFIG_REGISTRY = 'http://127.0.0.1:48731/';
     process.env.NPM_CONFIG_PACKAGE_LOCK = 'false';
     process.env.NPM_CONFIG_LEGACY_PEER_DEPS = 'true';
+    process.env.PATH = `${wrapperDir}:${previousPath}`;
+    process.env.SOMEWHERE_SWAP_SOURCE = substitutedPath;
+    process.env.SOMEWHERE_SWAP_TARGET = tarballPath;
+    process.env.SOMEWHERE_REAL_NPM = realNpm;
     await installVerifiedTarball(tarballPath, operationDir, release);
+
+    assert.deepEqual(readFileSync(tarballPath), readFileSync(substitutedPath));
 
     const installedManifest = JSON.parse(readFileSync(
       join(prefix, 'lib', 'node_modules', '@somewhere-tech', 'cli', 'package.json'),
@@ -481,11 +509,16 @@ test('real isolated install rejects substitution/TOCTOU and executes only the si
     }
     const output = execFileSync(join(prefix, 'bin', 'somewhere'), [], { encoding: 'utf8' });
     assert.match(output, /fixture dependency closure executed/);
+    assert.doesNotMatch(output, /malicious swapped artifact executed/);
   } finally {
     restoreEnvironment('NPM_CONFIG_PREFIX', previousPrefix);
     restoreEnvironment('NPM_CONFIG_REGISTRY', previousRegistry);
     restoreEnvironment('NPM_CONFIG_PACKAGE_LOCK', previousPackageLock);
     restoreEnvironment('NPM_CONFIG_LEGACY_PEER_DEPS', previousLegacyPeers);
+    restoreEnvironment('PATH', previousPath);
+    restoreEnvironment('SOMEWHERE_SWAP_SOURCE', previousSwapSource);
+    restoreEnvironment('SOMEWHERE_SWAP_TARGET', previousSwapTarget);
+    restoreEnvironment('SOMEWHERE_REAL_NPM', previousRealNpm);
     rmSync(root, { recursive: true, force: true });
   }
 });
