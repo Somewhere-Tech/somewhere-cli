@@ -136,6 +136,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
     .map((verdict, index) => ({ verdict, index }))
     .filter(({ verdict }) =>
       directPackageNames.has(verdict.package)
+      && verdict.verdict !== 'blocked'
       && !verdict.summary?.trim())
     .map(({ index }) => index);
   const resolvedSummaryKeys = new Set<string>();

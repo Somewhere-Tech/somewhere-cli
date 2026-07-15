@@ -209,9 +209,10 @@ test('swpm install — clean tree runs npm install', async () => {
   assert.match(cap.errText(), /✓ {2}1 verified/);
 });
 
-test('swpm install — a blocked package halts install (exit 1)', async () => {
+test('swpm install — a blocked package renders immediately without polling', async () => {
   const cap = capture();
   const runReal = spyRun(0);
+  const polls = [];
   const r = await runSwpm(['install'], {
     ...cap,
     readTree: () => ({
@@ -220,11 +221,17 @@ test('swpm install — a blocked package halts install (exit 1)', async () => {
       locked: [{ package: '@ctrl/tinycolor', version: '4.1.1' }],
     }),
     getVerdictBatch: async () => [BLOCKED],
+    pollVerdictSummary: async (name, version) => {
+      polls.push([name, version]);
+      return null;
+    },
     runReal,
   });
   assert.equal(r.action, 'blocked');
   assert.equal(r.exitCode, 1);
   assert.equal(runReal.calls.length, 0);
+  assert.equal(polls.length, 0);
+  assert.doesNotMatch(cap.errText(), /Generating LLM summary…/);
   assert.match(cap.errText(), /✖ {2}1 blocked/);
   assert.match(cap.errText(), /Remove or replace blocked packages/);
 });
