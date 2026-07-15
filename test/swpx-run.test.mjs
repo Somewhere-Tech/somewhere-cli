@@ -25,6 +25,7 @@ function capture() {
     err,
     log: (s) => out.push(s),
     errLog: (s) => err.push(s),
+    pollVerdictSummary: async () => null,
     outText: () => strip(out.join('\n')),
     errText: () => strip(err.join('\n')),
   };
@@ -37,6 +38,7 @@ const VERIFIED = {
   capabilities: ['network', 'fs', 'child_process'],
   description: 'Create Next.js apps',
   description_match: 'match',
+  summary: 'Established package with readable source.',
 };
 const BLOCKED = {
   package: '@ctrl/tinycolor',
@@ -50,6 +52,7 @@ const UNVERIFIED = {
   verdict: 'unverified',
   has_provenance: false,
   is_minified: true,
+  summary: 'The source is minified and has no provenance.',
 };
 
 // ---------------- swpx ----------------
@@ -142,6 +145,43 @@ test('swpx — no package arg is a usage error', async () => {
   assert.match(cap.errText(), /Usage: swpx/);
 });
 
+test('swpx — polls and renders a pending LLM summary before running', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const polls = [];
+  const r = await runSwpx(['foo'], {
+    ...cap,
+    resolveVersion: async () => '1.0.0',
+    getVerdict: async () => ({ package: 'foo', version: '1.0.0', verdict: 'verified' }),
+    pollVerdictSummary: async (name, version) => {
+      polls.push([name, version]);
+      return { package: name, version, verdict: 'verified', summary: 'The generated assessment is ready.' };
+    },
+    runReal,
+  });
+  assert.equal(r.action, 'ran');
+  assert.deepEqual(polls, [['foo', '1.0.0']]);
+  assert.match(cap.errText(), /Generating LLM summary…/);
+  assert.match(cap.errText(), /The generated assessment is ready\./);
+  assert.doesNotMatch(cap.errText(), /timed out/);
+});
+
+test('swpx — summary timeout falls back to raw verdict metadata', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpx(['foo'], {
+    ...cap,
+    resolveVersion: async () => '1.0.0',
+    getVerdict: async () => ({ package: 'foo', version: '1.0.0', verdict: 'verified' }),
+    pollVerdictSummary: async () => null,
+    runReal,
+  });
+  assert.equal(r.action, 'ran');
+  assert.match(cap.errText(), /Generating LLM summary…/);
+  assert.match(cap.errText(), /LLM summary timed out — continuing with raw verdict metadata\./);
+  assert.deepEqual(runReal.calls, [{ cmd: 'npx', args: ['foo'] }]);
+});
+
 // ---------------- swpm ----------------
 
 test('swpm — non-install passes straight through to npm', async () => {
@@ -204,6 +244,29 @@ test('swpm install — a missing verdict row counts as unverified, not verified'
   });
   assert.equal(r.action, 'ran'); // unverified doesn't block install
   assert.match(cap.errText(), /⚠ {2}1 unverified/);
+  assert.match(cap.errText(), /Generating LLM summary…/);
+  assert.match(cap.errText(), /LLM summary timed out/);
+});
+
+test('swpm install — polls pending direct-package summaries and renders them', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const polls = [];
+  const r = await runSwpm(['install', 'foo'], {
+    ...cap,
+    resolveVersion: async () => '1.0.0',
+    getVerdictBatch: async () => [{ package: 'foo', version: '1.0.0', verdict: 'unverified' }],
+    pollVerdictSummary: async (name, version) => {
+      polls.push([name, version]);
+      return { package: name, version, verdict: 'unverified', summary: 'Review this package before installing.' };
+    },
+    runReal,
+  });
+  assert.equal(r.action, 'ran');
+  assert.deepEqual(polls, [['foo', '1.0.0']]);
+  assert.match(cap.errText(), /Generating LLM summary…/);
+  assert.match(cap.errText(), /Review this package before installing\./);
+  assert.doesNotMatch(cap.errText(), /timed out/);
 });
 
 test('swpm install — explicit packages are resolved and checked', async () => {

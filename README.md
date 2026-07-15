@@ -123,6 +123,9 @@ $ swpx @ctrl/tinycolor@4.1.1
 - **Confirmed malware** is hard-blocked (`swpx` exits 1; `swpm install` refuses
   the whole install). For `swpm`, unverified *transitive* deps are surfaced as
   warnings but don't block the install — only confirmed malware does.
+- **Pending LLM summaries are explicit.** The wrapper prints
+  `Generating LLM summary…` and polls briefly before the install decision. If
+  generation times out, it says so and continues with the raw verdict metadata.
 - **A gate, not a wall.** If the verdict service is unreachable, you get normal
   npm behaviour (a dim note, then the real tool runs). Our outage never stops you.
 - **No account, no login.** The verdict service is public and free.

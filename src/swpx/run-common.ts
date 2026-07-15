@@ -6,7 +6,11 @@
  *  callers pass `{}` and get the real implementations. */
 
 import { resolveVersion as realResolveVersion } from './registry.js';
-import { getVerdict as realGetVerdict, getVerdictBatch as realGetVerdictBatch } from './verdict-client.js';
+import {
+  getVerdict as realGetVerdict,
+  getVerdictBatch as realGetVerdictBatch,
+  pollVerdictSummary as realPollVerdictSummary,
+} from './verdict-client.js';
 import { runReal as realRunReal } from './spawn.js';
 import { readTree as realReadTree, type ResolvedTree } from './tree.js';
 import type { Verdict } from './types.js';
@@ -15,6 +19,7 @@ export interface RunDeps {
   resolveVersion?: (name: string, version: string | undefined) => Promise<string>;
   getVerdict?: (name: string, version: string) => Promise<Verdict>;
   getVerdictBatch?: (pkgs: Array<{ package: string; version: string }>) => Promise<Verdict[]>;
+  pollVerdictSummary?: (name: string, version: string) => Promise<Verdict | null>;
   runReal?: (cmd: 'npx' | 'npm', args: string[]) => Promise<number>;
   readTree?: (dir: string) => ResolvedTree;
   /** stdout — the command's product (check output, --json). */
@@ -30,6 +35,7 @@ export interface BoundDeps {
   resolveVersion: (name: string, version: string | undefined) => Promise<string>;
   getVerdict: (name: string, version: string) => Promise<Verdict>;
   getVerdictBatch: (pkgs: Array<{ package: string; version: string }>) => Promise<Verdict[]>;
+  pollVerdictSummary: (name: string, version: string) => Promise<Verdict | null>;
   runReal: (cmd: 'npx' | 'npm', args: string[]) => Promise<number>;
   readTree: (dir: string) => ResolvedTree;
   log: (s: string) => void;
@@ -41,6 +47,7 @@ export function bindDeps(deps: RunDeps): BoundDeps {
     resolveVersion: deps.resolveVersion ?? ((n, v) => realResolveVersion(n, v)),
     getVerdict: deps.getVerdict ?? ((n, v) => realGetVerdict(n, v)),
     getVerdictBatch: deps.getVerdictBatch ?? ((p) => realGetVerdictBatch(p)),
+    pollVerdictSummary: deps.pollVerdictSummary ?? ((n, v) => realPollVerdictSummary(n, v)),
     runReal: deps.runReal ?? realRunReal,
     readTree: deps.readTree ?? realReadTree,
     log: deps.log ?? ((s) => console.log(s)),

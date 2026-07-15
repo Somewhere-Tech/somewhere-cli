@@ -209,6 +209,18 @@ test('renderTree — full tree summary (swpm install)', () => {
   );
 });
 
+test('renderTree — includes an available LLM narrative under a flagged row', () => {
+  const lines = renderTree([
+    {
+      package: 'flagged',
+      version: '1.0.0',
+      verdict: 'unverified',
+      summary: 'Readable, but too new to have meaningful ecosystem history.',
+    },
+  ], 1).map(strip);
+  assert.ok(lines.some((line) => line.includes('Readable, but too new')));
+});
+
 test('renderVerdict — rich: narrative headline + author + dependencies + github link', () => {
   const v = {
     package: 'tiny-thing', version: '0.1.0', verdict: 'verified',

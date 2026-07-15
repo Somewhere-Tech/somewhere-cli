@@ -24,6 +24,12 @@ const VERDICT_BASE =
  *  override with SWPX_VERDICT_TIMEOUT_MS (e.g. lower it for strict fail-fast in CI). */
 const VERDICT_TIMEOUT_MS = Number(process.env.SWPX_VERDICT_TIMEOUT_MS) || 8000;
 
+/** Summary generation is best-effort, but a missing narrative must never leave
+ *  the user staring at a blank decision screen forever. Keep one overall budget
+ *  across every enrich poll; env overrides make staging and tests tunable. */
+const SUMMARY_POLL_TIMEOUT_MS = Number(process.env.SWPX_SUMMARY_TIMEOUT_MS) || 20_000;
+const SUMMARY_POLL_INTERVAL_MS = Number(process.env.SWPX_SUMMARY_POLL_INTERVAL_MS) || 1_500;
+
 const defaultFetch: FetchLike = (url, init) =>
   fetch(url, init as RequestInit) as unknown as Promise<FetchResponse>;
 
@@ -50,24 +56,32 @@ function unwrap(body: unknown): unknown {
   return body;
 }
 
-function timeoutSignal(): AbortSignal | undefined {
+function timeoutSignal(timeoutMs = VERDICT_TIMEOUT_MS): AbortSignal | undefined {
   try {
-    return AbortSignal.timeout(VERDICT_TIMEOUT_MS);
+    return AbortSignal.timeout(timeoutMs);
   } catch {
     return undefined; // very old runtime — let the request run without our timeout
   }
 }
 
-/** Look up one package@version. Throws VerdictUnavailable on any failure. */
-export async function getVerdict(
+async function requestVerdict(
   name: string,
   version: string,
-  fetchImpl: FetchLike = defaultFetch,
+  fetchImpl: FetchLike,
+  enrich: boolean,
+  timeoutMs = VERDICT_TIMEOUT_MS,
 ): Promise<Verdict> {
-  const url = `${VERDICT_BASE}/api/verdict/${encodeURIComponent(name)}/${encodeURIComponent(version)}`;
+  const suffix = enrich ? '?enrich=1' : '';
+  const url = `${VERDICT_BASE}/api/verdict/${encodeURIComponent(name)}/${encodeURIComponent(version)}${suffix}`;
   let res: FetchResponse;
   try {
-    res = await fetchImpl(url, { headers: { Accept: 'application/json' }, signal: timeoutSignal() });
+    res = await fetchImpl(url, {
+      headers: {
+        Accept: 'application/json',
+        ...(enrich ? { 'Cache-Control': 'no-cache' } : {}),
+      },
+      signal: timeoutSignal(timeoutMs),
+    });
   } catch (err) {
     throw new VerdictUnavailable(err instanceof Error ? err.message : String(err));
   }
@@ -84,6 +98,61 @@ export async function getVerdict(
   }
   // Trust the caller's resolved coordinates over whatever the row echoes back.
   return { ...v, package: name, version };
+}
+
+/** Look up one package@version. Throws VerdictUnavailable on any failure. */
+export async function getVerdict(
+  name: string,
+  version: string,
+  fetchImpl: FetchLike = defaultFetch,
+): Promise<Verdict> {
+  return requestVerdict(name, version, fetchImpl, false);
+}
+
+export interface SummaryPollOptions {
+  timeoutMs?: number;
+  intervalMs?: number;
+  now?: () => number;
+  sleep?: (ms: number) => Promise<void>;
+}
+
+/** Ask the verdict backend to enrich a mechanical verdict, then keep polling
+ *  until its LLM narrative appears or the single overall budget expires.
+ *  Returns null on timeout/unavailability so callers can continue with the raw
+ *  verdict and metadata; summary generation never changes fail-open behavior. */
+export async function pollVerdictSummary(
+  name: string,
+  version: string,
+  fetchImpl: FetchLike = defaultFetch,
+  options: SummaryPollOptions = {},
+): Promise<Verdict | null> {
+  const timeoutMs = Math.max(1, options.timeoutMs ?? SUMMARY_POLL_TIMEOUT_MS);
+  const intervalMs = Math.max(1, options.intervalMs ?? SUMMARY_POLL_INTERVAL_MS);
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? ((ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms)));
+  const deadline = now() + timeoutMs;
+
+  while (now() < deadline) {
+    const remaining = Math.max(1, deadline - now());
+    try {
+      const verdict = await requestVerdict(
+        name,
+        version,
+        fetchImpl,
+        true,
+        Math.min(VERDICT_TIMEOUT_MS, remaining),
+      );
+      if (typeof verdict.summary === 'string' && verdict.summary.trim()) return verdict;
+    } catch (err) {
+      // A throttle will not clear inside this short budget. Other transient
+      // failures get another attempt, still bounded by the same deadline.
+      if (err instanceof VerdictUnavailable && err.rateLimited) return null;
+    }
+
+    const waitMs = Math.min(intervalMs, Math.max(0, deadline - now()));
+    if (waitMs > 0) await sleep(waitMs);
+  }
+  return null;
 }
 
 /** Batch-check a resolved tree. Throws VerdictUnavailable on any failure so the

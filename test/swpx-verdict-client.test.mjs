@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   getVerdict,
   getVerdictBatch,
+  pollVerdictSummary,
   VerdictUnavailable,
 } from '../dist/swpx/verdict-client.js';
 
@@ -101,4 +102,57 @@ test('getVerdictBatch — failure throws VerdictUnavailable', async () => {
     () => getVerdictBatch([{ package: 'a', version: '1' }], resp({}, false, 500)),
     VerdictUnavailable,
   );
+});
+
+test('pollVerdictSummary — requests enrichment until the narrative resolves', async () => {
+  let clock = 0;
+  const urls = [];
+  const requestHeaders = [];
+  const fetchImpl = async (url, init) => {
+    urls.push(url);
+    requestHeaders.push(init.headers);
+    const summary = urls.length === 2 ? 'Readable and established.' : null;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        data: { package: 'foo', version: '1.0.0', verdict: 'verified', summary },
+      }),
+    };
+  };
+  const verdict = await pollVerdictSummary('foo', '1.0.0', fetchImpl, {
+    timeoutMs: 10,
+    intervalMs: 2,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  assert.equal(verdict.summary, 'Readable and established.');
+  assert.equal(urls.length, 2);
+  assert.ok(urls.every((url) => url.endsWith('/api/verdict/foo/1.0.0?enrich=1')));
+  assert.ok(requestHeaders.every((headers) => headers['Cache-Control'] === 'no-cache'));
+});
+
+test('pollVerdictSummary — returns null at one overall deadline', async () => {
+  let clock = 0;
+  let calls = 0;
+  const verdict = await pollVerdictSummary('foo', '1.0.0', async () => {
+    calls++;
+    return {
+      ok: true,
+      status: 200,
+      json: async () => ({
+        ok: true,
+        data: { package: 'foo', version: '1.0.0', verdict: 'unverified', summary: null },
+      }),
+    };
+  }, {
+    timeoutMs: 7,
+    intervalMs: 3,
+    now: () => clock,
+    sleep: async (ms) => { clock += ms; },
+  });
+  assert.equal(verdict, null);
+  assert.equal(clock, 7);
+  assert.equal(calls, 3);
 });

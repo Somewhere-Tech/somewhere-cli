@@ -74,6 +74,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   const explicit = clean.slice(subIdx + 1).filter((a) => !a.startsWith('-'));
   let toCheck: PkgRef[] = [];
   let directCount = 0;
+  const directPackageNames = new Set<string>();
   try {
     if (explicit.length) {
       toCheck = await Promise.all(
@@ -83,8 +84,10 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
         }),
       );
       directCount = toCheck.length;
+      for (const pkg of toCheck) directPackageNames.add(pkg.package);
     } else {
       const tree = d.readTree(process.cwd());
+      for (const name of tree.directNames) directPackageNames.add(name);
       if (tree.locked.length) {
         toCheck = tree.locked;
         const directSet = new Set(tree.directNames);
@@ -129,6 +132,39 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   }
 
   const aligned = alignVerdicts(toCheck, verdicts);
+  const pendingIndexes = aligned
+    .map((verdict, index) => ({ verdict, index }))
+    .filter(({ verdict }) =>
+      directPackageNames.has(verdict.package)
+      && (verdict.verdict === 'unverified' || verdict.verdict === 'suspicious')
+      && !verdict.summary?.trim())
+    .map(({ index }) => index);
+  if (pendingIndexes.length > 0) {
+    d.errLog(dim('Generating LLM summary…'));
+    const refreshed = await Promise.all(
+      pendingIndexes.map(async (index) => {
+        const verdict = aligned[index];
+        try {
+          return await d.pollVerdictSummary(verdict.package, verdict.version);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    let unresolved = 0;
+    refreshed.forEach((verdict, resultIndex) => {
+      const alignedIndex = pendingIndexes[resultIndex];
+      if (verdict?.summary?.trim()) aligned[alignedIndex] = verdict;
+      else unresolved++;
+    });
+    if (unresolved > 0) {
+      d.errLog(dim(
+        unresolved === 1
+          ? 'LLM summary timed out — continuing with raw verdict metadata.'
+          : `LLM summaries timed out for ${unresolved} packages — continuing with raw verdict metadata.`,
+      ));
+    }
+  }
   for (const l of renderTree(aligned, directCount)) d.errLog(l);
 
   // Halt on a hard block OR any level we don't recognize as installable. Known

@@ -11,6 +11,7 @@ function capture() {
   return {
     log: (s) => out.push(s),
     errLog: (s) => err.push(s),
+    pollVerdictSummary: async () => null,
     outText: () => strip(out.join('\n')),
     errText: () => strip(err.join('\n')),
   };

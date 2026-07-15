@@ -315,6 +315,9 @@ export function renderTree(items: Verdict[], directCount: number): string[] {
     rows.forEach((v, i) => {
       const branch = i === rows.length - 1 ? '└' : '├';
       out.push(`     ${branch} ${v.package}@${v.version} — ${shortReasons(v)}`);
+      if (v.summary) {
+        for (const line of wrap(v.summary, 68)) out.push(`       ${dim(line)}`);
+      }
     });
   };
 
