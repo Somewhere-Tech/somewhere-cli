@@ -26,6 +26,7 @@ on:
       - 'src/**'
       - 'bin/**'
       - 'package.json'
+      - 'npm-shrinkwrap.json'
 
 permissions:
   contents: write # tag push on auto-release

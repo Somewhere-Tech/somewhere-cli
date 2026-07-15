@@ -31,6 +31,7 @@
     "bin",
     "dist",
     "runtime",
+    "npm-shrinkwrap.json",
     "README.md",
     "LICENSE"
   ],
@@ -51,6 +52,8 @@
     "commander": "^12.0.0",
     "prompts": "^2.4.2",
     "semver": "^7.6.3",
+    "sigstore": "4.1.1",
+    "tar": "7.5.20",
     "undici": "^8.4.1"
   },
   "devDependencies": {
