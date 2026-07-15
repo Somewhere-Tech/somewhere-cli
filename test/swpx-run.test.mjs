@@ -269,6 +269,39 @@ test('swpm install — polls pending direct-package summaries and renders them',
   assert.doesNotMatch(cap.errText(), /timed out/);
 });
 
+test('swpm install — polls and renders a pending summary for a verified direct package', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const polls = [];
+  const r = await runSwpm(['install', 'cli-truncate@4.0.0'], {
+    ...cap,
+    resolveVersion: async () => '4.0.0',
+    getVerdictBatch: async () => [{
+      package: 'cli-truncate',
+      version: '4.0.0',
+      verdict: 'verified',
+      summary: null,
+    }],
+    pollVerdictSummary: async (name, version) => {
+      polls.push([name, version]);
+      return {
+        package: name,
+        version,
+        verdict: 'verified',
+        summary: 'This verified package has a generated assessment.',
+      };
+    },
+    runReal,
+  });
+  assert.equal(r.action, 'ran');
+  assert.deepEqual(polls, [['cli-truncate', '4.0.0']]);
+  assert.match(cap.errText(), /Generating LLM summary…/);
+  assert.match(cap.errText(), /cli-truncate@4\.0\.0/);
+  assert.match(cap.errText(), /This verified package has a generated assessment\./);
+  assert.doesNotMatch(cap.errText(), /timed out/);
+  assert.deepEqual(runReal.calls, [{ cmd: 'npm', args: ['install', 'cli-truncate@4.0.0'] }]);
+});
+
 test('swpm install — explicit packages are resolved and checked', async () => {
   const cap = capture();
   const runReal = spyRun(0);

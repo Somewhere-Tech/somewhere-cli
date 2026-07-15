@@ -136,9 +136,9 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
     .map((verdict, index) => ({ verdict, index }))
     .filter(({ verdict }) =>
       directPackageNames.has(verdict.package)
-      && (verdict.verdict === 'unverified' || verdict.verdict === 'suspicious')
       && !verdict.summary?.trim())
     .map(({ index }) => index);
+  const resolvedSummaryKeys = new Set<string>();
   if (pendingIndexes.length > 0) {
     d.errLog(dim('Generating LLM summary…'));
     const refreshed = await Promise.all(
@@ -154,8 +154,10 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
     let unresolved = 0;
     refreshed.forEach((verdict, resultIndex) => {
       const alignedIndex = pendingIndexes[resultIndex];
-      if (verdict?.summary?.trim()) aligned[alignedIndex] = verdict;
-      else unresolved++;
+      if (verdict?.summary?.trim()) {
+        aligned[alignedIndex] = verdict;
+        resolvedSummaryKeys.add(`${verdict.package}@${verdict.version}`);
+      } else unresolved++;
     });
     if (unresolved > 0) {
       d.errLog(dim(
@@ -165,7 +167,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
       ));
     }
   }
-  for (const l of renderTree(aligned, directCount)) d.errLog(l);
+  for (const l of renderTree(aligned, directCount, resolvedSummaryKeys)) d.errLog(l);
 
   // Halt on a hard block OR any level we don't recognize as installable. Known
   // installable levels warn but proceed (unverified/suspicious); an unrecognized

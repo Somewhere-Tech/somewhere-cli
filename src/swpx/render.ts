@@ -298,7 +298,11 @@ const isBlocked = (v: Verdict): boolean => v.verdict === 'blocked';
 
 /** The full `swpm install` tree summary. `directCount` is how many of `items`
  *  are direct (top-level) dependencies; the rest count as transitive. */
-export function renderTree(items: Verdict[], directCount: number): string[] {
+export function renderTree(
+  items: Verdict[],
+  directCount: number,
+  expandedSummaryKeys: ReadonlySet<string> = new Set<string>(),
+): string[] {
   const total = items.length;
   const transitive = Math.max(0, total - directCount);
   const verified = items.filter(isVerified);
@@ -320,6 +324,14 @@ export function renderTree(items: Verdict[], directCount: number): string[] {
       }
     });
   };
+
+  // Verified rows are normally collapsed into the count above. When swpm just
+  // waited for a direct package's narrative, expand that row so the generated
+  // result is actually visible before npm takes over.
+  const expandedVerified = verified.filter(
+    (v) => expandedSummaryKeys.has(`${v.package}@${v.version}`) && v.summary?.trim(),
+  );
+  if (expandedVerified.length) branchList(expandedVerified);
 
   if (unverified.length) {
     out.push(`  ${yellow('⚠')} ${String(unverified.length).padStart(2)} unverified`);
