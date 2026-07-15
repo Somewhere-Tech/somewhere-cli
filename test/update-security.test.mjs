@@ -6,11 +6,17 @@ import {
   closeSync,
   copyFileSync,
   cpSync,
+  existsSync,
+  fstatSync,
+  ftruncateSync,
+  fsyncSync,
   mkdirSync,
   mkdtempSync,
   openSync,
   readFileSync,
+  readSync,
   rmSync,
+  writeSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -106,6 +112,14 @@ function tarballResponse(bytes) {
 function restoreEnvironment(name, previous) {
   if (previous === undefined) delete process.env[name];
   else process.env[name] = previous;
+}
+
+async function waitForFile(path, timeoutMs = 15_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!existsSync(path)) {
+    if (Date.now() >= deadline) throw new Error(`timed out waiting for ${path}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
 }
 
 test('update refuses an ambient forged release with no provenance or integrity', async () => {
@@ -337,7 +351,7 @@ test('the release artifact bundles its complete authenticated dependency lock', 
   }
 });
 
-test('real isolated install survives a post-verification pathname swap and executes only the signed closure', async () => {
+test('real isolated install survives post-verification path and writable-fd swaps', async () => {
   const root = mkdtempSync(join(tmpdir(), 'somewhere-update-test-'));
   const fixtureDir = join(root, 'fixture');
   const binDir = join(fixtureDir, 'bin');
@@ -352,6 +366,8 @@ test('real isolated install survives a post-verification pathname swap and execu
   const previousSwapSource = process.env.SOMEWHERE_SWAP_SOURCE;
   const previousSwapTarget = process.env.SOMEWHERE_SWAP_TARGET;
   const previousRealNpm = process.env.SOMEWHERE_REAL_NPM;
+  const previousSwapTrigger = process.env.SOMEWHERE_SWAP_TRIGGER;
+  const previousSwapDone = process.env.SOMEWHERE_SWAP_DONE;
   const repositoryLock = JSON.parse(readFileSync(new URL('../npm-shrinkwrap.json', import.meta.url), 'utf8'));
   const closurePaths = ['node_modules/prompts', 'node_modules/kleur', 'node_modules/sisteransi'];
   const lockedClosure = Object.fromEntries(closurePaths.map((path) => {
@@ -461,23 +477,22 @@ test('real isolated install survives a post-verification pathname swap and execu
     });
     const substitutedPack = packFixture();
     const substitutedPath = join(fixtureDir, substitutedPack[0].filename);
-    const substitutedFd = openSync(substitutedPath, 'r');
-    try {
-      await assert.rejects(
-        verifyLockedArtifact(substitutedFd, join(root, 'substituted-operation'), release),
-        /does not match the authenticated lock/,
-      );
-    } finally {
-      closeSync(substitutedFd);
-    }
+    await assert.rejects(
+      verifyLockedArtifact(readFileSync(substitutedPath), join(root, 'substituted-operation'), release),
+      /does not match the authenticated lock/,
+    );
 
     const wrapperDir = join(root, 'npm-wrapper');
     const wrapperPath = join(wrapperDir, 'npm');
+    const swapTrigger = join(root, 'swap-trigger');
+    const swapDone = join(root, 'swap-done');
     const realNpm = execFileSync('which', ['npm'], { encoding: 'utf8' }).trim();
     mkdirSync(wrapperDir);
     writeFileSync(
       wrapperPath,
       '#!/bin/sh\n/bin/cp "$SOMEWHERE_SWAP_SOURCE" "$SOMEWHERE_SWAP_TARGET"\n' +
+        ': > "$SOMEWHERE_SWAP_TRIGGER"\n' +
+        'while [ ! -f "$SOMEWHERE_SWAP_DONE" ]; do /bin/sleep 0.01; done\n' +
         'exec "$SOMEWHERE_REAL_NPM" "$@"\n',
     );
     chmodSync(wrapperPath, 0o755);
@@ -490,7 +505,42 @@ test('real isolated install survives a post-verification pathname swap and execu
     process.env.SOMEWHERE_SWAP_SOURCE = substitutedPath;
     process.env.SOMEWHERE_SWAP_TARGET = tarballPath;
     process.env.SOMEWHERE_REAL_NPM = realNpm;
-    await installVerifiedTarball(tarballPath, operationDir, release);
+    process.env.SOMEWHERE_SWAP_TRIGGER = swapTrigger;
+    process.env.SOMEWHERE_SWAP_DONE = swapDone;
+
+    const attackerFd = openSync(tarballPath, 'r+');
+    try {
+      const mutatePreopenedFd = (async () => {
+        await waitForFile(swapTrigger);
+        const maliciousBytes = readFileSync(substitutedPath);
+        ftruncateSync(attackerFd, 0);
+        let offset = 0;
+        while (offset < maliciousBytes.byteLength) {
+          offset += writeSync(
+            attackerFd,
+            maliciousBytes,
+            offset,
+            maliciousBytes.byteLength - offset,
+            offset,
+          );
+        }
+        fsyncSync(attackerFd);
+        writeFileSync(swapDone, '');
+      })();
+      const results = await Promise.allSettled([
+        installVerifiedTarball(tarballPath, operationDir, release),
+        mutatePreopenedFd,
+      ]);
+      for (const result of results) {
+        if (result.status === 'rejected') throw result.reason;
+      }
+
+      const rewritten = Buffer.alloc(fstatSync(attackerFd).size);
+      assert.equal(readSync(attackerFd, rewritten, 0, rewritten.byteLength, 0), rewritten.byteLength);
+      assert.deepEqual(rewritten, readFileSync(substitutedPath));
+    } finally {
+      closeSync(attackerFd);
+    }
 
     assert.deepEqual(readFileSync(tarballPath), readFileSync(substitutedPath));
 
@@ -519,6 +569,8 @@ test('real isolated install survives a post-verification pathname swap and execu
     restoreEnvironment('SOMEWHERE_SWAP_SOURCE', previousSwapSource);
     restoreEnvironment('SOMEWHERE_SWAP_TARGET', previousSwapTarget);
     restoreEnvironment('SOMEWHERE_REAL_NPM', previousRealNpm);
+    restoreEnvironment('SOMEWHERE_SWAP_TRIGGER', previousSwapTrigger);
+    restoreEnvironment('SOMEWHERE_SWAP_DONE', previousSwapDone);
     rmSync(root, { recursive: true, force: true });
   }
 });

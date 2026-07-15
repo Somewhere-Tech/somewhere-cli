@@ -1,6 +1,7 @@
 import { createHash, timingSafeEqual } from 'node:crypto';
-import { createReadStream, mkdirSync, readFileSync, statSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
+import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import semver from 'semver';
 import { x as extractTar } from 'tar';
@@ -476,19 +477,19 @@ function bundledManifestLockPath(tarPath: string): string | undefined {
 /** Validate the shrinkwrap and every bundled package manifest from an already
  * hash-verified tarball. The tarball digest authenticates both the lock's
  * integrity pins and the exact bundled bytes installed later. */
-async function extractOpenArtifact(
-  tarballFd: number,
+async function extractArtifactSnapshot(
+  artifact: Buffer,
   extractionDir: string,
   filter: NonNullable<Parameters<typeof extractTar>[0]>['filter'],
 ): Promise<void> {
   await pipeline(
-    createReadStream('', { fd: tarballFd, autoClose: false, start: 0 }),
+    Readable.from([artifact]),
     extractTar({ cwd: extractionDir, strip: 1, strict: true, filter }),
   );
 }
 
 export async function verifyLockedArtifact(
-  tarballFd: number,
+  artifact: Buffer,
   extractionDir: string,
   release: OfficialRelease,
 ): Promise<void> {
@@ -498,8 +499,8 @@ export async function verifyLockedArtifact(
     ['package/npm-shrinkwrap.json', MAX_LOCKFILE_BYTES],
   ]);
   const seen = new Set<string>();
-  await extractOpenArtifact(
-    tarballFd,
+  await extractArtifactSnapshot(
+    artifact,
     extractionDir,
     (path, entry) => {
       const maxSize = allowed.get(path);
@@ -535,8 +536,8 @@ export async function verifyLockedArtifact(
   }
 
   const seenBundles = new Set<string>();
-  await extractOpenArtifact(
-    tarballFd,
+  await extractArtifactSnapshot(
+    artifact,
     extractionDir,
     (tarPath, entry) => {
       const lockPath = bundledManifestLockPath(tarPath);

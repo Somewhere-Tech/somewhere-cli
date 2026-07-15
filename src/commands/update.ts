@@ -3,7 +3,6 @@ import { randomBytes } from 'node:crypto';
 import {
   closeSync,
   constants,
-  createReadStream,
   fstatSync,
   mkdtempSync,
   openSync,
@@ -142,21 +141,19 @@ async function runPinnedNpm(
 
 const MAX_UPDATE_BYTES = 128 * 1024 * 1024;
 
-function openAuthenticatedArtifact(tarballPath: string): { fd: number; size: number } {
+function snapshotAuthenticatedArtifact(tarballPath: string): Buffer {
   const fd = openSync(tarballPath, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
   try {
     const stat = fstatSync(fd);
     if (!stat.isFile() || stat.size <= 0 || stat.size > MAX_UPDATE_BYTES) {
       throw new Error('the downloaded update artifact is not a usable regular file');
     }
-    // The original pathname is never used again. Removing it makes a later
-    // replacement a different inode while this descriptor retains the bytes
-    // that will be verified and streamed to npm.
+    // Take one private snapshot and never consult disk again. Unlinking first
+    // also ensures a later pathname replacement cannot affect this read.
     unlinkSync(tarballPath);
-    return { fd, size: stat.size };
-  } catch (cause) {
+    return readOpenArtifact(fd, stat.size);
+  } finally {
     closeSync(fd);
-    throw cause;
   }
 }
 
@@ -179,7 +176,7 @@ interface ArtifactServer {
   close(): Promise<void>;
 }
 
-async function serveOpenArtifact(fd: number, size: number): Promise<ArtifactServer> {
+async function serveArtifactSnapshot(artifact: Buffer): Promise<ArtifactServer> {
   const token = randomBytes(32).toString('hex');
   const artifactPath = `/${token}.tgz`;
   const unexpected: string[] = [];
@@ -187,16 +184,14 @@ async function serveOpenArtifact(fd: number, size: number): Promise<ArtifactServ
     if ((request.method === 'GET' || request.method === 'HEAD') && request.url === artifactPath) {
       response.writeHead(200, {
         'Content-Type': 'application/octet-stream',
-        'Content-Length': String(size),
+        'Content-Length': String(artifact.byteLength),
         'Cache-Control': 'no-store',
       });
       if (request.method === 'HEAD') {
         response.end();
         return;
       }
-      const stream = createReadStream('', { fd, autoClose: false, start: 0, end: size - 1 });
-      stream.once('error', (cause) => response.destroy(cause));
-      stream.pipe(response);
+      response.end(artifact);
       return;
     }
     unexpected.push(`${request.method ?? 'UNKNOWN'} ${request.url ?? ''}`);
@@ -232,10 +227,10 @@ async function serveOpenArtifact(fd: number, size: number): Promise<ArtifactServ
   };
 }
 
-/** Real installer used by production and the isolated positive test. It opens
- * and unlinks the downloaded tarball once, then uses only that descriptor for
- * integrity, closure inspection, and the one loopback byte stream npm may
- * consume. Registry/proxy traffic is denied and treated as a failed update. */
+/** Real installer used by production and the isolated positive test. It reads
+ * and unlinks the downloaded tarball once, then uses only that immutable Buffer
+ * snapshot for integrity, closure inspection, and the loopback response npm
+ * consumes. Registry/proxy traffic is denied and treated as a failed update. */
 export async function installVerifiedTarball(
   tarballPath: string,
   tempDir: string,
@@ -249,12 +244,12 @@ export async function installVerifiedTarball(
   writeFileSync(userConfigPath, '', { mode: 0o600 });
   writeFileSync(globalConfigPath, '', { mode: 0o600 });
 
-  const { fd, size } = openAuthenticatedArtifact(tarballPath);
+  const artifact = snapshotAuthenticatedArtifact(tarballPath);
   let artifactServer: ArtifactServer | undefined;
   try {
-    verifyTarballIntegrity(readOpenArtifact(fd, size), release.integrity);
-    await verifyLockedArtifact(fd, packageDir, release);
-    artifactServer = await serveOpenArtifact(fd, size);
+    verifyTarballIntegrity(artifact, release.integrity);
+    await verifyLockedArtifact(artifact, packageDir, release);
+    artifactServer = await serveArtifactSnapshot(artifact);
     await runPinnedNpm(
       ['install', '--global', `--cache=${cacheDir}`, artifactServer.artifactUrl],
       tempDir,
@@ -267,7 +262,6 @@ export async function installVerifiedTarball(
     artifactServer.assertNoUnexpectedRequests();
   } finally {
     if (artifactServer) await artifactServer.close();
-    closeSync(fd);
   }
 }
 
