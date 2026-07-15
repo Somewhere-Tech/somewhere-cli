@@ -153,6 +153,46 @@ test('update refuses unsigned provenance before downloading or installing', asyn
   assert.deepEqual(requested, [PACKUMENT_URL, metadata(version, published).versions[version].dist.attestations.url]);
 });
 
+test('unsupported Node refuses clearly before tarball download or install', async () => {
+  const version = '1.1.0';
+  const published = Buffer.from('published package');
+  const releaseMetadata = metadata(version, published);
+  const attestationUrl = releaseMetadata.versions[version].dist.attestations.url;
+  let installed = false;
+  const requested = [];
+  const nodeVersionDescriptor = Object.getOwnPropertyDescriptor(process.versions, 'node');
+  Object.defineProperty(process.versions, 'node', { ...nodeVersionDescriptor, value: '18.20.8' });
+
+  try {
+    await assert.rejects(
+      verifyPublishedProvenance({}, {
+        version,
+        integrity: integrity(published),
+        tarballUrl: releaseMetadata.versions[version].dist.tarball,
+        attestationUrl,
+      }),
+      /Update verification needs Node 20\.17\+ or Node 22\.9\+.*Please upgrade Node, then re-run `somewhere update`/,
+    );
+
+    const code = await runUpdate({}, {
+      currentVersion: () => '1.0.0',
+      fetch: async (url) => {
+        requested.push(url);
+        if (url === PACKUMENT_URL) return jsonResponse(releaseMetadata);
+        if (url === attestationUrl) return jsonResponse({});
+        return tarballResponse(published);
+      },
+      install: async () => { installed = true; },
+    });
+
+    assert.equal(code, 1);
+    assert.equal(installed, false);
+    assert.deepEqual(requested, [PACKUMENT_URL]);
+  } finally {
+    Object.defineProperty(process.versions, 'node', nodeVersionDescriptor);
+  }
+});
+
 test('update refuses a forged tarball whose bytes fail the published integrity', async () => {
   const version = '1.1.0';
   const published = Buffer.from('published package');
@@ -243,7 +283,7 @@ test('the release artifact declares and validates its authenticated dependency l
   });
 });
 
-test('real isolated installer honors authenticated shrinkwrap and safe npm settings', async () => {
+test('real isolated installer installs and executes an integrity-locked dependency closure', async () => {
   const root = mkdtempSync(join(tmpdir(), 'somewhere-update-test-'));
   const fixtureDir = join(root, 'fixture');
   const binDir = join(fixtureDir, 'bin');
@@ -254,6 +294,14 @@ test('real isolated installer honors authenticated shrinkwrap and safe npm setti
   const previousRegistry = process.env.NPM_CONFIG_REGISTRY;
   const previousPackageLock = process.env.NPM_CONFIG_PACKAGE_LOCK;
   const previousLegacyPeers = process.env.NPM_CONFIG_LEGACY_PEER_DEPS;
+  const repositoryLock = JSON.parse(readFileSync(new URL('../npm-shrinkwrap.json', import.meta.url), 'utf8'));
+  const closurePaths = ['node_modules/prompts', 'node_modules/kleur', 'node_modules/sisteransi'];
+  const lockedClosure = Object.fromEntries(closurePaths.map((path) => {
+    const entry = repositoryLock.packages[path];
+    assert.equal(typeof entry?.integrity, 'string');
+    return [path, entry];
+  }));
+  const promptsVersion = lockedClosure['node_modules/prompts'].version;
 
   mkdirSync(binDir, { recursive: true });
   mkdirSync(operationDir, { recursive: true });
@@ -263,6 +311,7 @@ test('real isolated installer honors authenticated shrinkwrap and safe npm setti
     type: 'module',
     bin: { somewhere: 'bin/somewhere.js' },
     files: ['bin', 'npm-shrinkwrap.json'],
+    dependencies: { prompts: promptsVersion },
     scripts: {
       preinstall: 'node -e "process.exit(93)"',
       postinstall: 'node -e "process.exit(94)"',
@@ -278,13 +327,20 @@ test('real isolated installer honors authenticated shrinkwrap and safe npm setti
         name: PACKAGE,
         version,
         bin: { somewhere: 'bin/somewhere.js' },
+        dependencies: { prompts: promptsVersion },
       },
+      ...lockedClosure,
     },
   };
   writeFileSync(join(fixtureDir, 'package.json'), `${JSON.stringify(manifest, null, 2)}\n`);
   writeFileSync(join(fixtureDir, 'npm-shrinkwrap.json'), `${JSON.stringify(shrinkwrap, null, 2)}\n`);
   const binPath = join(binDir, 'somewhere.js');
-  writeFileSync(binPath, '#!/usr/bin/env node\nconsole.log("fixture cli");\n');
+  writeFileSync(
+    binPath,
+    '#!/usr/bin/env node\nimport prompts from "prompts";\n' +
+      'if (typeof prompts !== "function") process.exit(95);\n' +
+      'console.log("fixture dependency closure executed");\n',
+  );
   chmodSync(binPath, 0o755);
 
   try {
@@ -311,7 +367,15 @@ test('real isolated installer honors authenticated shrinkwrap and safe npm setti
       'utf8',
     ));
     assert.equal(installedManifest.version, version);
-    assert.equal(readFileSync(join(prefix, 'bin', 'somewhere'), 'utf8').includes('fixture cli'), true);
+    for (const dependency of ['prompts', 'kleur', 'sisteransi']) {
+      const installedDependency = JSON.parse(readFileSync(
+        join(prefix, 'lib', 'node_modules', PACKAGE, 'node_modules', dependency, 'package.json'),
+        'utf8',
+      ));
+      assert.equal(typeof installedDependency.version, 'string');
+    }
+    const output = execFileSync(join(prefix, 'bin', 'somewhere'), [], { encoding: 'utf8' });
+    assert.match(output, /fixture dependency closure executed/);
   } finally {
     restoreEnvironment('NPM_CONFIG_PREFIX', previousPrefix);
     restoreEnvironment('NPM_CONFIG_REGISTRY', previousRegistry);

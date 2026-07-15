@@ -7,6 +7,7 @@ import { Command } from 'commander';
 import semver from 'semver';
 import { dim, error, info, success, teal } from '../lib/output.js';
 import {
+  assertUpdateVerificationRuntime,
   CLI_PACKAGE,
   OFFICIAL_NPM_REGISTRY,
   parseOfficialRelease,
@@ -173,6 +174,7 @@ export async function runUpdate(
 
   let tempDir: string | undefined;
   try {
+    assertUpdateVerificationRuntime();
     const provenance = await fetchJson(fetchImpl, release.attestationUrl, 'the official npm provenance endpoint');
     await (dependencies.verifyProvenance ?? verifyPublishedProvenance)(provenance, release);
     const tarball = await downloadTarball(fetchImpl, release);

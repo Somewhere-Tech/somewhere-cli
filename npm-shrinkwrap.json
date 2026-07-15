@@ -32,7 +32,7 @@
         "typescript": "^5.4.0"
       },
       "engines": {
-        "node": ">=18"
+        "node": "^20.17.0 || >=22.9.0"
       }
     },
     "node_modules/@gar/promise-retry": {

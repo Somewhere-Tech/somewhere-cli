@@ -163,11 +163,18 @@ function findSlsaBundle(body: unknown): { bundle: SigstoreBundle; envelope: Obje
  * signature, GitHub OIDC issuer, exact workflow identity, immutable repository
  * and owner IDs, and public-repository claim. Any verifier/network/policy error
  * is a hard refusal. */
-export async function verifyPublishedProvenance(body: unknown, release: OfficialRelease): Promise<void> {
-  const { bundle, envelope } = findSlsaBundle(body);
-  if (!semver.satisfies(process.versions.node, SIGSTORE_NODE_RANGE)) {
-    throw new Error('cryptographic update verification requires Node 20.17+ or 22.9+');
+export function assertUpdateVerificationRuntime(nodeVersion = process.versions.node): void {
+  if (!semver.satisfies(nodeVersion, SIGSTORE_NODE_RANGE)) {
+    throw new Error(
+      `Update verification needs Node 20.17+ or Node 22.9+; current runtime is Node ${nodeVersion}. ` +
+      'Please upgrade Node, then re-run `somewhere update`',
+    );
   }
+}
+
+export async function verifyPublishedProvenance(body: unknown, release: OfficialRelease): Promise<void> {
+  assertUpdateVerificationRuntime();
+  const { bundle, envelope } = findSlsaBundle(body);
 
   let certificateSourceDigest: string | undefined;
   try {

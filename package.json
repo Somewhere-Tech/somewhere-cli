@@ -44,7 +44,7 @@
     "test:e2e-local": "node scripts/e2e-local.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": "^20.17.0 || >=22.9.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
