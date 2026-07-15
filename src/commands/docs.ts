@@ -1,6 +1,7 @@
 import { once } from 'node:events';
 import { Command } from 'commander';
 import { dim, error, printJson } from '../lib/output.js';
+import { callPlatformHelpTool } from './advisor.js';
 
 // Platform docs from the CLI — works with ZERO credentials (tsk_497b7eeb /
 // tsk_2ae9dce9 funnel work). The docs are public text URLs on the apex, so an
@@ -68,9 +69,9 @@ export function registerDocs(program: Command) {
   program
     .command('docs [topic]')
     .description(
-      'Print platform docs as plain text — no login needed. Topics: ' +
+      'Read platform docs. Public text topics need no login; platform manual topics use your login. Public topics: ' +
         Object.keys(TOPICS).join(', ') +
-        '. New here with no account? `somewhere docs start`.',
+        '. Example manual topic: `somewhere docs sw.db`.',
     )
     .option('--list', 'List available topics instead of streaming documentation')
     .option('--json', 'Print the selected document in a JSON envelope')
@@ -99,8 +100,15 @@ export function registerDocs(program: Command) {
         : ALIASES[requestedTopic.toLowerCase()];
       const entry = key ? TOPICS[key] : undefined;
       if (!entry) {
-        error(`Unknown topic "${requestedTopic}". Topics: ${Object.keys(TOPICS).join(', ')}`);
-        process.exit(1);
+        try {
+          const content = await callPlatformHelpTool('docs', { topic: requestedTopic });
+          if (opts.json) printJson({ topic: requestedTopic, content });
+          else process.stdout.write(content.endsWith('\n') ? content : `${content}\n`);
+        } catch (e) {
+          error(e instanceof Error ? e.message : String(e));
+          process.exitCode = 1;
+        }
+        return;
       }
       try {
         const res = await fetch(DOCS_BASE + entry.path);

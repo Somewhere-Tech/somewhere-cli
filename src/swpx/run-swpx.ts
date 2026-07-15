@@ -19,6 +19,8 @@ import { decide, renderVerdict } from './render.js';
 import { bindDeps, type RunDeps } from './run-common.js';
 import { resolveEnforce, stripEnforceFlags, loudUnavailable, refused } from './enforce.js';
 import { VerdictUnavailable } from './verdict-client.js';
+import { dim } from '../lib/output.js';
+import type { Verdict } from './types.js';
 
 export interface SwpxOutcome {
   exitCode: number;
@@ -74,11 +76,26 @@ export async function runSwpx(args: string[], deps: RunDeps = {}): Promise<SwpxO
     return failOpen(false, causeOf(err));
   }
 
-  let verdict;
+  let verdict: Verdict;
   try {
     verdict = await d.getVerdict(spec.name, version);
   } catch (err) {
     return failOpen(err instanceof VerdictUnavailable && err.rateLimited, causeOf(err));
+  }
+
+  if (verdict.verdict !== 'blocked' && !verdict.summary?.trim()) {
+    d.errLog(dim('Generating LLM summary…'));
+    let enriched: Verdict | null = null;
+    try {
+      enriched = await d.pollVerdictSummary(spec.name, version);
+    } catch {
+      // Summary generation is presentation-only. Keep the mechanical verdict.
+    }
+    if (enriched?.summary?.trim()) {
+      verdict = enriched;
+    } else {
+      d.errLog(dim('LLM summary timed out — continuing with raw verdict metadata.'));
+    }
   }
 
   const action = decide(verdict);

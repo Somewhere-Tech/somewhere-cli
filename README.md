@@ -68,6 +68,9 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere dev --local` | Run functions in local Node (sw.* hits the real project); typechecks before start + on every reload so a dropped import surfaces in the terminal, not as a 500 |
 | `somewhere dev --local --check` | Same, but EXIT on type errors instead of warning |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
+| `somewhere advisor "<question>"` | Ask the authenticated platform advisor (`--json` for automation) |
+| `somewhere docs [topic]` | Read public text docs or an MCP manual topic such as `sw.db` (`--json` supported) |
+| `somewhere catalog` | Browse the live platform tool catalog (`--json` for the raw catalog) |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |
 | `somewhere mcp install <host>` | Configure an MCP host (`codex`, `claude-code`, `cursor`) |
 | `somewhere mcp doctor` | Check MCP setup: login, token, server reachability, host configs |
@@ -120,6 +123,9 @@ $ swpx @ctrl/tinycolor@4.1.1
 - **Confirmed malware** is hard-blocked (`swpx` exits 1; `swpm install` refuses
   the whole install). For `swpm`, unverified *transitive* deps are surfaced as
   warnings but don't block the install — only confirmed malware does.
+- **Pending LLM summaries are explicit.** The wrapper prints
+  `Generating LLM summary…` and polls briefly before the install decision. If
+  generation times out, it says so and continues with the raw verdict metadata.
 - **A gate, not a wall.** If the verdict service is unreachable, you get normal
   npm behaviour (a dim note, then the real tool runs). Our outage never stops you.
 - **No account, no login.** The verdict service is public and free.
@@ -230,7 +236,7 @@ Inside deployed functions you use the `sw` runtime directly (`sw.db.query(...)`,
 
 - No hosting or running code (the platform does that)
 - No building or compiling — **deploy raw source; the platform compiles it**
-- No AI calls (Claude Code / Codex do that via MCP)
+- No application AI calls (the `advisor` command only exposes the platform-help expert)
 - No workspace management (dashboard)
 - No billing (dashboard)
 
