@@ -31,6 +31,7 @@
     "bin",
     "dist",
     "runtime",
+    "npm-shrinkwrap.json",
     "README.md",
     "LICENSE"
   ],
@@ -43,7 +44,7 @@
     "test:e2e-local": "node scripts/e2e-local.mjs"
   },
   "engines": {
-    "node": ">=18"
+    "node": ">=22.19.0"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
@@ -51,8 +52,20 @@
     "commander": "^12.0.0",
     "prompts": "^2.4.2",
     "semver": "^7.6.3",
+    "sigstore": "4.1.1",
+    "tar": "7.5.20",
     "undici": "^8.4.1"
   },
+  "bundledDependencies": [
+    "@modelcontextprotocol/sdk",
+    "chokidar",
+    "commander",
+    "prompts",
+    "semver",
+    "sigstore",
+    "tar",
+    "undici"
+  ],
   "devDependencies": {
     "@types/node": "^22.19.21",
     "@types/prompts": "^2.4.0",
