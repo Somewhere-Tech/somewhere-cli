@@ -137,3 +137,19 @@ test('auth set reads a piped token and persists it after validation', async () =
     assert.equal(JSON.parse(readFileSync(configPath, 'utf8')).token, 'smt_stdin_secret');
   });
 });
+
+test('auth print-token prints the stored smt_ token without decoration', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-auth-print-token-home-'));
+  writeConfig(home, {
+    token: 'smt_print_token_test',
+    user: { email: 'token@example.com', username: 'token' },
+  });
+
+  const result = await run(['auth', 'print-token'], {
+    env: { HOME: home, USERPROFILE: home },
+  });
+
+  assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.equal(result.stdout, 'smt_print_token_test\n');
+  assert.equal(result.stderr, '');
+});

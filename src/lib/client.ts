@@ -1,5 +1,5 @@
 import type { ApiResponse } from '../types.js';
-import { Agent, fetch as undiciFetch } from 'undici';
+import { Agent, fetch as undiciFetch, type BodyInit, type Response as UndiciResponse } from 'undici';
 import { loadConfig, updateTokens } from './config.js';
 
 /** The /v1 API host. Override for staging/tests via SOMEWHERE_API_URL
@@ -75,6 +75,96 @@ export class ApiClient {
       // Retry exactly once with the new key. A second API_KEY_EXPIRED here is
       // genuine — let it propagate rather than loop.
       return await this.request<T>(method, path, body, query, opts);
+    }
+  }
+
+  /** Authenticated request whose body and response remain streams. The body is
+   *  supplied by a factory so a file can be reopened if an expired access key
+   *  is refreshed and the request is retried. Stdin is deliberately marked
+   *  non-replayable by callers: after refreshing, we fail with a clear rerun
+   *  message instead of silently sending an empty second request. */
+  async callStream(
+    method: string,
+    path: string,
+    bodyFactory?: () => BodyInit,
+    opts?: {
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+      replayableBody?: boolean;
+    },
+  ): Promise<UndiciResponse> {
+    let response = await this.requestStream(method, path, bodyFactory, opts);
+    if (response.status !== 401) return response;
+
+    let code: string | undefined;
+    try {
+      const payload = await response.clone().json() as { error?: string };
+      code = payload.error;
+    } catch {
+      return response;
+    }
+    if (code !== 'API_KEY_EXPIRED') return response;
+
+    const refreshed = await this.refreshAccessKey(opts?.timeoutMs);
+    if (!refreshed) {
+      await response.body?.cancel().catch(() => {});
+      throw new CliApiError(
+        'API_KEY_EXPIRED',
+        'Your somewhere access key expired and could not be refreshed. Run `somewhere login`.',
+        401,
+      );
+    }
+    await response.body?.cancel().catch(() => {});
+    if (bodyFactory && !opts?.replayableBody) {
+      throw new CliApiError(
+        'RETRY_REQUIRED',
+        'Your session was refreshed, but stdin cannot be replayed. Run the command again.',
+        401,
+      );
+    }
+    response = await this.requestStream(method, path, bodyFactory, opts);
+    return response;
+  }
+
+  private async requestStream(
+    method: string,
+    path: string,
+    bodyFactory?: () => BodyInit,
+    opts?: {
+      headers?: Record<string, string>;
+      timeoutMs?: number;
+      replayableBody?: boolean;
+    },
+  ): Promise<UndiciResponse> {
+    const url = `${API_BASE_URL}${path}`;
+    const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    try {
+      return await undiciFetch(url, {
+        method,
+        headers: {
+          Authorization: `Bearer ${this.token}`,
+          ...opts?.headers,
+        },
+        body: bodyFactory?.(),
+        duplex: bodyFactory ? 'half' : undefined,
+        signal: AbortSignal.timeout(timeoutMs),
+        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
+      });
+    } catch (err) {
+      if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
+        throw new CliApiError(
+          'TIMEOUT',
+          `No response from ${method} ${url} after ${Math.round(timeoutMs / 1000)}s.`,
+          0,
+        );
+      }
+      const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+      const detail = cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));
+      throw new CliApiError(
+        'NETWORK_ERROR',
+        `Could not reach ${method} ${url} — ${detail}. No HTTP response was received.`,
+        0,
+      );
     }
   }
 

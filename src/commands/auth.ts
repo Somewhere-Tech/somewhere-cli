@@ -12,6 +12,7 @@ import {
 import { ApiClient } from '../lib/client.js';
 import {
   clearConfig,
+  getToken,
   loadConfig,
   saveConfig,
   saveGlobalMcpConfig,
@@ -204,6 +205,13 @@ export function registerAuth(program: Command) {
       info(`Device ID:  ${deviceId}`);
       info(`Key name:   ${keyName}`);
       info(`Token:      ${config.token.slice(0, 8)}…${config.token.slice(-4)}`);
+    });
+
+  auth
+    .command('print-token')
+    .description('Print the current smt_ token for shell scripts')
+    .action(() => {
+      process.stdout.write(`${getToken()}\n`);
     });
 }
 
