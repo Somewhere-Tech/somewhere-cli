@@ -196,3 +196,82 @@ test('api --data-file streams from disk and accepts stdin with -', async () => {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
 });
+
+test('fs rejects dot segments and empty remote paths before any authenticated request', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-fs-path-home-'));
+  const fixture = mkdtempSync(join(tmpdir(), 'sw-fs-path-fixture-'));
+  writeConfig(home);
+  const source = join(fixture, 'source.bin');
+  writeFileSync(source, 'safe bytes');
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    sendJson(res, 500, { ok: false, error: 'UNEXPECTED_REQUEST', message: req.url });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1`,
+  };
+  const cases = [
+    ['fs', 'put', source, '../escape', '--project', 'proj'],
+    ['fs', 'put', source, 'safe/../escape', '--project', 'proj'],
+    ['fs', 'rm', '../../projects/victim', '--project', 'proj'],
+    ['fs', 'get', '/../../absolute', join(fixture, 'out.bin'), '--project', 'proj'],
+    ['fs', 'put', source, 'safe/./file', '--project', 'proj'],
+    ['fs', 'rm', '.', '--project', 'proj'],
+    ['fs', 'rm', '..', '--project', 'proj'],
+    ['fs', 'rm', '', '--project', 'proj'],
+    ['fs', 'rm', '/', '--project', 'proj'],
+  ];
+
+  try {
+    for (const args of cases) {
+      const result = await run(args, { cwd: fixture, env });
+      assert.notEqual(result.status, 0, args.join(' '));
+      assert.match(result.stderr, /Remote path|cannot contain/, args.join(' '));
+    }
+    assert.deepEqual(requests, []);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
+
+test('fs put rejects trailing slash and fs ls reports a raw file as not a directory', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-fs-kind-home-'));
+  const fixture = mkdtempSync(join(tmpdir(), 'sw-fs-kind-fixture-'));
+  writeConfig(home);
+  const source = join(fixture, 'source.bin');
+  writeFileSync(source, 'safe bytes');
+  const requests = [];
+  const server = createServer((req, res) => {
+    requests.push({ method: req.method, url: req.url });
+    res.statusCode = 200;
+    res.setHeader('Content-Type', 'application/octet-stream');
+    res.setHeader('X-Somewhere-Fs-Version', '1');
+    res.end('file bytes');
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1`,
+  };
+
+  try {
+    const put = await run(['fs', 'put', source, '/review/trailing/', '--project', 'proj'], { cwd: fixture, env });
+    assert.notEqual(put.status, 0);
+    assert.match(put.stderr, /cannot end with/);
+    assert.deepEqual(requests, []);
+
+    const ls = await run(['fs', 'ls', '/review/file.bin', '--project', 'proj'], { cwd: fixture, env });
+    assert.notEqual(ls.status, 0);
+    assert.match(ls.stderr, /not a directory/);
+    assert.deepEqual(requests, [{ method: 'GET', url: '/v1/fs/proj/review/file.bin' }]);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});

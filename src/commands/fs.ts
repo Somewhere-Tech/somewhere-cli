@@ -62,6 +62,13 @@ export function registerFs(program: Command): void {
     .option('--json', 'Print the raw file response as JSON')
     .action(async (local: string, remote: string, opts: FsCommandOptions) => {
       try {
+        if (remote.endsWith('/')) {
+          throw new CliApiError(
+            'INVALID_REMOTE_PATH',
+            'Upload destination must name a file and cannot end with `/`.',
+            0,
+          );
+        }
         const source = resolve(local);
         const file = await stat(source);
         if (!file.isFile()) throw new Error(`${local} is not a file.`);
@@ -131,11 +138,18 @@ export function registerFs(program: Command): void {
       try {
         const project = resolveProject(opts.project);
         const client = new ApiClient(getToken());
-        const result = await readEnvelope<FsListResult>(
-          await client.callStream('GET', fsPath(project, remote), undefined, {
-            timeoutMs: LONG_CALL_TIMEOUT_MS,
-          }),
-        );
+        const response = await client.callStream('GET', fsPath(project, remote), undefined, {
+          timeoutMs: LONG_CALL_TIMEOUT_MS,
+        });
+        const contentType = response.headers.get('content-type') ?? '';
+        if (response.ok && (
+          response.headers.has('x-somewhere-fs-version') ||
+          !contentType.toLowerCase().includes('application/json')
+        )) {
+          await response.body?.cancel().catch(() => {});
+          throw new CliApiError('NOT_A_DIRECTORY', `${remote} is not a directory.`, 400);
+        }
+        const result = await readEnvelope<FsListResult>(response);
         if (result.type !== 'directory' || !Array.isArray(result.entries)) {
           throw new Error(`${remote} is not a directory.`);
         }
@@ -196,7 +210,18 @@ function resolveProject(explicit?: string): string {
 
 function fsPath(project: string, remote: string): string {
   const path = remote.replace(/^\/+/, '');
-  const encoded = path.split('/').map(encodeURIComponent).join('/');
+  if (!path) {
+    throw new CliApiError('INVALID_REMOTE_PATH', 'Remote path is required.', 0);
+  }
+  const segments = path.split('/');
+  if (segments.some((segment) => segment === '.' || segment === '..')) {
+    throw new CliApiError(
+      'INVALID_REMOTE_PATH',
+      'Remote path cannot contain `.` or `..` segments.',
+      0,
+    );
+  }
+  const encoded = segments.map(encodeURIComponent).join('/');
   return `/fs/${encodeURIComponent(project)}/${encoded}`;
 }
 
