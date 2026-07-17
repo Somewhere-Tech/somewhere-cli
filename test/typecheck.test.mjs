@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdtempSync, writeFileSync, mkdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 const typecheckModule = process.env.SOMEWHERE_TEST_SOURCE
@@ -9,8 +11,9 @@ const typecheckModule = process.env.SOMEWHERE_TEST_SOURCE
 const scaffoldModule = process.env.SOMEWHERE_TEST_SOURCE
   ? '../src/lib/scaffold.ts'
   : '../dist/lib/scaffold.js';
-const { npxTscInvocation, parseTscOutput, runTypecheck } = await import(typecheckModule);
-const { buildScaffoldTsconfig } = await import(scaffoldModule);
+const { npxTscInvocation, parseTscOutput, runTypecheck, typecheckArgs } =
+  await import(typecheckModule);
+const { buildScaffoldPackageJson, buildScaffoldTsconfig } = await import(scaffoldModule);
 
 test('npx fallback installs the typescript package before invoking tsc', () => {
   assert.deepEqual(npxTscInvocation('linux'), {
@@ -19,6 +22,16 @@ test('npx fallback installs the typescript package before invoking tsc', () => {
     via: 'npx',
   });
   assert.equal(npxTscInvocation('win32').command, 'npx.cmd');
+});
+
+test('typecheck explicitly loads the scaffolded project config without file args', () => {
+  assert.deepEqual(typecheckArgs(), [
+    '--project',
+    'tsconfig.json',
+    '--noEmit',
+    '--pretty',
+    'false',
+  ]);
 });
 
 test('parseTscOutput extracts file:line:col, code, message', () => {
@@ -42,6 +55,7 @@ test('parseTscOutput extracts file:line:col, code, message', () => {
 function fixture(files) {
   const dir = mkdtempSync(join(tmpdir(), 'sw-tc-'));
   writeFileSync(join(dir, 'tsconfig.json'), buildScaffoldTsconfig());
+  writeFileSync(join(dir, 'package.json'), buildScaffoldPackageJson('fresh-pull', {}));
   for (const [rel, content] of Object.entries(files)) {
     const full = join(dir, rel);
     mkdirSync(join(full, '..'), { recursive: true });
@@ -49,6 +63,25 @@ function fixture(files) {
   }
   return dir;
 }
+
+test('a fresh pull scaffold is clean via somewhere typecheck and bare tsc', async () => {
+  const dir = fixture({
+    'src/main.ts': 'export const answer: number = 42;\n',
+  });
+
+  const cliResult = await runTypecheck(dir);
+  assert.equal(cliResult.ok, true, cliResult.raw);
+
+  const require = createRequire(import.meta.url);
+  const tscBin = require.resolve('typescript/bin/tsc');
+  const bareResult = spawnSync(
+    process.execPath,
+    [tscBin, '--noEmit', '--pretty', 'false'],
+    { cwd: dir, encoding: 'utf8' },
+  );
+  const bareOutput = `${bareResult.stdout ?? ''}${bareResult.stderr ?? ''}`;
+  assert.equal(bareResult.status, 0, bareOutput);
+});
 
 test('runTypecheck catches a dropped import (TS2304) with file:line', async () => {
   const dir = fixture({

@@ -13,6 +13,7 @@ import { existsSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { SCAFFOLD_TSCONFIG_FILENAME } from './scaffold.js';
 import { TYPECHECK_TYPESCRIPT_VERSION } from './typecheck-version.js';
 
 export interface TypeError {
@@ -63,6 +64,23 @@ export function npxTscInvocation(
     args: ['-y', '-p', `typescript@${TYPECHECK_TYPESCRIPT_VERSION}`, 'tsc'],
     via: 'npx',
   };
+}
+
+/**
+ * Load the pulled tree's project config explicitly. TypeScript 7 reports
+ * TS5112 when source files are passed because that would ignore tsconfig.json;
+ * this project-wide invocation needs neither source-file args nor
+ * --ignoreConfig.
+ */
+export function typecheckArgs(prefixArgs: readonly string[] = []): string[] {
+  return [
+    ...prefixArgs,
+    '--project',
+    SCAFFOLD_TSCONFIG_FILENAME,
+    '--noEmit',
+    '--pretty',
+    'false',
+  ];
 }
 
 /** Locate a runnable tsc. Never throws — npx is the always-available fallback. */
@@ -122,7 +140,7 @@ export function parseTscOutput(output: string): TypeError[] {
 export function runTypecheck(projectDir: string): Promise<TypecheckResult> {
   const { command, args, via } = resolveTsc(projectDir);
   // --pretty false → stable, parseable one-line diagnostics regardless of TTY.
-  const fullArgs = [...args, '--noEmit', '--pretty', 'false'];
+  const fullArgs = typecheckArgs(args);
 
   return new Promise((resolve) => {
     let child;

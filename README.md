@@ -49,7 +49,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
 | `somewhere deploy --force` | Intentionally overwrite remote changes made since this machine last deployed |
 | `somewhere pull` | Download a project's deployed source + scaffold tsconfig/package.json for local typechecking |
-| `somewhere typecheck` | `tsc --noEmit` over a pulled tree — the "safe to deploy?" gate; catches a dropped import (TS2304) with file:line |
+| `somewhere typecheck` | Loads the pulled `tsconfig.json` explicitly (equivalent to project-wide `tsc --noEmit`) — catches a dropped import (TS2304) with file:line; do not append source-file args, which bypass the project config |
 | `somewhere logs` | Show recent logs |
 | `somewhere logs --follow` | Stream logs in real-time |
 | `somewhere logs --level error` | Filter by level |
