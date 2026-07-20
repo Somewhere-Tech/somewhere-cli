@@ -192,11 +192,12 @@ test('pull updates last_deploy so the next deploy uses the pulled current versio
     req.on('end', () => {
       const url = new URL(req.url, 'http://127.0.0.1');
       if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        assert.equal(url.searchParams.get('env'), 'prod');
         sendJson(res, 200, {
           ok: true,
           data: {
             project_id: 'proj_stale_base',
-            env: 'dev',
+            env: 'prod',
             version: 9,
             static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
             binary_files: {},

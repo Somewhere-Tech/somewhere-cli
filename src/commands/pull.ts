@@ -37,7 +37,7 @@ export function registerPull(program: Command) {
         'Scaffolds a tsconfig.json + package.json (only if absent) so `somewhere typecheck` ' +
         'can catch undefined symbols locally before you deploy.',
     )
-    .option('--env <env>', 'Environment to pull from (dev or prod)', 'dev')
+    .option('--env <env>', 'Environment to pull from (dev or prod)', 'prod')
     .option('--out <dir>', 'Output directory', '.')
     .option('--force', 'Overwrite existing files without prompting')
     .option('--json', 'Print the raw source response as JSON')
