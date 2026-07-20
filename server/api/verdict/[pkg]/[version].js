@@ -25,30 +25,18 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
-/** Per-day, per-source request + 429 counters. Self-creates its table on first
- *  use so it needs no migration step, and NEVER throws into the verdict path —
- *  metrics are best-effort. `source` is 'web' (the live checker) or 'cli'. */
+/** Per-day, per-source request + 429 counters. Schema is owned by migration
+ *  0005; metrics remain best-effort and NEVER throw into the verdict path.
+ *  `source` is 'web' (the live checker) or 'cli'. */
 async function track(sw, source, blocked) {
-  const upsert = () =>
-    sw.db.query(
+  try {
+    await sw.db.query(
       `INSERT INTO usage_daily (day, source, requests, blocked) VALUES (?, ?, 1, ?)
        ON CONFLICT(day, source) DO UPDATE SET requests = requests + 1, blocked = blocked + ?`,
       [today(), source, blocked, blocked],
     );
-  try {
-    await upsert();
   } catch {
-    try {
-      await sw.db.query(
-        `CREATE TABLE IF NOT EXISTS usage_daily (
-           day TEXT NOT NULL, source TEXT NOT NULL DEFAULT 'cli',
-           requests INTEGER NOT NULL DEFAULT 0, blocked INTEGER NOT NULL DEFAULT 0,
-           PRIMARY KEY (day, source))`,
-      );
-      await upsert();
-    } catch {
-      // metrics must never break the verdict path
-    }
+    // metrics must never break the verdict path
   }
 }
 

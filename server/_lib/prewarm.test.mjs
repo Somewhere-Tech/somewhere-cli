@@ -178,7 +178,7 @@ function depSw(uncovered) {
         if (/SELECT DISTINCT je\.value/.test(sql)) return { data: uncovered.map((d) => ({ dep: d })) };
         if (/COUNT\(DISTINCT je\.value\)/.test(sql)) return { data: [{ c: Math.max(0, uncovered.length - writes.length) }] };
         if (sql.startsWith('INSERT')) { writes.push(params[0]); return { changes: 1 }; }
-        return { data: [] }; // ALTER (ensureSchema) + anything else
+        return { data: [] }; // any other best-effort query
       },
     },
   };

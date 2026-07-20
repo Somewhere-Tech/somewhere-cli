@@ -135,21 +135,6 @@ export async function readVerdict(sw, name, version) {
   return row ? rowToVerdict(row) : null;
 }
 
-let schemaEnsured = false;
-/** Add the `metadata` JSON column on the first write per worker instance — a
- *  no-op once it exists (the ALTER errors on a duplicate column, which we
- *  swallow). Lets the new signal columns ship without a separate migration. */
-async function ensureSchema(sw) {
-  if (schemaEnsured) return;
-  schemaEnsured = true;
-  try {
-    await sw.db.query('ALTER TABLE verdicts ADD COLUMN metadata TEXT');
-  } catch {
-    // column already exists, or DDL not permitted — writes degrade, never block
-  }
-}
-
 export async function writeVerdict(sw, v) {
-  await ensureSchema(sw);
   await sw.db.query(INSERT_SQL, verdictToParams(v));
 }

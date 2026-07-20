@@ -7,9 +7,9 @@
 -- verdict requests + 429s per day, split by source (web checker vs CLI).
 --
 -- APPLIED to the live `npm` project DB via `somewhere db query` on 2026-06-27.
--- DDL issued from a function's `sw.db` is rejected on this platform, so the
--- in-code self-migration (db.mjs ensureSchema / verdict route track()) is a
--- best-effort no-op — THIS FILE is the source of truth and what a fresh DB needs.
+-- DDL issued from a function's `sw.db` is rejected on this platform. THIS FILE
+-- is the source of truth and what a fresh DB needs; request handlers assume it
+-- has been applied and never attempt schema changes.
 -- (ALTER ADD COLUMN is not idempotent; run once on a fresh DB.)
 
 ALTER TABLE verdicts ADD COLUMN metadata TEXT;

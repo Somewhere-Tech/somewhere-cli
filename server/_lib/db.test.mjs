@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { rowToVerdict, verdictToParams } from './db.mjs';
+import { readFileSync } from 'node:fs';
+import { rowToVerdict, verdictToParams, writeVerdict } from './db.mjs';
 
 const COLUMNS = [
   'package', 'version', 'computed_at', 'has_provenance', 'provenance_commit', 'provenance_repo',
@@ -92,4 +93,36 @@ test('rowToVerdict — booleans from 0/1, null github tag stays null', () => {
   assert.equal(r.known_cves, 0);
   assert.deepEqual(r.compromised_history, []);
   assert.deepEqual(r.dependency_flags, []);
+});
+
+test('writeVerdict performs only the cache-row write; schema belongs to migrations', async () => {
+  const statements = [];
+  const sw = {
+    db: {
+      async query(sql) {
+        statements.push(sql);
+        return { data: [], changes: 1 };
+      },
+    },
+  };
+  await writeVerdict(sw, {
+    package: 'semver',
+    version: '7.7.2',
+    verdict: 'verified',
+    verdict_signals: [],
+    capabilities: [],
+    has_provenance: true,
+    is_minified: false,
+    has_install_scripts: false,
+    install_script_types: [],
+    computed_at: '2026-07-19T00:00:00Z',
+  });
+  assert.equal(statements.length, 1);
+  assert.match(statements[0], /^INSERT OR REPLACE INTO verdicts/);
+  assert.doesNotMatch(statements[0], /\b(?:ALTER|CREATE|DROP)\b/i);
+});
+
+test('verdict request handler contains no runtime DDL fallback', () => {
+  const source = readFileSync(new URL('../api/verdict/[pkg]/[version].js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /\b(?:ALTER|CREATE|DROP)\s+(?:TABLE|INDEX)\b/i);
 });
