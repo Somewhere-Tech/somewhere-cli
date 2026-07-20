@@ -13,7 +13,16 @@ const PROVIDERS: NoticeProvider[] = [updateProvider];
 /** `somewhere <sub>` forms that must stay silent: the verdict/safety pass-throughs
  *  (their own bins already bypass this entry, but `somewhere swpx …` reaches here)
  *  and the machine-oriented npx/npm aliases. */
-const SKIP_SUBCOMMANDS = new Set(['swpx', 'swpm', 'x', 'm', 'npx', 'npm']);
+const SKIP_SUBCOMMANDS = new Set(['swpx', 'swpm', 'x', 'm', 'npx', 'npm', 'update']);
+
+/** Commands that own their output or run in a safety-sensitive pass-through
+ * stay silent. In particular, an `update` process keeps its old in-memory
+ * version after installing the new package, so its generic exit notice would
+ * otherwise repeat the update that just succeeded. */
+export function subcommandSuppressesNotifications(argv: string[]): boolean {
+  const sub = argv[2];
+  return !sub || sub.startsWith('-') || SKIP_SUBCOMMANDS.has(sub);
+}
 
 function currentVersion(): string {
   try {
@@ -34,8 +43,7 @@ function notificationsAllowed(argv: string[]): boolean {
   if (!process.stderr.isTTY) return false; // agents, pipes, redirects, files
   if (process.env.CI) return false; // CI logs
   if (process.env.SOMEWHERE_NO_NOTIFICATIONS) return false; // global opt-out
-  const sub = argv[2];
-  if (!sub || sub.startsWith('-') || SKIP_SUBCOMMANDS.has(sub)) return false;
+  if (subcommandSuppressesNotifications(argv)) return false;
   return true;
 }
 
