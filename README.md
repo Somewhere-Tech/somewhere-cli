@@ -48,14 +48,13 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
 | `somewhere deploy --force` | Intentionally overwrite remote changes made since this machine last deployed |
-| `somewhere pull` | Download a project's deployed source + scaffold tsconfig/package.json for local typechecking |
+| `somewhere pull` | Download a project's live deployed source + scaffold tsconfig/package.json for local typechecking |
 | `somewhere typecheck` | Loads the pulled `tsconfig.json` explicitly (equivalent to project-wide `tsc --noEmit`) — catches a dropped import (TS2304) with file:line; do not append source-file args, which bypass the project config |
 | `somewhere logs` | Show recent logs |
 | `somewhere logs --follow` | Stream logs in real-time |
 | `somewhere logs --level error` | Filter by level |
-| `somewhere run <script.js>` | Run a one-off script once against the project's live dev bindings (`sw.db`/`sw.fs`/`sw.ai`…) and print its return value + logs — no deploy |
+| `somewhere run <script.js>` | Run a one-off script once against the project's live bindings (`sw.db`/`sw.fs`/`sw.ai`…) and print its return value + logs — no deploy |
 | `somewhere errors` | Show the most recent exceptions (endpoint, status, error, time) — the curated error view |
-| `somewhere promote [draft_id]` | Ship the current dev/preview build to production (pass a `draft_id` to publish exactly that build) |
 | `somewhere rollback` | Revert production to the previous deployed version |
 | `somewhere env list` | Show environment variables |
 | `somewhere env set KEY value` | Set an env var |
@@ -64,9 +63,6 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere status` | Show project + workspace status |
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |
-| `somewhere dev` | Private preview watcher — save a file, your owner-only preview updates in seconds (no local server, nothing to prod) |
-| `somewhere dev --local` | Run functions in local Node (sw.* hits the real project); typechecks before start + on every reload so a dropped import surfaces in the terminal, not as a 500 |
-| `somewhere dev --local --check` | Same, but EXIT on type errors instead of warning |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
 | `somewhere advisor "<question>"` | Ask the authenticated platform advisor (`--json` for automation) |
 | `somewhere docs [topic]` | Read public text docs or an MCP manual topic such as `sw.db` (`--json` supported) |
@@ -161,7 +157,7 @@ Files under `public/` deploy at the site root, matching Vite's convention: `publ
 
 To exclude local-only files from deploy, add gitignore-style patterns to `.somewhereignore` in the project root. The CLI also respects the root `.gitignore`. `.somewhereignore` is applied after `.gitignore`, so it can add deploy-only excludes or `!` re-includes. Built-in safety excludes such as `node_modules`, `.git`, `.env`, `dist`, and dotfiles still apply.
 
-After each successful linked deploy, promote, or pull, the CLI records the current deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
+After each successful linked deploy or pull, the CLI records the current deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
 
 ### Deploy options
 
@@ -183,38 +179,19 @@ somewhere deploy --scope functions    # ship a backend fix without touching the 
 somewhere deploy --force --yes        # overwrite remote edits intentionally
 ```
 
-## Hot reload: `somewhere dev`
+## Optional cloud development
 
-```sh
-somewhere dev
-```
+The default workflow is `somewhere pull` → edit → `somewhere typecheck` →
+`somewhere deploy`, followed by verification on the public live URL. Database,
+files, one-off scripts, deployed functions, and Browser all use that same live
+project.
 
-Starts a file watcher that updates a **private preview** on every save — no local
-server, no emulator. You get a preview link (`{project}-dev.somewhere.tech`) that
-**only you can see** (owner-gated). Edit a file, save, and the preview refreshes
-in a couple of seconds on the real platform with full `sw.*` context.
-
-**It is not a deploy.** Nothing goes to production, no version number changes, no
-deployment-history entry — your real users never see your half-finished work.
-When it looks right, run `somewhere deploy` to ship to production. Compile errors
-show up in the terminal immediately (file + line); your last working preview keeps
-serving until you fix them.
-
-```
-$ somewhere dev
-✓ Synced 3 files to preview
-👀 Watching /my-app for changes
-🌐 Preview: https://my-app-dev.somewhere.tech
-   private to you — save a file and the preview updates. Not live to users.
-   run `somewhere deploy` to ship to production.
-
-[13:41:01] src/main.tsx → ✓ preview (1.2s)
-[13:41:18] api/users.ts → ✗ compile failed (1.4s)  ← last working preview still up
-[13:41:24] api/users.ts → ✓ preview (0.9s)
-```
-
-Passing a command (`somewhere dev npm run dev`) keeps the legacy behavior — run
-your own process locally with `SOMEWHERE_PROJECT_ID` / `SOMEWHERE_URL` injected.
+`somewhere dev`, `somewhere dev --local`, `somewhere exec`, and
+`somewhere promote` are preserved advanced commands for the isolated
+cloud-development environment. Cloud development is off by default, including
+on paid accounts, and requires both a paid plan and explicit platform
+enablement. Without it, these commands return `CLOUD_DEV_NOT_ENABLED` before
+creating cloud-development resources.
 
 ## Client-side code: use the SDK
 
