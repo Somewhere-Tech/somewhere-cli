@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { spawn } from 'node:child_process';
+import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
 import { reportTypecheck } from './typecheck.js';
@@ -7,7 +8,7 @@ import { runTypecheck } from '../lib/typecheck.js';
 import chokidar from 'chokidar';
 import open from '../lib/open.js';
 import ora from '../lib/spinner.js';
-import { ApiClient, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
+import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { buildErrorSummary, isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
@@ -19,22 +20,47 @@ import { showProjectNotices } from '../lib/project-notices.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
+const RETRYABLE_DRAFT_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
 
 interface DeployResult {
   files?: string[] | number;
-  url: string;
+  files_deployed?: number;
+  preview_url?: string;
   has_functions?: boolean;
   build_log?: string[];
   warnings?: string[];
+  draft_id?: string;
+  candidate_release_id?: string;
 }
 
 interface PatchResult {
-  url: string;
+  preview_url?: string;
   version: number;
   warnings?: string[];
   function_errors?: Array<{ route?: string; error?: string } | string>;
   bundle_error?: string;
   status?: 'success' | 'partial' | 'compile_degraded' | 'functions_degraded';
+  draft_id?: string;
+  candidate_release_id?: string;
+}
+
+export async function callDraftCandidate<T>(
+  client: ApiClient,
+  path: '/deploy' | '/deploy/patch',
+  body: Record<string, unknown>,
+): Promise<T> {
+  try {
+    return await client.call<T>('POST', path, body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
+  } catch (err) {
+    if (!(err instanceof CliApiError) || !RETRYABLE_DRAFT_CODES.has(err.code)) throw err;
+    // The exact same draft_operation_id makes this a read/replay of one
+    // immutable build result, never a hidden rebase onto whatever is live now.
+    return client.call<T>('POST', path, body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
+  }
 }
 
 export function registerDev(program: Command) {
@@ -191,17 +217,35 @@ async function runHotDeploy(opts: { project?: string }) {
   // deploy first establishes the sandbox AND returns the {slug}-dev URL.
   const spinner = ora('Syncing to preview...').start();
   const { files, binaryFiles, functions } = collectFiles(cwd);
+  const draftId = `draft_${randomUUID()}`;
+  const firstOperationId = `draftop_${randomUUID()}`;
+  let candidateReleaseId: string | null = null;
   let url: string;
   try {
-    const body: Record<string, unknown> = { project_id: projectId, files, preview: true };
+    const body: Record<string, unknown> = {
+      project_id: projectId,
+      files,
+      preview: true,
+      draft_id: draftId,
+      draft_operation_id: firstOperationId,
+      expected_candidate_release_id: null,
+    };
     if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
     if (Object.keys(functions).length) body.functions = functions;
-    const res = await client.call<DeployResult>('POST', '/deploy', body, undefined, {
-      timeoutMs: LONG_CALL_TIMEOUT_MS,
-    });
-    url = res.url;
+    const res = await callDraftCandidate<DeployResult>(client, '/deploy', body);
+    if (res.draft_id !== draftId
+        || typeof res.candidate_release_id !== 'string'
+        || typeof res.preview_url !== 'string') {
+      throw new Error('The platform did not return the exact draft candidate created by this session.');
+    }
+    candidateReleaseId = res.candidate_release_id;
+    url = res.preview_url;
     spinner.stop();
-    const n = typeof res.files === 'number' ? res.files : (res.files ?? []).length;
+    const n = typeof res.files_deployed === 'number'
+      ? res.files_deployed
+      : typeof res.files === 'number'
+        ? res.files
+        : (res.files ?? []).length;
     success(`Synced ${n} files to preview`);
     if (res.warnings?.length) for (const w of res.warnings) warn(w);
   } catch (err) {
@@ -216,7 +260,8 @@ async function runHotDeploy(opts: { project?: string }) {
   console.log(`${green('👀')} ${bold('Watching')} ${dim(cwd)} ${dim('for changes')}`);
   console.log(`${teal('🌐')} ${bold('Preview:')} ${teal(url)}`);
   console.log(dim('   private to you — save a file and the preview updates. Not live to users.'));
-  console.log(dim('   run `somewhere deploy` to ship to production. Ctrl-C to stop.\n'));
+  console.log(dim(`   publish this exact preview with \`somewhere promote ${draftId} ${candidateReleaseId}\`.`));
+  console.log(dim('   Ctrl-C to stop.\n'));
   open(url).catch(() => {});
 
   // Debounced batch of changes. Saving three files in quick succession ships
@@ -243,7 +288,16 @@ async function runHotDeploy(opts: { project?: string }) {
     pendingDeleted.clear();
     deploying = true;
     try {
-      await deployBatch(client, projectId!, cwd, changed, deleted);
+      const nextCandidate = await deployBatch(
+        client,
+        projectId!,
+        cwd,
+        changed,
+        deleted,
+        draftId,
+        candidateReleaseId!,
+      );
+      if (nextCandidate) candidateReleaseId = nextCandidate;
     } finally {
       deploying = false;
       if (pendingChanged.size || pendingDeleted.size) schedule();
@@ -290,7 +344,9 @@ async function deployBatch(
   cwd: string,
   changed: string[],
   deleted: string[],
-) {
+  draftId: string,
+  expectedCandidateReleaseId: string,
+): Promise<string | null> {
   const updateFiles: Record<string, string> = {};
   const updateFunctions: Record<string, string> = {};
   const updateBinary: Record<string, string> = {};
@@ -306,23 +362,35 @@ async function deployBatch(
   }
   for (const rel of deleted) deleteKeys.push(classifyKey(rel).key);
 
-  const body: Record<string, unknown> = { project_id: projectId, preview: true };
+  const operationId = `draftop_${randomUUID()}`;
+  const body: Record<string, unknown> = {
+    project_id: projectId,
+    preview: true,
+    draft_id: draftId,
+    draft_operation_id: operationId,
+    expected_candidate_release_id: expectedCandidateReleaseId,
+  };
   if (Object.keys(updateFiles).length) body.update_files = updateFiles;
   if (Object.keys(updateFunctions).length) body.update_functions = updateFunctions;
   if (Object.keys(updateBinary).length) body.update_binary_files = updateBinary;
   if (deleteKeys.length) body.delete_files = deleteKeys;
 
   // Nothing real to ship (e.g. every changed file vanished) — skip quietly.
-  if (Object.keys(body).length === 2) return;
+  if (!Object.keys(updateFiles).length
+      && !Object.keys(updateFunctions).length
+      && !Object.keys(updateBinary).length
+      && !deleteKeys.length) return null;
 
   const label = describeBatch(changed, deleted);
   const t0 = Date.now();
   process.stdout.write(`${dim(stamp())} ${label} ${dim('→ updating preview...')}`);
 
   try {
-    const r = await client.call<PatchResult>('POST', '/deploy/patch', body, undefined, {
-      timeoutMs: LONG_CALL_TIMEOUT_MS,
-    });
+    const r = await callDraftCandidate<PatchResult>(client, '/deploy/patch', body);
+    if (r.draft_id !== draftId || typeof r.candidate_release_id !== 'string') {
+      throw new Error('The platform did not return the exact updated draft candidate.');
+    }
+    const nextCandidate = r.candidate_release_id;
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');
@@ -331,7 +399,7 @@ async function deployBatch(
       console.log(`${dim(stamp())} ${label} ${red('✗ compile failed')} ${dim(`(${secs}s)`)}`);
       error(r.bundle_error);
       info(dim('Your last working preview is still up. Fix and save again.'));
-      return;
+      return null;
     }
     if (r.function_errors?.length) {
       console.log(`${dim(stamp())} ${label} ${yellow('⚠ functions degraded')} ${dim(`(${secs}s)`)}`);
@@ -340,14 +408,15 @@ async function deployBatch(
         const detail = typeof fe === 'string' ? '' : fe.error ? ` — ${fe.error}` : '';
         warn(`${route}${detail}`);
       }
-      return;
+      return null;
     }
     if (r.warnings?.length) {
       console.log(`${dim(stamp())} ${label} ${yellow('⚠ preview')} ${dim(`(${secs}s)`)}`);
       for (const w of r.warnings) warn(w);
-      return;
+      return nextCandidate;
     }
     console.log(`${dim(stamp())} ${label} ${green('✓ preview')} ${dim(`(${secs}s)`)}`);
+    return nextCandidate;
   } catch (err) {
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     process.stdout.write('\r\x1b[K');
@@ -355,10 +424,11 @@ async function deployBatch(
       console.log(`${dim(stamp())} ${label} ${red('✗ compile failed')} ${dim(`(${secs}s)`)} ${yellow(buildErrorSummary(err))}`);
       renderBuildError(err, cwd);
       info(dim('Your last working preview is still up. Fix and save again.'));
-      return;
+      return null;
     }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
     error(err instanceof Error ? err.message : String(err));
+    return null;
   }
 }
 

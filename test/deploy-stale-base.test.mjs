@@ -728,6 +728,8 @@ test('promote writes the returned version to the linked project state', async ()
   const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-stale-promote-fixture-'));
   writeLogin(HOME);
   writeProject(fixtureDir);
+  const draftId = 'draft_11111111-1111-4111-8111-111111111111';
+  const candidateReleaseId = 'rel_candidate_11111111';
 
   let promoteBody = null;
   await withServer((req, res) => {
@@ -745,13 +747,15 @@ test('promote writes the returned version to the linked project state', async ()
       sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
     });
   }, async (apiUrl) => {
-    const result = await run(['promote', '--yes', '--json'], {
+    const result = await run(['promote', draftId, candidateReleaseId, '--yes', '--json'], {
       cwd: fixtureDir,
       env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
     });
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.equal(promoteBody.project_id, 'proj_stale_base');
+    assert.equal(promoteBody.draft_id, draftId);
+    assert.equal(promoteBody.candidate_release_id, candidateReleaseId);
     const project = readProject(fixtureDir);
     assert.equal(project.last_deploy.project_id, 'proj_stale_base');
     assert.equal(project.last_deploy.last_deployed_version, 21);
