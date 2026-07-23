@@ -20,17 +20,17 @@ interface PromoteResult {
 
 export function registerPromote(program: Command) {
   program
-    .command('promote [draft_id]')
+    .command('promote <draft_id> <candidate_release_id>')
     .description(
-      'Ship the current dev/preview build to production. Pass the draft_id you ' +
-        'got from `somewhere dev` / a preview to publish EXACTLY that build — ' +
-        'the promote is refused if a newer draft replaced it since you previewed.',
+      'Ship one exact preview candidate to production. Pass the draft_id and ' +
+        'candidate_release_id returned by the preview; promotion is refused if ' +
+        'the live base or candidate changed.',
     )
     .option('-p, --project <id>', 'Project ID (defaults to the linked project)')
     .option('-m, --message <msg>', 'Release notes for this version')
     .option('-y, --yes', 'Skip confirmation prompt')
     .option('--json', 'Print the raw promote response as JSON')
-    .action(async (draftId: string | undefined, opts) => {
+    .action(async (draftId: string, candidateReleaseId: string, opts) => {
       const client = new ApiClient(getToken());
 
       let projectId = opts.project as string | undefined;
@@ -55,9 +55,7 @@ export function registerPromote(program: Command) {
         const { ok } = await prompts({
           type: 'confirm',
           name: 'ok',
-          message: draftId
-            ? `Promote draft ${teal(draftId)} of ${teal(projectId)} → prod?`
-            : `Promote ${teal(projectId)} dev → prod?`,
+          message: `Promote candidate ${teal(candidateReleaseId)} from ${teal(draftId)} of ${teal(projectId)} → prod?`,
           initial: true,
           stdout: opts.json ? process.stderr : undefined,
         });
@@ -78,6 +76,7 @@ export function registerPromote(program: Command) {
           project_id: projectId,
           message: opts.message,
           draft_id: draftId,
+          candidate_release_id: candidateReleaseId,
         });
         spinner?.stop();
         if (deployStateEntry) {
