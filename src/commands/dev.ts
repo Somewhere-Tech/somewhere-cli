@@ -16,7 +16,6 @@ import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
 import { showProjectNotices } from '../lib/project-notices.js';
-import { callWithPinnedReleaseRetry } from '../lib/pinned-release-retry.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -197,12 +196,9 @@ async function runHotDeploy(opts: { project?: string }) {
     const body: Record<string, unknown> = { project_id: projectId, files, preview: true };
     if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
     if (Object.keys(functions).length) body.functions = functions;
-    const res = await callWithPinnedReleaseRetry(
-      (requestBody) => client.call<DeployResult>('POST', '/deploy', requestBody, undefined, {
-        timeoutMs: LONG_CALL_TIMEOUT_MS,
-      }),
-      body,
-    );
+    const res = await client.call<DeployResult>('POST', '/deploy', body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
     url = res.url;
     spinner.stop();
     const n = typeof res.files === 'number' ? res.files : (res.files ?? []).length;
@@ -324,12 +320,9 @@ async function deployBatch(
   process.stdout.write(`${dim(stamp())} ${label} ${dim('→ updating preview...')}`);
 
   try {
-    const r = await callWithPinnedReleaseRetry(
-      (requestBody) => client.call<PatchResult>('POST', '/deploy/patch', requestBody, undefined, {
-        timeoutMs: LONG_CALL_TIMEOUT_MS,
-      }),
-      body,
-    );
+    const r = await client.call<PatchResult>('POST', '/deploy/patch', body, undefined, {
+      timeoutMs: LONG_CALL_TIMEOUT_MS,
+    });
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');

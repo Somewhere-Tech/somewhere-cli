@@ -20,7 +20,6 @@ import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
-import { pinnedReleaseRetryBody } from '../lib/pinned-release-retry.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
 // `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
@@ -774,24 +773,15 @@ async function callDeployWithRetry<T>(
   body: Record<string, unknown>,
   opts: DeployRetryOptions,
 ): Promise<T> {
-  let requestBody = body;
   for (let attempt = 1; attempt <= DEPLOY_MAX_ATTEMPTS; attempt++) {
     const startedAt = Date.now();
     const stopHeartbeat = startDeployHeartbeat(opts, attempt, startedAt);
     try {
-      return await client.call<T>('POST', '/deploy', requestBody, undefined, {
+      return await client.call<T>('POST', '/deploy', body, undefined, {
         timeoutMs: deployTimeoutMs(),
       });
     } catch (err) {
       if (attempt >= DEPLOY_MAX_ATTEMPTS) throw err;
-
-      const pinnedRetryBody = pinnedReleaseRetryBody(err, body);
-      if (pinnedRetryBody !== null) {
-        // This shares the existing two-attempt budget, so any failure from the
-        // pinned retry is surfaced directly and can never trigger request 3.
-        requestBody = pinnedRetryBody;
-        continue;
-      }
 
       if (!isRetryableDeployError(err)) throw err;
       if (!opts.json) {
