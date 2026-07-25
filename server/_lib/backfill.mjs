@@ -1,53 +1,70 @@
 /** Mechanical backfill — reconcile STORED verdict rows with the CURRENT engine
- *  after a rules change (commit 51623b2: provenance short-circuits the tag
- *  heuristic; no_github_tag demoted to non-solo; deps scored at their declared
- *  range). A cache hit returns the stored mechanical verdict WITHOUT recomputing
- *  (resolve.mjs), so a rules change leaves the table full of verdicts derived
- *  under the old rules until each row is rewritten. This rewrites them.
+ *  after a rules/signal change. A cache hit returns the stored verdict WITHOUT
+ *  recomputing (resolve.mjs), so a rules change leaves the table computed under
+ *  the OLD rules until each row is rewritten. This rewrites them — and does it
+ *  with ZERO network calls.
  *
- *  Two things make this cheap and safe:
+ *  Why zero-fetch is both correct and necessary:
  *
- *  1. NO re-fetch of mechanical signals. Every input computeVerdict reads
- *     (has_provenance, is_minified, has_install_scripts, has_github_tag,
- *     weekly_downloads, description_match, typosquat) is a fixed FACT about
- *     package@version that the OLD code already stored correctly — only the
- *     VERDICT it derived was wrong. So we re-derive the verdict from the stored
- *     row with ZERO network. In particular NO GitHub calls (has_github_tag is
- *     reused), so the GitHub rate limit is never touched.
+ *  1. MECHANICAL verdict from stored signals. Every input computeVerdict reads
+ *     (has_provenance, has_github_tag, is_minified, weekly_downloads,
+ *     description_match, typosquat) is a fixed FACT the old code already stored
+ *     correctly. The install-script signal is the one exception: the fix that
+ *     motivated this pass DROPPED `prepare` from the install-time set (it does
+ *     not run for registry consumers), so we RE-DERIVE has_install_scripts from
+ *     the stored `install_script_types` list, filtered through the corrected
+ *     INSTALL_LIFECYCLE — no manifest re-fetch needed, because the raw script
+ *     NAMES were already stored.
  *
- *  2. LLM-free. The narrative, author profile, CVE/advisory history and every
- *     other enrich field are PRESERVED verbatim (we spread the existing row and
- *     overwrite only verdict + signals + the dependency-cascade fields). No
- *     summarize() call, no PREWARM budget spent. (Stale narrative TEXT — "no
- *     release tag" prose on a row that is now verified — is a SEPARATE, opt-in
- *     LLM re-enrichment pass; this backfill does not touch summaries.)
+ *  2. CASCADE by re-reading the stored flags' children. The rule/signal fixes
+ *     are all monotone-lenient — they only ever CLEAR a verdict, never add one —
+ *     so a dependency that was `verified` cannot newly-flag. The complete set of
+ *     children that could still flag a parent is therefore a SUBSET of that
+ *     parent's already-stored `dependency_flags`. We re-read each of those
+ *     children's CURRENT verdict; any now-`verified` (or vanished → unknown)
+ *     drops off. No dep re-resolution, no packument download.
  *
- *  The dependency cascade DOES need the parent packument (to resolve each dep to
- *  its DECLARED range, matching the deployed enrich path), so rows WITH
- *  dependencies cost one packument fetch plus the dep resolutions; leaf rows
- *  cost nothing.
+ *  Convergence: the worklist IS `verdict != 'verified'` and clearing only
+ *  REMOVES rows from it. A leaf clears the moment its signals re-derive clean; a
+ *  parent clears on the pass after its last flagged child does. Repeat full
+ *  passes until one changes nothing. Idempotent (a correct row re-derives to
+ *  itself → 0 change) and resumable (cursor by package+version).
  *
- *  Convergence: the worklist IS `verdict != 'verified'`, and clearing only ever
- *  REMOVES a row from it. Leaves clear on the first pass; their parents clear on
- *  the next (the cascade re-reads the now-corrected child rows); repeat until a
- *  full pass changes nothing. Idempotent (recompute is deterministic → a correct
- *  row rewrites to itself → 0 change) and resumable (cursor by package+version,
- *  which INSERT-OR-REPLACE never perturbs). */
+ *  LIMITATION (documented on purpose): this pass does NOT re-run change #3
+ *  (resolve each dependency to its DECLARED range rather than the version stored
+ *  in the old flags) — that would require a manifest fetch per row and is what
+ *  made the first cut take ~90s/slice. For the fixes this pass targets it is
+ *  moot (the divergent children clear anyway), and any residual version-
+ *  resolution drift is reconciled by the weekly prewarm (freshDays=7), which
+ *  does a full re-enrich. */
 
 import { computeVerdict, cascadeVerdict } from './engine.mjs';
-import { checkDependencies, resolveVersion as resolveDependencyVersion } from './dep-tree.mjs';
+import { INSTALL_LIFECYCLE } from './checks/manifest.mjs';
 import { readVerdict as dbReadVerdict, writeVerdict as dbWriteVerdict, rowToVerdict } from './db.mjs';
-import { fetchPackument as registryFetchPackument } from './registry.mjs';
+
+/** Re-derive install-script signals from the stored `install_script_types`
+ *  under the CURRENT INSTALL_LIFECYCLE (which no longer counts `prepare`). Falls
+ *  back to the stored boolean for very old rows that never stored the list. */
+export function correctedInstallScripts(row) {
+  const stored = Array.isArray(row.install_script_types) ? row.install_script_types : null;
+  if (stored) {
+    const kept = stored.filter((t) => INSTALL_LIFECYCLE.includes(t));
+    return { types: kept, has: kept.length > 0 };
+  }
+  return { types: row.install_script_types ?? [], has: !!row.has_install_scripts };
+}
 
 /** Re-derive the MECHANICAL verdict (pre-MAL, pre-freshness) from a stored row's
  *  signals — the exact inputs computeMechanical feeds computeVerdict, read back
- *  off the row instead of re-fetched. Pure; no network. */
+ *  off the row instead of re-fetched, with the corrected install-script signal.
+ *  Pure; no network. */
 export function mechanicalVerdictFromRow(row) {
+  const { has } = correctedInstallScripts(row);
   return computeVerdict({
     mal: [], // MAL is applied live at read-time (finalize), never stored
     has_provenance: row.has_provenance,
     is_minified: row.is_minified,
-    has_install_scripts: row.has_install_scripts,
+    has_install_scripts: has,
     description_match: row.description_match,
     diff_review: row.diff_review,
     typosquat: row.typosquat_of ? { of: row.typosquat_of, distance: row.typosquat_distance } : null,
@@ -56,110 +73,75 @@ export function mechanicalVerdictFromRow(row) {
   });
 }
 
-/** Recompute one row under the current engine and persist it iff the verdict,
- *  signals, or dependency-cascade fields actually changed. Returns what happened
- *  so the caller can tally. Everything is injectable for tests. */
+/** Recompute one row under the current engine (zero network) and persist it iff
+ *  anything material changed. Injectable readVerdict/writeVerdict for tests. */
 export async function recomputeRow(row, opts = {}) {
-  const {
-    sw,
-    fetchImpl = fetch,
-    readVerdict = dbReadVerdict,
-    writeVerdict = dbWriteVerdict,
-    fetchPackument = registryFetchPackument,
-    resolveVersion = resolveDependencyVersion,
-    packumentCache,
-    resolverCache,
-  } = opts;
+  const { sw, readVerdict = dbReadVerdict, writeVerdict = dbWriteVerdict } = opts;
 
   const base = mechanicalVerdictFromRow(row);
+  const { types: keptScripts, has: hasScripts } = correctedInstallScripts(row);
 
-  // Dependency cascade — only rows WITH declared dependencies touch the network.
-  const deps = Array.isArray(row.dependencies) ? row.dependencies : [];
-  let flagged = [];
-  let verified = 0;
-  let unknown = 0;
-  if (deps.length) {
-    // Declared ranges for THIS version, so we score the version actually
-    // installed (change #3), not each dep's `latest`. One packument, memoised.
-    let ranges = {};
+  // Cascade — re-read the CURRENT verdict of each previously-flagged child (at
+  // the version it was stored under). Monotone fixes ⇒ new flags ⊆ old flags, so
+  // this is complete: a child now verified (or gone) drops off.
+  const oldFlags = Array.isArray(row.dependency_flags) ? row.dependency_flags : [];
+  const newFlags = [];
+  for (const f of oldFlags) {
+    if (!f || typeof f.name !== 'string') continue;
+    let child = null;
     try {
-      const pack = packumentCache && packumentCache.has(row.package)
-        ? packumentCache.get(row.package)
-        : await fetchPackument(row.package, { fetchImpl });
-      if (packumentCache) packumentCache.set(row.package, pack);
-      const declared = pack?.versions?.[row.version]?.dependencies;
-      if (declared && typeof declared === 'object') ranges = declared;
+      child = await readVerdict(sw, f.name, f.version);
     } catch {
-      ranges = {}; // no packument → fall back to latest (dep-tree default)
+      child = null;
     }
-
-    // Memoise (dep@range → version) across the slice so a shared dependency is
-    // resolved once. resolverCache is optional; without it the raw resolver runs.
-    const resolveImpl = resolverCache
-      ? async (name, range) => {
-          const key = `${name}@${range ?? 'latest'}`;
-          if (resolverCache.has(key)) return resolverCache.get(key);
-          const v = await resolveVersion(name, range, { fetchImpl });
-          resolverCache.set(key, v);
-          return v;
-        }
-      : resolveVersion;
-
-    const result = await checkDependencies(deps, {
-      resolveVersion: resolveImpl,
-      readVerdict,
-      sw,
-      fetchImpl,
-      ranges,
-    });
-    flagged = result.flagged;
-    verified = result.verified;
-    unknown = result.unknown;
-  } else {
-    unknown = 0;
-    verified = 0;
+    if (child?.verdict && child.verdict !== 'verified') {
+      newFlags.push({ name: f.name, version: f.version, verdict: child.verdict });
+    }
   }
 
   let verdict = base.verdict;
   let signals = [...base.verdict_signals];
-  const cascaded = cascadeVerdict(verdict, flagged.map((d) => d.verdict));
+  const cascaded = cascadeVerdict(verdict, newFlags.map((d) => d.verdict));
   if (cascaded !== verdict) {
     verdict = cascaded;
-    const signal = flagged.some((d) => d.verdict === 'blocked') ? 'dependency_blocked' : 'dependency_flagged';
+    const signal = newFlags.some((d) => d.verdict === 'blocked') ? 'dependency_blocked' : 'dependency_flagged';
     signals = [...new Set([...signals, signal])];
   }
 
+  const cleared = Math.max(0, oldFlags.length - newFlags.length);
   const next = {
     ...row,
     verdict,
     verdict_signals: signals,
-    dependency_flags: flagged,
-    dep_verified: deps.length ? verified : row.dep_verified,
-    dep_unknown: deps.length ? unknown : row.dep_unknown,
+    install_script_types: keptScripts,
+    has_install_scripts: hasScripts,
+    dependency_flags: newFlags,
+    dep_verified: (row.dep_verified ?? 0) + cleared,
+    dep_unknown: row.dep_unknown,
   };
 
   const changed =
     row.verdict !== next.verdict ||
     JSON.stringify(row.verdict_signals ?? []) !== JSON.stringify(next.verdict_signals) ||
-    JSON.stringify(row.dependency_flags ?? []) !== JSON.stringify(next.dependency_flags);
+    JSON.stringify(row.dependency_flags ?? []) !== JSON.stringify(next.dependency_flags) ||
+    Boolean(row.has_install_scripts) !== next.has_install_scripts;
 
   if (changed) await writeVerdict(sw, next);
   return { package: row.package, version: row.version, from: row.verdict, to: verdict, changed };
 }
 
 /** SELECT + recompute one slice of the worklist (verdict != 'verified'), after a
- *  stable (package, version) cursor. Returns a tally plus the cursor to resume
- *  from and whether more rows remain in this pass. */
+ *  stable (package, version) cursor. Zero network — bounded concurrency only
+ *  hides DB round-trip latency. Returns a tally, the resume cursor, and whether
+ *  more rows remain in this pass. */
 export async function backfillSlice(sw, opts = {}) {
   const {
     limit = 150,
     afterPackage = '',
     afterVersion = '',
-    fetchImpl = fetch,
     readVerdict = dbReadVerdict,
     writeVerdict = dbWriteVerdict,
-    fetchPackument = registryFetchPackument,
-    concurrency = 5,
+    concurrency = 8,
   } = opts;
   const cap = Math.min(500, Math.max(1, limit));
   const lanes = Math.min(16, Math.max(1, concurrency));
@@ -172,13 +154,7 @@ export async function backfillSlice(sw, opts = {}) {
       LIMIT ?`,
     [afterPackage, afterPackage, afterVersion, cap],
   );
-  const rawRows = Array.isArray(r?.data) ? r.data : [];
-  const rows = rawRows.map(rowToVerdict);
-
-  // Per-slice memo: packuments and dep-version resolutions are shared across the
-  // rows in this invocation but not persisted (a fresh worker resets them).
-  const packumentCache = new Map();
-  const resolverCache = new Map();
+  const rows = (Array.isArray(r?.data) ? r.data : []).map(rowToVerdict);
 
   const before = { verified: 0, suspicious: 0, unverified: 0, blocked: 0 };
   const after = { verified: 0, suspicious: 0, unverified: 0, blocked: 0 };
@@ -186,19 +162,13 @@ export async function backfillSlice(sw, opts = {}) {
   let changed = 0;
   let errors = 0;
 
-  // Bounded concurrency (default 5) so a slice fits the function time budget and
-  // stays polite to the registry. Concurrent recompute of a parent+child within
-  // one chunk can read a stale child, but convergence (a later pass) fixes it —
-  // correctness rests on repeat-to-stable, not on order.
   for (let i = 0; i < rows.length; i += lanes) {
     const chunk = rows.slice(i, i + lanes);
     await Promise.all(
       chunk.map(async (row) => {
         if (row.verdict in before) before[row.verdict]++;
         try {
-          const res = await recomputeRow(row, {
-            sw, fetchImpl, readVerdict, writeVerdict, fetchPackument, packumentCache, resolverCache,
-          });
+          const res = await recomputeRow(row, { sw, readVerdict, writeVerdict });
           processed++;
           if (res.changed) changed++;
           if (res.to in after) after[res.to]++;
@@ -218,6 +188,8 @@ export async function backfillSlice(sw, opts = {}) {
     before,
     after,
     hasMore: rows.length === cap,
-    nextCursor: last ? { package: last.package, version: last.version } : { package: afterPackage, version: afterVersion },
+    nextCursor: last
+      ? { package: last.package, version: last.version }
+      : { package: afterPackage, version: afterVersion },
   };
 }

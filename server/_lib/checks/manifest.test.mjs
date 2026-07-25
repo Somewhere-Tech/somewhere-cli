@@ -12,21 +12,28 @@ import {
 // installScripts
 // ---------------------------------------------------------------------------
 
-test('installScripts: all four lifecycle scripts present, returned sorted', () => {
+test('installScripts: the three install-time scripts present, returned sorted (prepare NOT counted)', () => {
   const m = {
     scripts: {
       postinstall: 'node setup.js',
       preinstall: 'echo hi',
-      prepare: 'tsc',
+      prepare: 'tsc', // build/publish hook — does NOT run for registry consumers
       install: 'node-gyp rebuild',
     },
   };
-  assert.deepEqual(installScripts(m), [
-    'install',
-    'postinstall',
-    'preinstall',
-    'prepare',
-  ]);
+  assert.deepEqual(installScripts(m), ['install', 'postinstall', 'preinstall']);
+});
+
+test('installScripts: prepare-only is NOT an install script (minipass / minimatch / tshy shape)', () => {
+  // The exact shape that cascaded `unverified` across most of npm: a package
+  // whose only lifecycle script is a `prepare` build step. It runs on git-install
+  // and local dev, never on a registry `npm install <pkg>` — so it is not an
+  // install-time code-execution vector and must not be flagged.
+  const minipass = {
+    scripts: { prepare: 'tshy', pretest: 'npm run prepare', test: 'tap', prepublishOnly: 'git push origin --follow-tags' },
+  };
+  assert.deepEqual(installScripts(minipass), []);
+  assert.equal(hasInstallScripts(minipass), false);
 });
 
 test('installScripts: single script present', () => {
@@ -35,9 +42,9 @@ test('installScripts: single script present', () => {
   ]);
 });
 
-test('installScripts: partial subset present, returned sorted', () => {
+test('installScripts: partial subset present, returned sorted (prepare dropped)', () => {
   const m = { scripts: { prepare: 'tsc', preinstall: 'echo' } };
-  assert.deepEqual(installScripts(m), ['preinstall', 'prepare']);
+  assert.deepEqual(installScripts(m), ['preinstall']);
 });
 
 test('installScripts: no scripts object -> []', () => {
@@ -77,11 +84,11 @@ test('installScripts: non-string / empty-string / falsy values treated as absent
     scripts: {
       preinstall: '', // empty string -> absent
       install: null, // null -> absent
-      postinstall: 42, // number -> absent
-      prepare: 'tsc', // valid
+      postinstall: 'node patch.js', // valid
+      prepare: 'tsc', // not an install-time script -> ignored
     },
   };
-  assert.deepEqual(installScripts(m), ['prepare']);
+  assert.deepEqual(installScripts(m), ['postinstall']);
 });
 
 test('installScripts: object-valued lifecycle key treated as absent', () => {

@@ -12,13 +12,23 @@
  */
 
 /**
- * The npm lifecycle scripts that run automatically at install time. These are
- * the only `scripts` keys that can execute arbitrary code on a consumer's
- * machine during `npm install` (`test`, `build`, etc. do NOT auto-run on
- * install and are intentionally excluded).
+ * The npm lifecycle scripts that run automatically when a package is installed
+ * AS A DEPENDENCY FROM THE REGISTRY — the only vector that can execute arbitrary
+ * code on a consumer's machine during `npm install <pkg>`.
+ *
+ * `prepare` is deliberately EXCLUDED. Despite the name it is a build/publish
+ * hook: npm runs it on a local `npm install` (no args, in the package's own
+ * checkout), before `npm publish`, and when installing a git/tarball dependency
+ * — but NOT when installing a published package from the registry, which is our
+ * threat model. Thousands of legitimate TS packages (everything built with tshy,
+ * ts-scripts, etc. — minipass, minimatch, content-type, …) declare only
+ * `prepare`; counting it made them read as running an install script, which —
+ * combined with `no_provenance` — tipped them to `unverified` and cascaded that
+ * across most of npm. `test`, `build`, `start`, … are excluded for the same
+ * "does not auto-run on a registry install" reason.
  * @type {readonly string[]}
  */
-const INSTALL_LIFECYCLE = ['preinstall', 'install', 'postinstall', 'prepare'];
+export const INSTALL_LIFECYCLE = ['preinstall', 'install', 'postinstall'];
 
 /**
  * Narrow an unknown value to a non-null, non-array plain object.
@@ -33,11 +43,12 @@ function isObject(v) {
  * Return the sorted subset of install-time lifecycle scripts that are present
  * with a truthy string value in `manifest.scripts`.
  *
- * Only `preinstall`, `install`, `postinstall`, and `prepare` are considered —
- * these are the scripts npm auto-runs at install time. Non-lifecycle scripts
- * (`test`, `build`, `start`, …) are ignored. A script key whose value is not a
- * truthy string (empty string, number, null, undefined, object) is treated as
- * absent.
+ * Only `preinstall`, `install`, and `postinstall` are considered — the scripts
+ * npm auto-runs when a package is installed as a registry dependency.
+ * `prepare` (a build/publish hook that does NOT run for registry consumers) and
+ * non-lifecycle scripts (`test`, `build`, `start`, …) are ignored. A script key
+ * whose value is not a truthy string (empty string, number, null, undefined,
+ * object) is treated as absent.
  *
  * @param {unknown} manifest - npm version manifest object.
  * @returns {string[]} Sorted lifecycle script names present (e.g. ["postinstall", "preinstall"]). Empty array on missing/garbage input.

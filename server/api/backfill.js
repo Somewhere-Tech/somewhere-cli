@@ -60,11 +60,6 @@ export default async function (req, sw) {
   const afterPackage = url.searchParams.get('after') ?? body?.after ?? '';
   const afterVersion = url.searchParams.get('after_version') ?? body?.after_version ?? '';
 
-  const summary = await backfillSlice(sw, {
-    limit,
-    afterPackage,
-    afterVersion,
-    fetchImpl: fetch,
-  });
+  const summary = await backfillSlice(sw, { limit, afterPackage, afterVersion });
   return Response.json({ ok: true, data: { mode: 'slice', ...summary } });
 }
