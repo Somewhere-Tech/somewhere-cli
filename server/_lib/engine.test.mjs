@@ -54,10 +54,52 @@ test('unverified — the some-analytics-tool case (4 soft signals)', () => {
   ]);
 });
 
-test('unverified — popular package with no GitHub tag', () => {
-  const r = computeVerdict({ has_provenance: true, has_github_tag: 0, weekly_downloads: 50000 });
+test('verified — no_github_tag is never a solo stop, even for a huge package (express)', () => {
+  // express: no provenance, no matching v-tag, 110M weekly downloads. Under the
+  // old rule this was `unverified: [no_github_tag]` — the most-installed package
+  // on npm reading as unverified on one passive proxy. It must pass.
+  const r = computeVerdict({
+    has_provenance: false,
+    has_github_tag: 0,
+    weekly_downloads: 110_627_794,
+    is_minified: false,
+    has_install_scripts: false,
+    description_match: 'match',
+  });
+  assert.equal(r.verdict, 'verified');
+});
+
+test('verified — provenance short-circuits the tag heuristic (@sigstore/bundle)', () => {
+  // Valid Sigstore provenance + 9.6M downloads but no matching v-tag. A
+  // cryptographic attestation must never be overridden by a git-tag guess.
+  const r = computeVerdict({ has_provenance: true, has_github_tag: 0, weekly_downloads: 9_614_346 });
+  assert.equal(r.verdict, 'verified');
+  assert.deepEqual(r.verdict_signals, []);
+});
+
+test('verified — minified + no provenance + no tag, but no ACTIVE signal (zod-to-json-schema)', () => {
+  // 47M downloads, three PASSIVE signals, nothing the package actively does.
+  const r = computeVerdict({
+    has_provenance: false,
+    is_minified: true,
+    has_github_tag: 0,
+    weekly_downloads: 47_261_616,
+  });
+  assert.equal(r.verdict, 'verified');
+});
+
+test('unverified — no_github_tag COUNTS toward the threshold when an active signal is present', () => {
+  // Proves the rule still FIRES: a no-provenance, no-tag package that also runs
+  // an install script crosses the 2+/active bar. no_github_tag participates in
+  // the evidence, but the install script is what qualifies it.
+  const r = computeVerdict({
+    has_provenance: false,
+    has_github_tag: 0,
+    weekly_downloads: 50_000,
+    has_install_scripts: true,
+  });
   assert.equal(r.verdict, 'unverified');
-  assert.deepEqual(r.verdict_signals, ['no_github_tag']);
+  assert.deepEqual(r.verdict_signals, ['no_provenance', 'install_scripts', 'no_github_tag']);
 });
 
 test('verified — no GitHub tag but unpopular (no false stop on the long tail)', () => {

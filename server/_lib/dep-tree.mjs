@@ -33,6 +33,7 @@ export async function checkDependencies(deps, opts = {}) {
     readVerdict,
     sw,
     fetchImpl = fetch,
+    ranges = {},
   } = opts;
   const names = (Array.isArray(deps) ? deps : [])
     .filter((d) => typeof d === 'string' && d)
@@ -49,9 +50,15 @@ export async function checkDependencies(deps, opts = {}) {
   for (const name of names) {
     let version;
     try {
+      // Resolve to the version the PARENT actually installs (its declared
+      // range), NOT the registry's `latest`. Scoring `sigstore@latest` when the
+      // parent locks `sigstore@4.1.1` flags a version that never ships. Falls
+      // back to `latest` (undefined range) when no range is known, e.g. an old
+      // cached row written before ranges were captured.
+      const range = ranges[name];
       version = resolveImpl === resolveVersion
-        ? await resolveImpl(name, undefined, { fetchImpl })
-        : await resolveImpl(name, undefined, fetchImpl);
+        ? await resolveImpl(name, range, { fetchImpl })
+        : await resolveImpl(name, range, fetchImpl);
       checked++;
     } catch {
       continue;

@@ -11,6 +11,11 @@
 const REGISTRY = 'https://registry.npmjs.org';
 const DOWNLOADS_BULK = 'https://api.npmjs.org/downloads/point/last-week';
 
+// The bulk downloads endpoint rejects scoped names, so scoped packages are
+// summed one request each. Cap the fan-out so a prolific @scope author can't
+// trigger hundreds of point lookups in the enrich path.
+const SCOPED_DOWNLOAD_LOOKUP_CAP = 64;
+
 /** Pull names + oldest publish date + total count out of an npm v1 search body. */
 export function parseSearch(json) {
   const objects = Array.isArray(json?.objects) ? json.objects : [];
@@ -58,7 +63,7 @@ export async function authorProfile(maintainer, { fetchImpl = fetch } = {}) {
     return null;
   }
 
-  // Bulk downloads accepts up to 128 names and no scoped names.
+  // Bulk downloads accepts up to 128 names but ONLY unscoped ones.
   const unscoped = search.names.filter((n) => !n.startsWith('@')).slice(0, 128);
   let combined = 0;
   if (unscoped.length) {
@@ -66,10 +71,32 @@ export async function authorProfile(maintainer, { fetchImpl = fetch } = {}) {
       const res = await fetchImpl(`${DOWNLOADS_BULK}/${unscoped.join(',')}`, {
         headers: { accept: 'application/json' },
       });
-      if (res.ok) combined = sumBulkDownloads(await res.json());
+      if (res.ok) combined += sumBulkDownloads(await res.json());
     } catch {
-      // combined stays 0; package_count alone is still a useful signal
+      // combined keeps the scoped total below; package_count alone still helps
     }
+  }
+
+  // Scoped packages must be queried individually (the single-package point
+  // endpoint DOES accept scoped names). Without this, an author who ships only
+  // @scope/* packages sums to zero downloads and reads as "low-activity" — the
+  // exact false signal that dragged our own all-@somewhere-tech verdict.
+  const scoped = search.names.filter((n) => n.startsWith('@')).slice(0, SCOPED_DOWNLOAD_LOOKUP_CAP);
+  for (let i = 0; i < scoped.length; i += 8) {
+    const chunk = scoped.slice(i, i + 8);
+    const totals = await Promise.all(
+      chunk.map(async (name) => {
+        try {
+          const res = await fetchImpl(`${DOWNLOADS_BULK}/${name}`, {
+            headers: { accept: 'application/json' },
+          });
+          return res.ok ? sumBulkDownloads(await res.json()) : 0;
+        } catch {
+          return 0;
+        }
+      }),
+    );
+    combined += totals.reduce((sum, n) => sum + n, 0);
   }
 
   return {

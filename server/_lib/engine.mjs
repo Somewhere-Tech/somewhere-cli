@@ -56,30 +56,35 @@ export function computeVerdict(s = {}) {
   if (s.diff_review === 'suspicious' || s.diff_review === 'unexplained') strong.push(`diff_${s.diff_review}`);
   if (strong.length) return { verdict: 'suspicious', verdict_signals: strong };
 
-  // 3) UNVERIFIED — soft evidence, OR a popular package with no GitHub release
-  //    tag. (description_mismatch is LLM-derived; absent until the backfill runs.)
+  // 3) UNVERIFIED — soft evidence.
+  //    (description_mismatch is LLM-derived; absent until the backfill runs.)
   //
-  //    RULE 9 (no guardrail blocks legitimate code): `no_provenance` and
-  //    `minified` are both ubiquitous — most of npm has no provenance, and many
-  //    perfectly good packages ship a bundled/minified entry. Those two PASSIVE
-  //    signals together must NOT stop a package, or we'd warn on a huge slice of
-  //    normal popular installs. So we require BOTH: two-or-more evidence signals
-  //    AND at least one ACTIVE signal (an install script, or an LLM-confirmed
-  //    description mismatch) — something the package is actually DOING, not just
-  //    something it lacks.
+  //    RULE 9 (no guardrail blocks legitimate code): `no_provenance`,
+  //    `minified` and `no_github_tag` are all ubiquitous — most of npm has no
+  //    provenance, many perfectly good packages ship a bundled/minified entry,
+  //    and monorepos / CI release flows routinely never push a `v<version>`
+  //    tag. These PASSIVE signals, in any combination, must NOT stop a package,
+  //    or we'd warn on a huge slice of normal popular installs. So we require
+  //    BOTH: two-or-more evidence signals AND at least one ACTIVE signal (an
+  //    install script, or an LLM-confirmed description mismatch) — something the
+  //    package is actually DOING, not just something it lacks.
   const evidence = [];
   if (s.has_provenance === false) evidence.push('no_provenance');
   if (s.is_minified) evidence.push('minified');
   if (s.has_install_scripts) evidence.push('install_scripts');
   if (s.description_match === 'mismatch') evidence.push('description_mismatch');
+  // A missing GitHub release tag is the WEAKEST, most PASSIVE proxy of all: its
+  // absence means "a release process we don't recognise", not risk. It may add
+  // to the evidence count but can NEVER stop a package on its own. And a
+  // cryptographic build attestation (provenance) is a STRONGER origin proof
+  // than any git tag, so a package that HAS provenance is never docked for a
+  // missing tag at all — the attestation already answers "where did this come
+  // from?" better than a tag ever could.
+  if (s.has_github_tag === 0 && s.has_provenance !== true) evidence.push('no_github_tag');
   const ACTIVE = new Set(['install_scripts', 'description_mismatch']);
   const hasActive = evidence.some((e) => ACTIVE.has(e));
   if (evidence.length >= 2 && hasActive) {
     return { verdict: 'unverified', verdict_signals: evidence };
-  }
-
-  if (s.has_github_tag === 0 && (s.weekly_downloads || 0) > 10000) {
-    return { verdict: 'unverified', verdict_signals: ['no_github_tag'] };
   }
 
   // 4) VERIFIED — nothing tripped the threshold.

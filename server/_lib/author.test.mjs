@@ -40,10 +40,16 @@ test('sumBulkDownloads — junk → 0', () => {
 
 const resp = (body, ok = true) => async () => ({ ok, status: ok ? 200 : 500, json: async () => body });
 
-function routeFetch(searchBody, bulkBody) {
+function routeFetch(searchBody, bulkBody, scopedBody = {}) {
   return async (url) => {
     if (url.includes('/-/v1/search')) return (resp(searchBody))();
-    if (url.includes('/downloads/point/')) return (resp(bulkBody))();
+    if (url.includes('/downloads/point/')) {
+      // A scoped single-package lookup ends in `@scope/name` (no comma). The
+      // multi-name bulk request is comma-joined and unscoped-only.
+      const scoped = url.match(/last-week\/(@[^,]+)$/);
+      if (scoped) return (resp(scopedBody[scoped[1]] ?? {}))();
+      return (resp(bulkBody))();
+    }
     return (resp({}, false))();
   };
 }
@@ -72,16 +78,41 @@ test('authorProfile — null maintainer / search failure → null', async () => 
   assert.equal(await authorProfile('x', { fetchImpl: async () => ({ ok: false, status: 500, json: async () => ({}) }) }), null);
 });
 
-test('authorProfile — excludes scoped names from the bulk-downloads request', async () => {
-  let bulkUrl = '';
+test('authorProfile — scoped names never enter the bulk request (it 400s on them)', async () => {
+  const urls = [];
   const fetchImpl = async (url) => {
+    urls.push(url);
     if (url.includes('/-/v1/search')) {
       return { ok: true, status: 200, json: async () => ({ total: 2, objects: [{ package: { name: '@scope/a', date: '2020-01-01' } }, { package: { name: 'b', date: '2019-01-01' } }] }) };
     }
-    bulkUrl = url;
-    return { ok: true, status: 200, json: async () => ({ b: { downloads: 5 } }) };
+    if (url.endsWith('/b')) return { ok: true, status: 200, json: async () => ({ b: { downloads: 5 } }) };
+    if (url.endsWith('/@scope/a')) return { ok: true, status: 200, json: async () => ({ downloads: 7, package: '@scope/a' }) };
+    return { ok: false, status: 404, json: async () => ({}) };
   };
   const p = await authorProfile('someone', { fetchImpl });
-  assert.ok(!bulkUrl.includes('@scope'), 'scoped names must not go into the bulk request');
-  assert.equal(p.combined_downloads, 5);
+  const bulkWithScope = urls.find((u) => u.includes(',') && u.includes('@scope'));
+  assert.equal(bulkWithScope, undefined, 'scoped names must never be comma-joined into the bulk request');
+  assert.equal(p.combined_downloads, 12); // 5 (b, bulk) + 7 (@scope/a, individual)
+});
+
+test('authorProfile — an all-@scope author is NOT low-activity (scoped downloads summed)', async () => {
+  // The exact shape that dragged our own verdict: every package is @somewhere-tech/*,
+  // so the bulk endpoint (unscoped-only) would sum to 0. Individual lookups fix it.
+  const fetchImpl = routeFetch(
+    { total: 3, objects: [
+      { package: { name: '@somewhere-tech/cli', date: '2026-01-01T00:00:00Z' } },
+      { package: { name: '@somewhere-tech/sdk', date: '2026-02-01T00:00:00Z' } },
+      { package: { name: '@somewhere-tech/mcp', date: '2026-03-01T00:00:00Z' } },
+    ] },
+    {}, // bulk body irrelevant — no unscoped names
+    {
+      '@somewhere-tech/cli': { downloads: 821, package: '@somewhere-tech/cli' },
+      '@somewhere-tech/sdk': { downloads: 4000, package: '@somewhere-tech/sdk' },
+      '@somewhere-tech/mcp': { downloads: 1500, package: '@somewhere-tech/mcp' },
+    },
+  );
+  const p = await authorProfile('uzairhaq', { fetchImpl });
+  assert.equal(p.package_count, 3);
+  assert.equal(p.combined_downloads, 6321); // 821 + 4000 + 1500, previously 0
+  assert.equal(p.oldest_package_date, '2026-01-01T00:00:00Z');
 });

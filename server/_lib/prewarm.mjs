@@ -114,11 +114,22 @@ export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmMo
   row.known_cves = history.filter((h) => h.kind === 'CVE').length;
   row.compromised_history = history.filter((h) => h.kind === 'MAL').map(({ id, published }) => ({ id, published }));
 
+  // Fetch the parent packument once: it gives us BOTH this version's declared
+  // dependency ranges (so we score the versions actually installed, not each
+  // dep's `latest`) and the previous publisher (maintainer-change) below.
+  const pack = await fetchPackument(row.package, { fetchImpl }).catch(() => null);
+  const ranges =
+    pack?.versions?.[row.version]?.dependencies &&
+    typeof pack.versions[row.version].dependencies === 'object'
+      ? pack.versions[row.version].dependencies
+      : {};
+
   const deps = await checkDependencies(row.dependencies, {
     resolveVersion: resolveDependencyVersion,
     readVerdict,
     sw,
     fetchImpl,
+    ranges,
   });
   row.dependency_flags = deps.flagged;
   row.dep_verified = deps.verified;
@@ -148,9 +159,9 @@ export async function enrichRow(sw, row, { fetchImpl = fetch, llmProvider, llmMo
 
   // Maintainer change: who published THIS version vs the previous one. A new
   // publisher on an established package is a classic account-takeover tell.
+  // Reuses the packument fetched above.
   try {
-    const pack = await fetchPackument(row.package, { fetchImpl });
-    const prev = previousVersion(pack, row.version);
+    const prev = pack ? previousVersion(pack, row.version) : null;
     if (prev && row.publisher) {
       const pm = await fetchManifest(row.package, prev, { fetchImpl }).catch(() => null);
       const prevPub = pm?._npmUser?.name ?? null;

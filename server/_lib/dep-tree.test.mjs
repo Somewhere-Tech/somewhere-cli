@@ -48,6 +48,38 @@ test('checkDependencies — caps checks at 50 direct dependency names', async ()
   assert.equal(out.checked, 50);
 });
 
+test('checkDependencies — resolves each dep to its DECLARED range, not latest', async () => {
+  // The parent locks sigstore@4.1.1 (verified); the registry `latest` is 5.0.0
+  // (suspicious). We must score 4.1.1 — the version actually installed.
+  const rows = new Map([
+    ['sigstore@4.1.1', { verdict: 'verified' }],
+    ['sigstore@5.0.0', { verdict: 'suspicious' }],
+  ]);
+  const passedRanges = {};
+  const out = await checkDependencies(['sigstore'], {
+    ranges: { sigstore: '4.1.1' },
+    resolveVersion: async (name, range) => {
+      passedRanges[name] = range;
+      return range === '4.1.1' ? '4.1.1' : '5.0.0';
+    },
+    readVerdict: async (_sw, name, version) => rows.get(`${name}@${version}`) ?? null,
+    sw: {},
+  });
+  assert.equal(passedRanges.sigstore, '4.1.1');
+  assert.equal(out.verified, 1);
+  assert.deepEqual(out.flagged, []);
+});
+
+test('checkDependencies — falls back to latest when no range is known (old cached rows)', async () => {
+  const passed = {};
+  await checkDependencies(['x'], {
+    resolveVersion: async (name, range) => { passed[name] = range; return '9.9.9'; },
+    readVerdict: async () => ({ verdict: 'verified' }),
+    sw: {},
+  });
+  assert.equal(passed.x, undefined); // undefined range → resolveVersion picks latest
+});
+
 test('resolveVersion — mirrors npm dist-tag/range behavior', async () => {
   const fetchImpl = async () => ({
     ok: true,
