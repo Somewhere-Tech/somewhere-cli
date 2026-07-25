@@ -98,6 +98,29 @@ test('finalize — confirmed MAL escalates a verified row to blocked', () => {
   assert.equal(out.mal.length, 1);
 });
 
+test('finalize — complete: a verified row with unchecked dependencies is NOT complete', () => {
+  // Mechanical pass: deps declared but not yet checked (dep_verified null).
+  const row = { package: 'p', version: '1', verdict: 'verified', verdict_signals: [], dependencies: ['a', 'b'], dep_verified: null };
+  assert.equal(finalize(row, []).complete, false);
+});
+
+test('finalize — complete: dependency check has run (dep_verified is a number)', () => {
+  const row = { package: 'p', version: '1', verdict: 'verified', verdict_signals: [], dependencies: ['a', 'b'], dep_verified: 2 };
+  assert.equal(finalize(row, []).complete, true);
+});
+
+test('finalize — complete: a package with no dependencies is complete from the mechanical pass', () => {
+  const row = { package: 'p', version: '1', verdict: 'verified', verdict_signals: [], dependencies: [] };
+  assert.equal(finalize(row, []).complete, true);
+});
+
+test('finalize — complete: a block is decisive even with unchecked dependencies', () => {
+  const row = { package: 'p', version: '1', verdict: 'verified', verdict_signals: [], dependencies: ['a'], dep_verified: null };
+  const out = finalize(row, [{ id: 'MAL-1', sources: ['OpenSSF', 'OSV'] }]);
+  assert.equal(out.verdict, 'blocked');
+  assert.equal(out.complete, true);
+});
+
 test('finalize — no MAL keeps the mechanical verdict', () => {
   const row = { package: 'p', version: '1', verdict: 'unverified', verdict_signals: ['no_provenance', 'install_scripts'] };
   const out = finalize(row, []);

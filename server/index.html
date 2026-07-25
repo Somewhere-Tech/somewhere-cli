@@ -461,11 +461,15 @@ Creating a new Next.js app in /Users/dev/my-app...
   function yr(iso){ var d=iso?new Date(iso):null; return d&&!isNaN(d)?d.getUTCFullYear():null; }
   function row(sig, s, c, t){ return '  <span class="chk" data-sig="'+sig+'"><span class="'+c+'">'+s+'</span> <span class="muted">'+esc(t)+'</span></span>\n'; }
 
-  function render(name, version, d, pending){
+  function render(name, version, d, pending, pendingBadge){
     var v = d.verdict || 'unverified';
     var s = sym(v), o = '';
     o += '<span class="prompt">$</span> <span class="cmd">swpx check '+esc(name)+(version?'@'+esc(version):'')+'</span>\n\n';
-    o += '<span class="'+s[1]+'">'+s[0]+' '+v.toUpperCase()+' — '+esc(name)+(version?'@'+esc(version):'')+'</span>\n';
+    // Never present a favourable verdict before it is COMPLETE. While the
+    // dependency check is still running, show a neutral "checking" header — not
+    // the green badge — so we never say "verified" and then take it back.
+    if (pendingBadge) o += '<span class="dim">⋯ CHECKING — '+esc(name)+(version?'@'+esc(version):'')+'</span>\n';
+    else o += '<span class="'+s[1]+'">'+s[0]+' '+v.toUpperCase()+' — '+esc(name)+(version?'@'+esc(version):'')+'</span>\n';
     if (d.summary) o += '\n<span class="muted" style="white-space:pre-wrap;display:block">'+esc(d.summary)+'</span>';
     o += '\n';
     var mal = (d.mal && d.mal.length) ? d.mal : null;
@@ -491,7 +495,8 @@ Creating a new Next.js app in /Users/dev/my-app...
       var deps=d.dependencies||[], flags=d.dependency_flags||[];
       if (deps.length){ var bits=[]; if(d.dep_verified!=null) bits.push(d.dep_verified+' verified'); if(flags.length) bits.push(flags.length+' flagged'); if(d.dep_unknown) bits.push(d.dep_unknown+' not yet checked'); var any=flags.some(function(f){return f.verdict==='blocked';}); var ds=flags.length?(any?['✖','err']:['⚠','warn']):['⊕','dim']; var dt=deps.length+' direct dependencies'+(bits.length?' — '+bits.join(' · '):(flags.length?'':' — none flagged')); o += '  <span class="chk" data-sig="deps"><span class="'+ds[1]+'">'+ds[0]+'</span> <span class="muted">'+esc(dt)+(flags.length?':':'')+'</span></span>\n'; for (var f=0;f<flags.length;f++){ var fl=flags[f]; o += '     <span class="dim">└</span> <span class="'+(fl.verdict==='blocked'?'err':'warn')+'">'+esc(fl.name)+'@'+esc(fl.version)+' → '+esc(fl.verdict)+'</span>\n'; } }
     }
-    if (pending) o += '\n  <span class="dim">↻ fetching full report…</span>';
+    if (pendingBadge) o += '\n  <span class="dim">↻ checking dependencies…</span>';
+    else if (pending) o += '\n  <span class="dim">↻ fetching full report…</span>';
     out().innerHTML = o;
   }
 
@@ -525,6 +530,30 @@ Creating a new Next.js app in /Users/dev/my-app...
   function vurl(name, version, enrich){ return API+'/api/verdict/'+encodeURIComponent(name)+'/'+encodeURIComponent(version)+'?from=web'+(enrich?'&enrich=1':''); }
   function resolveLatest(name){ return fetch('https://registry.npmjs.org/'+name.replace(/\//g,'%2F')+'/latest').then(function(r){ if(!r.ok) throw 'notfound'; return r.json(); }).then(function(j){ if(!j.version) throw 'notfound'; return j.version; }); }
   var seq = 0;
+  // Paint the current state. A FAVOURABLE verdict (`verified`) is shown only when
+  // the verdict is COMPLETE; until then it renders as a neutral pending badge.
+  // Non-favourable verdicts paint immediately (enrich only escalates, so a
+  // warning is never retracted) — they just gain detail as the check finishes.
+  function paint(name, version, d){
+    var incomplete = d && d.complete === false;
+    var hideFavourable = incomplete && (d.verdict === 'verified' || !d.verdict);
+    render(name, version, d || {}, incomplete, hideFavourable);
+  }
+  function pollComplete(name, version, last, mine){
+    var tries = 0;
+    (function step(){
+      if (mine !== seq || tries++ > 8) return;
+      setTimeout(function(){
+        if (mine !== seq) return;
+        fetch(vurl(name, version, true)).then(function(r){ if(!r.ok) throw 0; return r.json(); }).then(function(j2){
+          if (mine !== seq) return;
+          var d2 = (j2 && j2.data) || last;
+          paint(name, version, d2);
+          if (d2.complete === false) step(); // still running → keep polling
+        }).catch(function(){ /* keep the last painted state; never flip to favourable on error */ });
+      }, 2500);
+    })();
+  }
   window.swRun = function(spec){
     var p = parseSpec(spec); if (!p.name) return; var mine = ++seq;
     var input = document.getElementById('sw-input'); if (input) input.value = spec;
@@ -533,9 +562,8 @@ Creating a new Next.js app in /Users/dev/my-app...
     (p.version?Promise.resolve(p.version):resolveLatest(p.name)).then(function(version){
       return fetch(vurl(p.name,version,false)).then(function(r){ if(r.status===429) throw 'rate'; if(!r.ok) throw 'down'; return r.json(); }).then(function(j){
         if (mine!==seq) return; var d=(j&&j.data)||{};
-        var willEnrich = !(j&&j.enriched) && !!d.verdict && d.verdict!=='blocked';
-        render(p.name, version, d, willEnrich);
-        if (willEnrich) setTimeout(function(){ if(mine!==seq) return; fetch(vurl(p.name,version,true)).then(function(r){ if(!r.ok) throw 0; return r.json(); }).then(function(j2){ if(mine===seq) render(p.name, version, (j2&&j2.data)||d, false); }).catch(function(){}); }, 5000);
+        paint(p.name, version, d);
+        if (d.complete === false && d.verdict !== 'blocked') pollComplete(p.name, version, d, mine);
       });
     }).catch(function(e){ if (mine!==seq) return; if(e==='rate') fail('Rate limited — give it a moment and try again.'); else if(e==='notfound') fail('That package wasn’t found on npm.'); else fail('Could not reach the verdict service. (swpx falls back to npm when this happens.)'); });
   };

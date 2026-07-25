@@ -192,6 +192,21 @@ function applyFreshness(result, now) {
   };
 }
 
+/** Is this verdict COMPLETE — has every check that could still change it run?
+ *  A block is decisive. Otherwise the dependency cascade is the last thing that
+ *  can move a favourable verdict (enrich only ever escalates), so a verdict with
+ *  declared dependencies is not complete until that check has run (dep_verified
+ *  becomes a number during enrich). Packages with no dependencies are complete
+ *  from the mechanical pass. Consumers must not present a FAVOURABLE verdict
+ *  until this is true — showing `verified` and then taking it back is worse than
+ *  showing `pending`, because the user acts on the first thing they see. */
+export function verdictComplete(row) {
+  if (row.verdict === 'blocked') return true;
+  const deps = Array.isArray(row.dependencies) ? row.dependencies : [];
+  if (deps.length === 0) return true;
+  return typeof row.dep_verified === 'number';
+}
+
 /** Merge a live MAL check onto a (cached or fresh) mechanical row, then apply the
  *  read-time freshness penalty. MAL only escalates: confirmed → blocked,
  *  unconfirmed → at least suspicious; the mechanical verdict stands otherwise. */
@@ -219,5 +234,8 @@ export function finalize(row, mal, now = Date.now()) {
       result = { ...row, mal: pub };
     }
   }
-  return applyFreshness(result, now);
+  const out = applyFreshness(result, now);
+  // `complete` is derived at read time (never stored), like freshness — it
+  // reflects whether the dependency check has run for THIS row.
+  return { ...out, complete: verdictComplete(out) };
 }

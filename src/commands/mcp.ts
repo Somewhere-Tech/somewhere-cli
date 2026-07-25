@@ -1,8 +1,10 @@
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import { UnauthorizedError } from '@modelcontextprotocol/sdk/client/auth.js';
+// The @modelcontextprotocol/sdk value imports (transports, UnauthorizedError)
+// are LAZY — loaded inside runStdioBridge only. They pull in a large tree
+// (zod/hono/ajv), and this module is registered at startup for EVERY command,
+// so a top-level import would make `somewhere deploy`/`run` pay for the MCP
+// bridge they never use. Types are erased at compile, so they stay static.
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
 import {
   CURSOR_MCP_PATH,
@@ -69,6 +71,14 @@ async function runStdioBridge(): Promise<void> {
     emitFatalError('Not logged in. Run: somewhere login');
     process.exit(1);
   }
+
+  // Lazy-load the SDK only when the bridge actually runs (see import note above).
+  const [{ StdioServerTransport }, { StreamableHTTPClientTransport }, { UnauthorizedError }] =
+    await Promise.all([
+      import('@modelcontextprotocol/sdk/server/stdio.js'),
+      import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
+      import('@modelcontextprotocol/sdk/client/auth.js'),
+    ]);
 
   const httpTransport = new StreamableHTTPClientTransport(new URL(UPSTREAM_URL), {
     requestInit: {

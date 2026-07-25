@@ -1,8 +1,8 @@
-import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import {
-  StreamableHTTPClientTransport,
-  StreamableHTTPError,
-} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+// @modelcontextprotocol/sdk is LAZY-loaded inside the call paths below. This
+// module is pulled in at startup (directly for `advisor`, transitively via
+// `catalog` and `docs` which import callPlatformHelpTool), so a top-level import
+// would make every command load the SDK's large tree (zod/hono/ajv). No values
+// are referenced at module scope, so nothing needs a static import.
 import { Command } from 'commander';
 import { ApiClient } from '../lib/client.js';
 import { getToken } from '../lib/config.js';
@@ -27,6 +27,10 @@ async function callPlatformHelpToolWithToken(
   args: Record<string, unknown>,
   token: string,
 ): Promise<string> {
+  const [{ Client }, { StreamableHTTPClientTransport }] = await Promise.all([
+    import('@modelcontextprotocol/sdk/client/index.js'),
+    import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
+  ]);
   const client = new Client({ name: 'somewhere-cli', version: 'unknown' });
   const transport = new StreamableHTTPClientTransport(new URL(MCP_URL), {
     requestInit: {
@@ -66,6 +70,7 @@ export async function callPlatformHelpTool(
   try {
     return await callPlatformHelpToolWithToken(name, args, token);
   } catch (err) {
+    const { StreamableHTTPError } = await import('@modelcontextprotocol/sdk/client/streamableHttp.js');
     if (!(err instanceof StreamableHTTPError) || err.code !== 401) throw err;
 
     // MCP uses the same developer key as the REST API, but it is not routed
