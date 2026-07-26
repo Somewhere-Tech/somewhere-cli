@@ -76,6 +76,22 @@ for (let pass = 1; pass <= MAX_PASSES; pass++) {
   if (passChanged === 0) { console.log(`converged after ${pass} pass(es).`); break; }
 }
 
+// Complete the dependency check for rows that never had one (dep_verified
+// absent) — these render as pending until this runs. Fetches a small manifest
+// per row, so it's a separate sweep; only the tiny missing set is touched.
+let depCompleted = 0;
+{
+  let cursor = { package: '', version: '' };
+  for (;;) {
+    const d = await post(`?depcheck=1&limit=${LIMIT}&after=${enc(cursor.package)}&after_version=${enc(cursor.version)}`);
+    depCompleted += d.completed;
+    cursor = d.nextCursor;
+    process.stdout.write(`\r  depcheck: completed ${depCompleted}, errors ${d.errors}     `);
+    if (!d.hasMore) break;
+  }
+  console.log(`\r  depcheck: completed ${depCompleted} row(s)`);
+}
+
 const after = (await post('?count=1')).remaining;
 console.log('worklist AFTER: ', JSON.stringify(after));
-console.log(`total rows rewritten: ${totalChanged}`);
+console.log(`total rows rewritten: ${totalChanged}; dep-checks completed: ${depCompleted}`);

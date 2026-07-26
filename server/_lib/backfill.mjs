@@ -40,6 +40,8 @@
 
 import { computeVerdict, cascadeVerdict } from './engine.mjs';
 import { INSTALL_LIFECYCLE } from './checks/manifest.mjs';
+import { checkDependencies, resolveVersion as resolveDependencyVersion } from './dep-tree.mjs';
+import { fetchManifest as registryFetchManifest } from './registry.mjs';
 import { readVerdict as dbReadVerdict, writeVerdict as dbWriteVerdict, rowToVerdict } from './db.mjs';
 
 /** Re-derive install-script signals from the stored `install_script_types`
@@ -187,6 +189,129 @@ export async function backfillSlice(sw, opts = {}) {
     errors,
     before,
     after,
+    hasMore: rows.length === cap,
+    nextCursor: last
+      ? { package: last.package, version: last.version }
+      : { package: afterPackage, version: afterVersion },
+  };
+}
+
+/** Run the dependency check for ONE row that never had one — the gap the
+ *  mechanical backfill deliberately left (it skipped deps to stay zero-fetch, so
+ *  rows that had never been enriched kept `dep_verified` absent, which
+ *  verdictComplete correctly reports as "still checking"). This is the small,
+ *  targeted "complete the data" fix: the gate is right — a favourable verdict
+ *  whose dependencies were never checked is genuinely incomplete — so we run the
+ *  check rather than teaching the gate to call it complete. Unlike the mechanical
+ *  pass this DOES fetch (a single-version manifest for the declared ranges, then
+ *  dep resolution), but only for the tiny set of rows missing the check.
+ *  Injectable for tests. */
+export async function completeRowDepCheck(row, opts = {}) {
+  const {
+    sw,
+    fetchImpl = fetch,
+    readVerdict = dbReadVerdict,
+    writeVerdict = dbWriteVerdict,
+    fetchManifest = registryFetchManifest,
+    resolveVersion = resolveDependencyVersion,
+  } = opts;
+
+  // Declared ranges for THIS exact version — a small single-version manifest,
+  // not the full packument (change #3: score the versions actually installed).
+  let ranges = {};
+  try {
+    const m = await fetchManifest(row.package, row.version, { fetchImpl });
+    if (m && typeof m.dependencies === 'object' && m.dependencies) ranges = m.dependencies;
+  } catch {
+    ranges = {}; // no manifest → resolve deps to latest (dep-tree default)
+  }
+
+  const deps = await checkDependencies(row.dependencies, {
+    resolveVersion,
+    readVerdict,
+    sw,
+    fetchImpl,
+    ranges,
+  });
+
+  let verdict = row.verdict;
+  let signals = Array.isArray(row.verdict_signals) ? [...row.verdict_signals] : [];
+  const cascaded = cascadeVerdict(verdict, deps.flagged.map((d) => d.verdict));
+  if (cascaded !== verdict) {
+    verdict = cascaded;
+    const signal = deps.flagged.some((d) => d.verdict === 'blocked') ? 'dependency_blocked' : 'dependency_flagged';
+    signals = [...new Set([...signals, signal])];
+  }
+
+  const next = {
+    ...row,
+    verdict,
+    verdict_signals: signals,
+    dependency_flags: deps.flagged,
+    dep_verified: deps.verified, // now a number → the verdict becomes COMPLETE
+    dep_unknown: deps.unknown,
+  };
+  await writeVerdict(sw, next);
+  return { package: row.package, version: row.version, from: row.verdict, to: verdict, dep_verified: deps.verified };
+}
+
+/** Slice of the "never dep-checked" worklist: verified/any rows that declare
+ *  dependencies but have no dep_verified (metadata JSON null). Resumable by
+ *  (package, version); idempotent (re-running recomputes the same numbers). */
+export async function completeDepChecks(sw, opts = {}) {
+  const {
+    limit = 50,
+    afterPackage = '',
+    afterVersion = '',
+    githubToken,
+    fetchImpl = fetch,
+    readVerdict = dbReadVerdict,
+    writeVerdict = dbWriteVerdict,
+    concurrency = 5,
+  } = opts;
+  const cap = Math.min(200, Math.max(1, limit));
+  const lanes = Math.min(16, Math.max(1, concurrency));
+
+  const r = await sw.db.query(
+    `SELECT * FROM verdicts
+      WHERE json_extract(metadata, '$.dep_verified') IS NULL
+        AND dependencies IS NOT NULL AND dependencies != '[]' AND dependencies != ''
+        AND (package > ? OR (package = ? AND version > ?))
+      ORDER BY package, version
+      LIMIT ?`,
+    [afterPackage, afterPackage, afterVersion, cap],
+  );
+  const rows = (Array.isArray(r?.data) ? r.data : []).map(rowToVerdict);
+
+  let processed = 0;
+  let completed = 0;
+  let changed = 0;
+  let errors = 0;
+  for (let i = 0; i < rows.length; i += lanes) {
+    const chunk = rows.slice(i, i + lanes);
+    const out = await Promise.all(
+      chunk.map(async (row) => {
+        try {
+          const res = await completeRowDepCheck(row, { sw, fetchImpl, readVerdict, writeVerdict });
+          return { ok: true, changed: res.to !== res.from };
+        } catch {
+          return { ok: false };
+        }
+      }),
+    );
+    for (const o of out) {
+      processed++;
+      if (o.ok) { completed++; if (o.changed) changed++; }
+      else errors++;
+    }
+  }
+
+  const last = rows[rows.length - 1];
+  return {
+    processed,
+    completed,
+    changed,
+    errors,
     hasMore: rows.length === cap,
     nextCursor: last
       ? { package: last.package, version: last.version }

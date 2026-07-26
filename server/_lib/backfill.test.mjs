@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mechanicalVerdictFromRow, correctedInstallScripts, recomputeRow } from './backfill.mjs';
+import { mechanicalVerdictFromRow, correctedInstallScripts, recomputeRow, completeRowDepCheck } from './backfill.mjs';
+import { verdictComplete } from './compute.mjs';
 
 // A tiny in-memory verdict store standing in for D1.
 function store(seed = {}) {
@@ -107,6 +108,41 @@ test('convergence — sigstore-shape chain clears once the prepare leaf clears',
   assert.equal((await rr('@sigstore/sign@5.0.0')).to, 'verified');
   assert.equal((await rr('sigstore@5.0.0')).to, 'verified');
   assert.deepEqual(s.m.get('sigstore@5.0.0').verdict_signals, []);
+});
+
+test('completeRowDepCheck — a VERIFIED row with declared deps but no dep_verified gets completed', async () => {
+  // The exact regression shape (express@5.2.1): verified, declares deps, but the
+  // mechanical backfill never ran the dep check → dep_verified absent → the
+  // `complete` gate renders it "⋯ CHECKING" forever. Running the check sets
+  // dep_verified and makes the verdict complete.
+  const s = store({ 'a@1.0.0': { verdict: 'verified' }, 'b@2.0.0': { verdict: 'verified' } });
+  const row = {
+    package: 'express', version: '5.2.1', verdict: 'verified', verdict_signals: [],
+    dependencies: ['a', 'b'], dep_verified: null, dependency_flags: [],
+  };
+  // Before: the gate correctly reports incomplete (the data, not the gate, is wrong).
+  assert.equal(verdictComplete(row), false);
+  const fetchManifest = async () => ({ dependencies: { a: '1.0.0', b: '2.0.0' } }); // exact ranges → no fetch
+  await completeRowDepCheck(row, { sw: {}, ...s, fetchManifest });
+  const saved = s.m.get('express@5.2.1');
+  assert.equal(typeof saved.dep_verified, 'number');
+  assert.equal(saved.dep_verified, 2);
+  assert.equal(saved.verdict, 'verified');           // clean deps → stays verified
+  assert.equal(verdictComplete(saved), true);         // now COMPLETE → renders its badge
+});
+
+test('completeRowDepCheck — a genuinely flagged dep cascades the parent (honest, not silenced)', async () => {
+  const s = store({ 'bad@1.0.0': { verdict: 'suspicious' } });
+  const row = {
+    package: 'p', version: '1.0.0', verdict: 'verified', verdict_signals: [],
+    dependencies: ['bad'], dep_verified: null, dependency_flags: [],
+  };
+  const fetchManifest = async () => ({ dependencies: { bad: '1.0.0' } });
+  await completeRowDepCheck(row, { sw: {}, ...s, fetchManifest });
+  const saved = s.m.get('p@1.0.0');
+  assert.equal(saved.verdict, 'suspicious');
+  assert.deepEqual(saved.dependency_flags, [{ name: 'bad', version: '1.0.0', verdict: 'suspicious' }]);
+  assert.equal(verdictComplete(saved), true);
 });
 
 test('recomputeRow — idempotent: a corrected row rewrites to itself (0 change)', async () => {

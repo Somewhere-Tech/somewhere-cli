@@ -16,7 +16,7 @@
  *  POST /api/backfill?count=1 — read-only worklist size by level (no writes),
  *  for before/after monitoring. */
 
-import { backfillSlice } from '../_lib/backfill.mjs';
+import { backfillSlice, completeDepChecks } from '../_lib/backfill.mjs';
 
 function bearer(req) {
   const h = req.headers.get('authorization') || '';
@@ -34,7 +34,18 @@ async function worklistCounts(sw) {
     if (row.verdict in out) out[row.verdict] = row.n;
     out.total += row.n;
   }
-  return out;
+  // Rows that declare dependencies but never had a dep check (dep_verified
+  // absent) — these render as pending/incomplete until `?depcheck=1` runs.
+  let missing_depcheck = 0;
+  try {
+    const m = await sw.db.query(
+      "SELECT COUNT(*) AS n FROM verdicts WHERE json_extract(metadata,'$.dep_verified') IS NULL AND dependencies IS NOT NULL AND dependencies != '[]' AND dependencies != ''",
+    );
+    missing_depcheck = m?.data?.[0]?.n ?? 0;
+  } catch {
+    // best-effort metric
+  }
+  return { ...out, missing_depcheck };
 }
 
 export default async function (req, sw) {
@@ -59,6 +70,19 @@ export default async function (req, sw) {
   const limit = Math.min(500, Math.max(1, parseInt(url.searchParams.get('limit') ?? '150', 10) || 150));
   const afterPackage = url.searchParams.get('after') ?? body?.after ?? '';
   const afterVersion = url.searchParams.get('after_version') ?? body?.after_version ?? '';
+
+  // Complete the dependency check for rows that never had one (dep_verified
+  // absent) — the gap the zero-fetch mechanical pass left. This mode fetches
+  // (a small manifest per row), so it is separate from the mechanical slice.
+  if (url.searchParams.get('depcheck') === '1') {
+    const summary = await completeDepChecks(sw, {
+      limit,
+      afterPackage,
+      afterVersion,
+      githubToken: sw.env?.GITHUB_TOKEN,
+    });
+    return Response.json({ ok: true, data: { mode: 'depcheck', ...summary } });
+  }
 
   const summary = await backfillSlice(sw, { limit, afterPackage, afterVersion });
   return Response.json({ ok: true, data: { mode: 'slice', ...summary } });
