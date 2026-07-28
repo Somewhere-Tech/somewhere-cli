@@ -11,9 +11,65 @@ const typecheckModule = process.env.SOMEWHERE_TEST_SOURCE
 const scaffoldModule = process.env.SOMEWHERE_TEST_SOURCE
   ? '../src/lib/scaffold.ts'
   : '../dist/lib/scaffold.js';
+const typecheckCommandModule = process.env.SOMEWHERE_TEST_SOURCE
+  ? '../src/commands/typecheck.ts'
+  : '../dist/commands/typecheck.js';
 const { npxTscInvocation, parseTscOutput, runTypecheck, typecheckArgs } =
   await import(typecheckModule);
 const { buildScaffoldPackageJson, buildScaffoldTsconfig } = await import(scaffoldModule);
+const { reportTypecheck } = await import(typecheckCommandModule);
+
+test('typecheck verdict is advisory on errors and keeps the clean summary unchanged', (t) => {
+  const stdout = [];
+  const stderr = [];
+  t.mock.method(console, 'log', (...args) => stdout.push(args.join(' ')));
+  t.mock.method(console, 'error', (...args) => stderr.push(args.join(' ')));
+
+  reportTypecheck({
+    ok: false,
+    errors: [
+      {
+        file: 'src/one.ts',
+        line: 1,
+        column: 2,
+        code: 'TS2322',
+        message: 'Type number is not assignable to type string.',
+      },
+      {
+        file: 'src/two.ts',
+        line: 3,
+        column: 4,
+        code: 'TS2304',
+        message: "Cannot find name 'missing'.",
+      },
+    ],
+    via: 'npx',
+    raw: '',
+  });
+
+  assert.equal(
+    stderr[0],
+    '✗ 2 type errors (via npx tsc) — deploys are not blocked by type errors; fix at your own pace.',
+  );
+  assert.ok(stdout.includes(
+    '  src/one.ts:1:2 TS2322 Type number is not assignable to type string.',
+  ));
+  assert.ok(stdout.includes(
+    "  src/two.ts:3:4 TS2304 Cannot find name 'missing'.",
+  ));
+
+  stdout.length = 0;
+  stderr.length = 0;
+  reportTypecheck({
+    ok: true,
+    errors: [],
+    via: 'bundled',
+    raw: '',
+  });
+
+  assert.deepEqual(stdout, ['✓ Typecheck clean (via bundled tsc) — safe to deploy.']);
+  assert.deepEqual(stderr, []);
+});
 
 test('npx fallback installs the typescript package before invoking tsc', () => {
   assert.deepEqual(npxTscInvocation('linux'), {

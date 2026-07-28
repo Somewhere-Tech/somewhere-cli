@@ -73,7 +73,7 @@ export function reportTypecheck(result: TypecheckResult): void {
   const undefinedSymbols = result.errors.filter((e) => e.code === 'TS2304');
   const n = result.errors.length;
   error(
-    `${bold(String(n))} type error${n === 1 ? '' : 's'} ${dim(`(via ${result.via} tsc)`)} — DO NOT deploy until fixed.`,
+    `${bold(String(n))} type error${n === 1 ? '' : 's'} ${dim(`(via ${result.via} tsc)`)} — deploys are not blocked by type errors; fix at your own pace.`,
   );
   if (undefinedSymbols.length) {
     warn(
