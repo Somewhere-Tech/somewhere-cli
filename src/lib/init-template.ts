@@ -284,7 +284,11 @@ export async function uploadFile(
 }
 `;
 
-const HOME_PAGE = `import { useState, type FormEvent } from 'react';
+const HOME_PAGE = `import {
+  useState,
+  type ChangeEvent,
+  type FormEvent,
+} from 'react';
 import {
   SignedIn,
   SignedOut,
@@ -335,8 +339,8 @@ function AuthForm() {
         event.preventDefault();
         void submit(false);
       }}>
-        <label>Email<input type="email" value={email} onChange={(event) => setEmail(event.target.value)} required /></label>
-        <label>Password<input type="password" value={password} onChange={(event) => setPassword(event.target.value)} minLength={8} required /></label>
+        <label>Email<input type="email" value={email} onChange={(event: ChangeEvent<HTMLInputElement>) => setEmail(event.target.value)} required /></label>
+        <label>Password<input type="password" value={password} onChange={(event: ChangeEvent<HTMLInputElement>) => setPassword(event.target.value)} minLength={8} required /></label>
         <div className="actions">
           <button type="submit">Sign in</button>
           <button type="button" className="secondary" onClick={() => void submit(true)}>Create account</button>
@@ -362,7 +366,7 @@ function Workspace() {
         </button>
         <label className="upload">
           Upload a private file
-          <input type="file" onChange={(event) => {
+          <input type="file" onChange={(event: ChangeEvent<HTMLInputElement>) => {
             const file = event.target.files?.[0];
             if (file) void uploadFile(auth, file).then((value) => setMessage(\`Uploaded \${value.path}\`)).catch((error: unknown) => setMessage(String(error)));
           }} />
