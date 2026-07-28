@@ -29,6 +29,7 @@ export async function browserLogin(): Promise<CliConfig> {
         // cli-pair key. Persisted so the client can refresh on a 401 instead
         // of forcing a manual re-login (tsk_3642f3c4).
         const refreshToken = url.searchParams.get('refresh_token') ?? undefined;
+        const accessExpiresAt = url.searchParams.get('expires_at') ?? undefined;
 
         if (!token) {
           res.writeHead(400, { 'Content-Type': 'text/html' });
@@ -133,6 +134,7 @@ export async function browserLogin(): Promise<CliConfig> {
         resolve({
           token,
           ...(refreshToken ? { refresh_token: refreshToken } : {}),
+          ...(accessExpiresAt ? { access_expires_at: accessExpiresAt } : {}),
           user: { email, username },
         });
 

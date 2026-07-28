@@ -176,7 +176,7 @@ export class ApiClient {
    *  the fix instead of seeing a bare expired-key 401. Returns false only for a
    *  malformed refresh response, where the caller surfaces the original
    *  API_KEY_EXPIRED. */
-  private async refreshAccessKey(timeoutMs?: number): Promise<boolean> {
+  async refreshAccessKey(timeoutMs?: number): Promise<boolean> {
     const config = loadConfig();
     const refreshToken = config?.refresh_token;
     if (!refreshToken) {
@@ -198,9 +198,9 @@ export class ApiClient {
       );
     }
 
-    let pair: { key?: string; refresh_token?: string };
+    let pair: { key?: string; refresh_token?: string; expires_at?: string };
     try {
-      pair = await this.request<{ key?: string; refresh_token?: string }>(
+      pair = await this.request<{ key?: string; refresh_token?: string; expires_at?: string }>(
         'POST',
         '/keys/cli-pair/refresh',
         { refresh_token: refreshToken },
@@ -222,7 +222,7 @@ export class ApiClient {
       // Malformed refresh response — don't half-update the stored creds.
       return false;
     }
-    updateTokens(pair.key, pair.refresh_token);
+    updateTokens(pair.key, pair.refresh_token, pair.expires_at);
     this.token = pair.key;
     return true;
   }

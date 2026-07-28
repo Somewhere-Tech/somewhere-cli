@@ -5,6 +5,10 @@ export interface CliConfig {
    *  POST /v1/keys/cli-pair/refresh instead of forcing a manual re-login
    *  (tsk_3642f3c4). Absent for login flows that don't yet return one. */
   refresh_token?: string;
+  /** ISO expiry of a refreshable cli-pair access key. MCP uses this to renew
+   *  shortly before expiry, avoiding replay of a request that reached the
+   *  auth boundary at the same moment the 24-hour access key expired. */
+  access_expires_at?: string;
   user: {
     email: string;
     username: string;

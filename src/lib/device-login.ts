@@ -45,7 +45,13 @@ interface StatusApproved {
   // once the server mints a cli-pair (refreshable) key for device login.
   // When present, the CLI persists it so it can refresh on a 401 instead of
   // forcing a manual re-login (tsk_3642f3c4).
-  data: { status: 'approved'; token: string; email: string; refresh_token?: string };
+  data: {
+    status: 'approved';
+    token: string;
+    email: string;
+    refresh_token?: string;
+    expires_at?: string;
+  };
 }
 interface StatusExpired {
   ok: true;
@@ -114,6 +120,7 @@ export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<CliC
         user: { email: status.data.email, username: '' },
       };
       if (status.data.refresh_token) config.refresh_token = status.data.refresh_token;
+      if (status.data.expires_at) config.access_expires_at = status.data.expires_at;
       return config;
     }
   }

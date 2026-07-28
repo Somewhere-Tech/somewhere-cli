@@ -70,10 +70,19 @@ export function clearConfig(): void {
 /** Swap in a freshly-refreshed access key + rotated refresh token, preserving
  *  the rest of the stored config (user, etc.). Used by the API client's
  *  refresh-on-401 path (tsk_3642f3c4). No-op if there's no config to update. */
-export function updateTokens(token: string, refreshToken: string): void {
+export function updateTokens(
+  token: string,
+  refreshToken: string,
+  accessExpiresAt?: string,
+): void {
   const config = loadConfig();
   if (!config) return;
-  saveConfig({ ...config, token, refresh_token: refreshToken });
+  saveConfig({
+    ...config,
+    token,
+    refresh_token: refreshToken,
+    access_expires_at: accessExpiresAt,
+  });
 }
 
 export function getToken(): string {
