@@ -10,6 +10,8 @@ import {
   saveMcpConfig,
   saveProjectConfig,
 } from '../lib/config.js';
+import { canWriteInitScaffold, writeInitScaffold } from '../lib/init-scaffold.js';
+import { createHappyPathTemplate } from '../lib/init-template.js';
 import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 interface InitOptions {
@@ -51,6 +53,7 @@ export function registerInit(program: Command) {
       const token = getToken();
       const client = new ApiClient(token);
       const dir = process.cwd();
+      const shouldScaffold = canWriteInitScaffold(dir);
 
       const existing = loadProjectConfig(dir);
       if (existing && !opts.project) {
@@ -126,6 +129,7 @@ export function registerInit(program: Command) {
           });
           saveMcpConfig(dir);
           if (!hasGlobalMcpConfig()) saveGlobalMcpConfig();
+          if (shouldScaffold) writeInitScaffold(dir, createHappyPathTemplate());
           printJson(project);
           return;
         }
@@ -140,13 +144,24 @@ export function registerInit(program: Command) {
 
         saveMcpConfig(dir);
 
+        if (shouldScaffold) {
+          const scaffold = writeInitScaffold(dir, createHappyPathTemplate());
+          success(`Happy-path starter written (${scaffold.created.length} files)`);
+        } else {
+          info('Existing source preserved; starter files were not added.');
+        }
+
         if (!hasGlobalMcpConfig()) {
           saveGlobalMcpConfig();
           success('~/.claude.json updated — Claude Code MCP connected');
         }
 
         console.log('');
-        info('Project created. Run claude to start building.');
+        info(
+          shouldScaffold
+            ? 'Next: npm install → npm run typecheck → somewhere deploy-check → somewhere deploy'
+            : 'Project created. Run claude to keep building.',
+        );
       } catch (err) {
         spinner?.fail('Failed to create project');
         error(err instanceof Error ? err.message : String(err));
