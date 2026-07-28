@@ -602,6 +602,55 @@ test('init --link --project links an exact existing project non-interactively', 
   });
 });
 
+test('init creates the happy-path starter in an empty directory and preserves existing source', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-home-'));
+  writeConfig(HOME);
+  const project = {
+    id: 'proj_init_scaffold',
+    name: 'Scaffold App',
+    slug: 'scaffold-app',
+    subdomain: 'scaffold-app',
+  };
+
+  await withServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/projects') {
+        sendJson(res, 200, { ok: true, data: project });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const empty = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-empty-'));
+    const created = await run(['init', '--name', project.name, '--json'], {
+      cwd: empty,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+    assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
+    assert.deepEqual(JSON.parse(created.stdout), project);
+    assert.match(
+      readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8'),
+      /loginWithCookie/,
+    );
+    assert.equal(
+      JSON.parse(readFileSync(join(empty, 'package.json'), 'utf8'))
+        .dependencies['@somewhere-tech/sdk'],
+      '^0.7.2',
+    );
+
+    const existing = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-existing-'));
+    writeFileSync(join(existing, 'app.ts'), 'export const mine = true;\n');
+    const preserved = await run(['init', '--name', project.name, '--json'], {
+      cwd: existing,
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+    assert.equal(preserved.status, 0, `stdout:\n${preserved.stdout}\nstderr:\n${preserved.stderr}`);
+    assert.equal(readFileSync(join(existing, 'app.ts'), 'utf8'), 'export const mine = true;\n');
+    assert.throws(() => readFileSync(join(existing, 'package.json')), /ENOENT/);
+  });
+});
+
 test('deploy prints a warning once when it also appears in the build log', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-warning-dedupe-home-'));
   const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-warning-dedupe-fixture-'));
