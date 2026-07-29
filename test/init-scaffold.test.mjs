@@ -97,18 +97,24 @@ test('one generated template consumes the SDK auth adapter and server data/files
   const wholeTemplate = createHappyPathTemplate()
     .map((file) => `${file.path}\n${file.content}`)
     .join('\n');
-  assert.match(
-    wholeTemplate,
-    /Auth is handled by `@somewhere-tech\/sdk` — use its client and hooks\./,
-  );
   const authMechanicsTerms =
-    /session|cookie|token|refresh|credential|http.?only|bearer|authorization|logout|loginWithCookie|signupWithCookie|googleCallbackWithCookie|developer key|smt_/i;
+    /session|cookie|token|refresh|credential|http.?only|bearer|authorization|logout|jwt|loginWithCookie|signupWithCookie|googleCallbackWithCookie|developer key|smt_/i;
   assert.doesNotMatch(wholeTemplate, authMechanicsTerms);
   assert.match('Session rotation remains SDK-owned.', authMechanicsTerms);
+  assert.match('JWT rotation remains SDK-owned.', authMechanicsTerms);
 
   const packageJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
   assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.7.2');
   assert.equal(packageJson.scripts.build, undefined);
+
+  const approvedAuthGuidance =
+    'Auth is handled by `@somewhere-tech/sdk` — use its client and hooks.';
+  for (const docName of ['AGENTS.md', 'CLAUDE.md', 'README.md']) {
+    const doc = readFileSync(join(dir, docName), 'utf8');
+    const authSection = doc.match(/^## Auth\n\n([\s\S]*?)(?=\n\n## |\s*$)/m);
+    assert.ok(authSection, `${docName} has an Auth section`);
+    assert.equal(authSection[1].trim(), approvedAuthGuidance, docName);
+  }
 
   for (const guideName of ['AGENTS.md', 'CLAUDE.md']) {
     const guide = readFileSync(join(dir, guideName), 'utf8');

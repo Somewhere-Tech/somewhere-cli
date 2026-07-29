@@ -374,7 +374,12 @@ const AGENT_GUIDE = `# somewhere.tech project contract
 
 This starter is intentionally the one happy path:
 
-- Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
+## Auth
+
+Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
+
+## Data, files, and deploy
+
 - Browser data and file calls go to \`api/*\`. Only those server functions call
   \`sw.db\` and \`sw.fs\`; do not move SQL or platform calls into \`src/\`.
 - Deploy raw source from this directory with \`somewhere deploy\`. Do not run a
@@ -400,11 +405,16 @@ const README = `# somewhere.tech starter
 
 One narrow production architecture is already wired:
 
-- Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
+## Auth
+
+Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
+
+## Data and files
+
 - authenticated data through a server function using \`sw.db\`;
 - private file upload through a server function using \`sw.fs\`;
 
-Run:
+## Run
 
 \`\`\`sh
 npm install
