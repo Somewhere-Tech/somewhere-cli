@@ -374,13 +374,9 @@ const AGENT_GUIDE = `# somewhere.tech project contract
 
 This starter is intentionally the one happy path:
 
-- Authentication is handled by \`@somewhere-tech/sdk\`. Use its client, hooks,
-  and components; never implement auth yourself or touch sessions.
+- Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
 - Browser data and file calls go to \`api/*\`. Only those server functions call
   \`sw.db\` and \`sw.fs\`; do not move SQL or platform calls into \`src/\`.
-- Use the one package: \`@somewhere-tech/sdk/auth\` for the client,
-  \`@somewhere-tech/sdk/server\` for the auth route, and
-  \`@somewhere-tech/sdk/react\` for providers/hooks/gates.
 - Deploy raw source from this directory with \`somewhere deploy\`. Do not run a
   build first and never deploy \`dist/\` or \`build/\`; the platform compiles
   TypeScript, TSX, CSS, and imports.
@@ -404,11 +400,9 @@ const README = `# somewhere.tech starter
 
 One narrow production architecture is already wired:
 
-- authentication handled by \`@somewhere-tech/sdk\` — use its client, hooks,
-  and components; never implement auth yourself or touch sessions;
+- Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
 - authenticated data through a server function using \`sw.db\`;
 - private file upload through a server function using \`sw.fs\`;
-- the consolidated \`@somewhere-tech/sdk\` client and React bindings.
 
 Run:
 

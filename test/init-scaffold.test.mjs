@@ -99,12 +99,12 @@ test('one generated template consumes the SDK auth adapter and server data/files
     .join('\n');
   assert.match(
     wholeTemplate,
-    /Authentication is handled by `@somewhere-tech\/sdk`|authentication handled by `@somewhere-tech\/sdk`/,
+    /Auth is handled by `@somewhere-tech\/sdk` — use its client and hooks\./,
   );
-  assert.doesNotMatch(
-    wholeTemplate,
-    /loginWithCookie|signupWithCookie|googleCallbackWithCookie|logoutWithCookie|cookie|bearer|credential|access.?token|refresh.?token|developer key/i,
-  );
+  const authMechanicsTerms =
+    /session|cookie|token|refresh|credential|http.?only|bearer|authorization|logout|loginWithCookie|signupWithCookie|googleCallbackWithCookie|developer key|smt_/i;
+  assert.doesNotMatch(wholeTemplate, authMechanicsTerms);
+  assert.match('Session rotation remains SDK-owned.', authMechanicsTerms);
 
   const packageJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
   assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.7.2');
@@ -115,7 +115,6 @@ test('one generated template consumes the SDK auth adapter and server data/files
     assert.match(guide, /somewhere deploy-check/);
     assert.match(guide, /somewhere deploy/);
     assert.match(guide, /Do not run a\s+build first/);
-    assert.match(guide, /never implement auth yourself or touch sessions/);
     assert.doesNotMatch(guide, /worker\/src\/runtime\/auth\.ts/);
   }
 });
