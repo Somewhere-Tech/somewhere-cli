@@ -49,6 +49,32 @@ export function classifyPublishedVersion(publishedHead, currentHead, hasReleaseI
   return 'drift';
 }
 
+export function validateReleaseShrinkwrap(manifest, shrinkwrap) {
+  const expected = `${manifest.name}@${manifest.version}`;
+  const root = shrinkwrap?.packages?.[''];
+  const mismatches = [];
+
+  if (shrinkwrap?.name !== manifest.name) {
+    mismatches.push(`top-level name is ${JSON.stringify(shrinkwrap?.name)}`);
+  }
+  if (shrinkwrap?.version !== manifest.version) {
+    mismatches.push(`top-level version is ${JSON.stringify(shrinkwrap?.version)}`);
+  }
+  if (root?.name !== manifest.name) {
+    mismatches.push(`packages[""].name is ${JSON.stringify(root?.name)}`);
+  }
+  if (root?.version !== manifest.version) {
+    mismatches.push(`packages[""].version is ${JSON.stringify(root?.version)}`);
+  }
+
+  if (mismatches.length > 0) {
+    throw new Error(
+      `npm-shrinkwrap.json does not authenticate ${expected}: ${mismatches.join('; ')}. ` +
+      'Regenerate it before releasing.',
+    );
+  }
+}
+
 function writeOutput(name, value) {
   const output = process.env.GITHUB_OUTPUT;
   if (output) appendFileSync(output, `${name}=${value}\n`);
@@ -57,6 +83,8 @@ function writeOutput(name, value) {
 function main() {
   const cwd = process.cwd();
   const manifest = JSON.parse(readFileSync(resolve(cwd, 'package.json'), 'utf8'));
+  const shrinkwrap = JSON.parse(readFileSync(resolve(cwd, 'npm-shrinkwrap.json'), 'utf8'));
+  validateReleaseShrinkwrap(manifest, shrinkwrap);
   const currentHead = process.env.GITHUB_SHA ??
     execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
   const published = spawnSync(

@@ -6,6 +6,8 @@
 # master was 0.18.3 while npm latest was 0.19.1.
 #
 # Rules, evaluated on every master push that touches src/bin/package.json:
+#   0. package.json and npm-shrinkwrap.json must authenticate the same package
+#      name/version at both lock roots. A stale release lock fails immediately.
 #   1. package.json version NOT on npm  → this push IS the release: gate
 #      (build + tests) then publish with provenance and push the v<version>
 #      tag. Merging a bump to master = releasing. No separate ritual.

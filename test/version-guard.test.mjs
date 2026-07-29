@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { execFileSync } from 'node:child_process';
+import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
@@ -8,10 +8,12 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   classifyPublishedVersion,
   releaseInputsDiffer,
+  validateReleaseShrinkwrap,
 } from '../scripts/version-guard.mjs';
 
 function git(cwd, ...args) {
@@ -57,4 +59,61 @@ test('version guard releases an unpublished version and accepts its exact publis
   const head = 'a'.repeat(40);
   assert.equal(classifyPublishedVersion(undefined, head, false), 'release');
   assert.equal(classifyPublishedVersion(head, head, false), 'in-sync');
+});
+
+test('version guard rejects a stale authenticated shrinkwrap before release', () => {
+  const manifest = { name: '@somewhere-tech/cli', version: '0.27.6' };
+  const matching = {
+    name: '@somewhere-tech/cli',
+    version: '0.27.6',
+    packages: {
+      '': { name: '@somewhere-tech/cli', version: '0.27.6' },
+    },
+  };
+  assert.doesNotThrow(() => validateReleaseShrinkwrap(manifest, matching));
+
+  assert.throws(
+    () => validateReleaseShrinkwrap(manifest, {
+      ...matching,
+      version: '0.27.5',
+    }),
+    /does not authenticate @somewhere-tech\/cli@0\.27\.6: top-level version is "0\.27\.5"/,
+  );
+
+  assert.throws(
+    () => validateReleaseShrinkwrap(manifest, {
+      ...matching,
+      packages: {
+        '': { ...matching.packages[''], version: '0.27.5' },
+      },
+    }),
+    /does not authenticate @somewhere-tech\/cli@0\.27\.6: packages\[""\]\.version is "0\.27\.5"/,
+  );
+});
+
+test('standalone version guard fails on a stale shrinkwrap before git or npm', () => {
+  const root = mkdtempSync(join(tmpdir(), 'somewhere-version-guard-stale-lock-'));
+  try {
+    writeFileSync(
+      join(root, 'package.json'),
+      '{"name":"@somewhere-tech/cli","version":"0.27.6"}\n',
+    );
+    writeFileSync(
+      join(root, 'npm-shrinkwrap.json'),
+      '{"name":"@somewhere-tech/cli","version":"0.27.5","packages":{"":{"name":"@somewhere-tech/cli","version":"0.27.5"}}}\n',
+    );
+    const script = fileURLToPath(new URL('../scripts/version-guard.mjs', import.meta.url));
+    const result = spawnSync(process.execPath, [script], {
+      cwd: root,
+      encoding: 'utf8',
+    });
+    assert.equal(result.status, 1);
+    assert.match(
+      result.stderr,
+      /npm-shrinkwrap\.json does not authenticate @somewhere-tech\/cli@0\.27\.6/,
+    );
+    assert.doesNotMatch(result.stderr, /not a git repository|npm ERR/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
