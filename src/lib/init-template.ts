@@ -134,7 +134,7 @@ export default async function upload(req: Request, sw: Runtime): Promise<Respons
     path: \`/uploads/\${user.id}/\${crypto.randomUUID()}\`,
     fieldName: 'file',
     maxBytes: 10 * 1024 * 1024,
-    allowedTypes: ['image/*', 'application/pdf', 'text/plain'],
+    allowedTypes: ['image/jpeg', 'image/png', 'application/pdf', 'text/plain'],
   });
   await sw.fs.setOwner(uploaded.path, user);
   return Response.json({ file: uploaded });

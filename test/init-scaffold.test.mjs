@@ -7,7 +7,9 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
 import test from 'node:test';
+import ts from 'typescript';
 
 import {
   canWriteInitScaffold,
@@ -79,6 +81,8 @@ test('one generated template consumes the SDK auth adapter and server data/files
   const upload = readFileSync(join(dir, 'api/upload.ts'), 'utf8');
   assert.match(upload, /sw\.fs\.uploadFromRequest/);
   assert.match(upload, /sw\.fs\.setOwner/);
+  assert.match(upload, /allowedTypes: \['image\/jpeg', 'image\/png', 'application\/pdf', 'text\/plain'\]/);
+  assert.doesNotMatch(upload, /image\/\*/);
 
   const service = readFileSync(join(dir, 'src/services/app.ts'), 'utf8');
   assert.match(service, /@somewhere-tech\/sdk\/auth/);
@@ -174,6 +178,66 @@ declare module '@vitejs/plugin-react' {
   const result = await runTypecheck(dir);
   assert.equal(result.ok, true, result.raw);
   assert.deepEqual(result.errors, []);
+});
+
+test('generated image upload accepts image/png with the runtime exact-membership rule', async () => {
+  const { dir } = generate();
+  const source = readFileSync(join(dir, 'api/upload.ts'), 'utf8');
+  const emitted = ts.transpileModule(source, {
+    compilerOptions: {
+      module: ts.ModuleKind.ESNext,
+      target: ts.ScriptTarget.ES2022,
+    },
+  }).outputText;
+  const modulePath = join(dir, 'upload-fixture.mjs');
+  writeFileSync(modulePath, emitted);
+  const { default: upload } = await import(`${pathToFileURL(modulePath).href}?fixture=${Date.now()}`);
+
+  const form = new FormData();
+  form.set('file', new File(['png bytes'], 'avatar.png', { type: 'image/png' }));
+  const request = new Request('https://starter.example/api/upload', {
+    method: 'POST',
+    body: form,
+  });
+  let ownerPath = '';
+  const response = await upload(request, {
+    auth: {
+      fromRequest: async () => ({ id: 'usr_fixture' }),
+    },
+    fs: {
+      uploadFromRequest: async (req, options) => {
+        const body = await req.formData();
+        const file = body.get(options.fieldName ?? 'file');
+        assert.ok(file instanceof File);
+        const allowed = options.allowedTypes.map((type) => String(type).toLowerCase());
+        if (!allowed.includes(file.type.toLowerCase())) {
+          throw new Error(`UPLOAD_TYPE_NOT_ALLOWED: ${file.type}`);
+        }
+        return {
+          url: '/signed/avatar.png',
+          path: '/uploads/usr_fixture/avatar.png',
+          size: file.size,
+          contentType: file.type,
+          visibility: 'private',
+        };
+      },
+      setOwner: async (path) => {
+        ownerPath = path;
+      },
+    },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(ownerPath, '/uploads/usr_fixture/avatar.png');
+  assert.deepEqual(await response.json(), {
+    file: {
+      url: '/signed/avatar.png',
+      path: '/uploads/usr_fixture/avatar.png',
+      size: 9,
+      contentType: 'image/png',
+      visibility: 'private',
+    },
+  });
 });
 
 test('generated starter produces a clean deploy-check request fixture', () => {
