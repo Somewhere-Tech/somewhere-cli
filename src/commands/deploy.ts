@@ -18,7 +18,7 @@ import {
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
-import type { CliConfig } from '../types.js';
+import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
@@ -571,16 +571,11 @@ export function registerDeploy(program: Command) {
         spinner?.stop();
         const functionErrors = result.function_errors ?? [];
         const hasFunctionErrors = functionErrors.length > 0;
-        const projectSubdomain =
-          targetProjectConfig &&
-            (!result.project_id || result.project_id === targetProjectConfig.project_id)
-            ? targetProjectConfig.subdomain
-            : undefined;
         const formatted = formatDeploySuccess(result, {
           scope,
           functionCount: Object.keys(functions).length,
           totalBytes,
-          subdomain: projectSubdomain,
+          linkedProject: targetProjectConfig,
         });
         if (opts.json) {
           if (tempSession) {
@@ -752,7 +747,7 @@ interface DeploySuccessFormatOptions {
   scope?: 'functions' | 'static';
   functionCount: number;
   totalBytes: number;
-  subdomain?: string;
+  linkedProject?: Pick<ProjectConfig, 'project_id' | 'subdomain'>;
 }
 
 export interface FormattedDeploySuccess {
@@ -794,7 +789,11 @@ export function formatDeploySuccess(
 
   const responseUrl =
     typeof result.url === 'string' && result.url.trim() ? result.url.trim() : null;
-  const subdomain = options.subdomain?.trim();
+  const subdomain =
+    result.project_id &&
+      result.project_id === options.linkedProject?.project_id
+      ? options.linkedProject.subdomain.trim()
+      : null;
   const liveUrl = responseUrl ??
     (subdomain && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(subdomain)
       ? `https://${subdomain}.${PROJECT_SITE_DOMAIN}`
