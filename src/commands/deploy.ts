@@ -386,6 +386,7 @@ export function registerDeploy(program: Command) {
       }
 
       const linkedProjectEntry = findProjectConfigEntry(targetDir);
+      let targetProjectConfig = linkedProjectEntry?.config;
       let deployStateEntry: ProjectConfigEntry | null = null;
       let projectId = opts.project as string | undefined;
       if (!projectId) {
@@ -404,11 +405,12 @@ export function registerDeploy(program: Command) {
               { name, subdomain: name },
             );
             createSpinner?.stop();
-            saveProjectConfig(targetDir, {
+            targetProjectConfig = {
               project_id: created.id,
               name: created.name,
               subdomain: created.subdomain ?? name,
-            });
+            };
+            saveProjectConfig(targetDir, targetProjectConfig);
             projectId = created.id;
           } catch (err) {
             createSpinner?.fail('Could not create a temporary project');
@@ -569,10 +571,21 @@ export function registerDeploy(program: Command) {
         spinner?.stop();
         const functionErrors = result.function_errors ?? [];
         const hasFunctionErrors = functionErrors.length > 0;
+        const projectSubdomain =
+          targetProjectConfig &&
+            (!result.project_id || result.project_id === targetProjectConfig.project_id)
+            ? targetProjectConfig.subdomain
+            : undefined;
+        const formatted = formatDeploySuccess(result, {
+          scope,
+          functionCount: Object.keys(functions).length,
+          totalBytes,
+          subdomain: projectSubdomain,
+        });
         if (opts.json) {
           if (tempSession) {
             printJson({
-              url: result.url,
+              url: formatted.liveUrl,
               claim_url: tempSession.claimUrl,
               expires_at: tempSession.expiresAt ?? null,
             });
@@ -588,23 +601,12 @@ export function registerDeploy(program: Command) {
           return;
         }
 
-        const staticCount =
-          typeof result.files === 'number'
-            ? result.files
-            : (result.files ?? []).length;
-        const fnCount = Object.keys(functions).length;
         // ONE scope-consistent headline — report only the layer this deploy
         // actually touched, so it never claims "Functions deployed" on a
         // static-only deploy or counts static files on a backend-only deploy
         // (audit #3: the old output printed "Functions deployed" + a static
         // count + "the other layer was left untouched" all at once).
-        if (scope === 'functions') {
-          success(`${fnCount} function(s) deployed — site left untouched`);
-        } else if (scope === 'static') {
-          success(`${staticCount} static file(s) deployed (${formatBytes(totalBytes)}) — functions left untouched`);
-        } else {
-          success(`${staticCount} static file(s)${fnCount > 0 ? ` + ${fnCount} function(s)` : ''} deployed (${formatBytes(totalBytes)})`);
-        }
+        success(formatted.headline);
 
         // Build log: entry chunk, chunks + sizes, functions + sizes (returned
         // by the worker since tsk_8af76ef9). Surface it instead of a bare
@@ -649,7 +651,11 @@ export function registerDeploy(program: Command) {
           const remaining = tempSession.reused && tempSession.expiresAt
             ? formatRemainingTempTime(tempSession.expiresAt)
             : null;
-          success(`Live URL: ${teal(result.url)}`);
+          if (formatted.liveUrl) {
+            success(`Live URL: ${teal(formatted.liveUrl)}`);
+          } else {
+            info('Live URL unavailable — check the dashboard.');
+          }
           info(`Claim URL: ${teal(tempSession.claimUrl)}`);
           if (tempSession.expiresAt) {
             info(`Expires at: ${tempSession.expiresAt}${remaining ? ` (${remaining} remaining)` : ''}`);
@@ -659,7 +665,11 @@ export function registerDeploy(program: Command) {
           }
           info(`Next step: ${teal('somewhere login')} to keep it.`);
         } else {
-          success(`Live at ${teal(result.url)}`);
+          if (formatted.liveUrl) {
+            success(`Live at ${teal(formatted.liveUrl)}`);
+          } else {
+            success(formatted.liveMessage);
+          }
         }
 
         // Remind the dev of the round-trip trade-off they opted into. Raw
@@ -719,16 +729,85 @@ export function registerDeploy(program: Command) {
     });
 }
 
-interface DeployResult {
+export interface DeployResult {
+  project_id?: string;
   version?: number;
-  files: string[] | number;
-  url: string;
+  release_id?: string;
+  active_release_id?: string;
+  base_release_id?: string | null;
+  files_deployed?: number;
+  files?: string[] | number;
+  url?: string;
   has_functions: boolean;
   build_log?: string[];
   warnings?: string[];
   preserved_functions?: string[];
   function_errors?: Array<{ route?: string; error?: string } | string>;
   runtime_fixes?: Array<{ notice_id: string; title: string; message: string }>;
+  status?: string;
+  release_publish?: boolean;
+}
+
+interface DeploySuccessFormatOptions {
+  scope?: 'functions' | 'static';
+  functionCount: number;
+  totalBytes: number;
+  subdomain?: string;
+}
+
+export interface FormattedDeploySuccess {
+  staticFileCount: number | null;
+  headline: string;
+  liveUrl: string | null;
+  liveMessage: string;
+}
+
+const PROJECT_SITE_DOMAIN = 'somewhere.site';
+
+export function formatDeploySuccess(
+  result: DeployResult,
+  options: DeploySuccessFormatOptions,
+): FormattedDeploySuccess {
+  const staticFileCount =
+    typeof result.files_deployed === 'number' && Number.isFinite(result.files_deployed)
+      ? result.files_deployed
+      : typeof result.files === 'number' && Number.isFinite(result.files)
+        ? result.files
+        : Array.isArray(result.files)
+          ? result.files.length
+          : null;
+  const staticLabel =
+    staticFileCount === null ? 'Static files' : `${staticFileCount} static file(s)`;
+
+  let headline: string;
+  if (options.scope === 'functions') {
+    headline = `${options.functionCount} function(s) deployed — site left untouched`;
+  } else if (options.scope === 'static') {
+    headline =
+      `${staticLabel} deployed (${formatBytes(options.totalBytes)}) — functions left untouched`;
+  } else {
+    const functionLabel =
+      options.functionCount > 0 ? ` + ${options.functionCount} function(s)` : '';
+    headline =
+      `${staticLabel}${functionLabel} deployed (${formatBytes(options.totalBytes)})`;
+  }
+
+  const responseUrl =
+    typeof result.url === 'string' && result.url.trim() ? result.url.trim() : null;
+  const subdomain = options.subdomain?.trim();
+  const liveUrl = responseUrl ??
+    (subdomain && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(subdomain)
+      ? `https://${subdomain}.${PROJECT_SITE_DOMAIN}`
+      : null);
+
+  return {
+    staticFileCount,
+    headline,
+    liveUrl,
+    liveMessage: liveUrl
+      ? `Live at ${liveUrl}`
+      : 'Deployed — check the dashboard for the live URL.',
+  };
 }
 
 function normalizeWarning(value: string): string {
