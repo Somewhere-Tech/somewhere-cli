@@ -105,7 +105,7 @@ interface GreetingRow {
 
 // Source of truth: worker/src/runtime/auth.ts:728 (fromRequest) and
 // worker/src/runtime/db.ts:1653 (query). Browser code never receives SQL or a
-// database credential; it calls this same-origin function.
+// database connection; it calls this same-origin function.
 export default async function data(req: Request, sw: Runtime): Promise<Response> {
   const user = await sw.auth.fromRequest(req);
   if (!user) return Response.json({ error: 'UNAUTHORIZED' }, { status: 401 });
@@ -244,7 +244,7 @@ export function HomePage() {
       <header>
         <p className="eyebrow">somewhere.tech happy path</p>
         <h1>One secure app, already wired.</h1>
-        <p>Cookie auth, server-side data, private file uploads, and raw-source deploy.</p>
+        <p>SDK auth, server-side data, private file uploads, and raw-source deploy.</p>
       </header>
       <SignedOut><AuthForm /></SignedOut>
       <SignedIn><Workspace /></SignedIn>
@@ -374,11 +374,10 @@ const AGENT_GUIDE = `# somewhere.tech project contract
 
 This starter is intentionally the one happy path:
 
-- Browser authentication is owned by \`@somewhere-tech/sdk\`: the backend route
-  mounts \`@somewhere-tech/sdk/server\` and the browser uses the default client.
-  Browser JavaScript holds no access token, refresh token, or developer key.
+- Authentication is handled by \`@somewhere-tech/sdk\`. Use its client, hooks,
+  and components; never implement auth yourself or touch sessions.
 - Browser data and file calls go to \`api/*\`. Only those server functions call
-  \`sw.db\` and \`sw.fs\`; do not move SQL or platform credentials into \`src/\`.
+  \`sw.db\` and \`sw.fs\`; do not move SQL or platform calls into \`src/\`.
 - Use the one package: \`@somewhere-tech/sdk/auth\` for the client,
   \`@somewhere-tech/sdk/server\` for the auth route, and
   \`@somewhere-tech/sdk/react\` for providers/hooks/gates.
@@ -395,13 +394,8 @@ somewhere deploy-check
 somewhere deploy
 \`\`\`
 
-Runtime citations used by this starter (source, not docs prose):
+Runtime citations for the server data and files examples:
 
-- \`worker/src/runtime/auth.ts:388\` loginWithCookie
-- \`worker/src/runtime/auth.ts:398\` signupWithCookie
-- \`worker/src/runtime/auth.ts:410\` googleCallbackWithCookie
-- \`worker/src/runtime/auth.ts:448\` logoutWithCookie
-- \`worker/src/runtime/auth.ts:728\` fromRequest
 - \`worker/src/runtime/db.ts:1653\` query
 - \`worker/src/runtime/fs.ts:207\` uploadFromRequest
 `;
@@ -410,7 +404,8 @@ const README = `# somewhere.tech starter
 
 One narrow production architecture is already wired:
 
-- password, signup, and Google auth through an HttpOnly cookie;
+- authentication handled by \`@somewhere-tech/sdk\` — use its client, hooks,
+  and components; never implement auth yourself or touch sessions;
 - authenticated data through a server function using \`sw.db\`;
 - private file upload through a server function using \`sw.fs\`;
 - the consolidated \`@somewhere-tech/sdk\` client and React bindings.
