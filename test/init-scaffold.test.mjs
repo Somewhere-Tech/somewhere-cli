@@ -60,21 +60,17 @@ test('writer preflights every target and never partially overwrites a project', 
   assert.throws(() => readFileSync(join(dir, 'new.txt')), /ENOENT/);
 });
 
-test('one generated template contains the complete cookie/data/files contract', () => {
+test('one generated template consumes the SDK auth adapter and server data/files contract', () => {
   const { dir, result } = generate();
   assert.equal(result.created.length, 18);
 
   const auth = readFileSync(join(dir, 'api/auth/[...path].ts'), 'utf8');
-  for (const method of [
-    'loginWithCookie',
-    'signupWithCookie',
-    'googleCallbackWithCookie',
-    'logoutWithCookie',
-    'fromRequest',
-  ]) {
-    assert.match(auth, new RegExp(`sw\\.auth\\.${method}`), method);
-  }
-  assert.match(auth, /cookie_session: true/);
+  assert.match(auth, /from '@somewhere-tech\/sdk\/server'/);
+  assert.match(auth, /return somewhereAuth\(req, sw\)/);
+  assert.doesNotMatch(
+    auth,
+    /loginWithCookie|signupWithCookie|googleCallbackWithCookie|logoutWithCookie|fromRequest|cookie_session|subpath/,
+  );
 
   const data = readFileSync(join(dir, 'api/data.ts'), 'utf8');
   assert.match(data, /sw\.db\.query/);
@@ -86,6 +82,8 @@ test('one generated template contains the complete cookie/data/files contract', 
 
   const service = readFileSync(join(dir, 'src/services/app.ts'), 'utf8');
   assert.match(service, /@somewhere-tech\/sdk\/auth/);
+  assert.match(service, /createSomewhereAuth\(\)/);
+  assert.doesNotMatch(service, /authPath|mode:\s*['"]cookie['"]/);
   assert.doesNotMatch(service, /Authorization|Bearer|accessToken|refreshToken|smt_/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
@@ -139,13 +137,17 @@ declare module '@somewhere-tech/sdk/auth' {
     signIn(input: { email: string; password: string }): Promise<User>;
     signUp(input: { email: string; password: string }): Promise<User>;
     signOut(): Promise<void>;
-    googleSignInUrl(): Promise<string>;
+    googleSignInUrl(input?: { redirectUri?: string }): Promise<string>;
     fetch(input: string, init?: RequestInit): Promise<Response>;
   }
-  export function createSomewhereAuth(options: {
-    authPath: string;
-    mode: 'cookie';
-  }): SomewhereAuth;
+  export function createSomewhereAuth(): SomewhereAuth;
+}
+declare module '@somewhere-tech/sdk/server' {
+  export interface SwAuthNamespace { auth: Record<string, unknown> }
+  export function somewhereAuth(
+    req: Request,
+    sw: SwAuthNamespace,
+  ): Promise<Response>;
 }
 declare module '@somewhere-tech/sdk/react' {
   import type { SomewhereAuth, User } from '@somewhere-tech/sdk/auth';
@@ -155,6 +157,9 @@ declare module '@somewhere-tech/sdk/react' {
   }) => JSX.Element;
   export const SignedIn: (props: { children?: unknown }) => JSX.Element;
   export const SignedOut: (props: { children?: unknown }) => JSX.Element;
+  export const AuthCallback: (props: {
+    provider?: 'google' | 'github' | 'discord';
+  }) => JSX.Element;
   export function useAuth(): SomewhereAuth;
   export function useUser(): User | null;
 }

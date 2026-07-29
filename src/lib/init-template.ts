@@ -55,16 +55,6 @@ const RUNTIME_TYPES = `export interface AppUser {
 
 export interface Runtime {
   auth: {
-    loginWithCookie(req: Request, email: string, password: string): Promise<AppUser | null>;
-    signupWithCookie(
-      req: Request,
-      email: string,
-      password: string,
-      options?: { display_name?: string },
-    ): Promise<AppUser | null>;
-    googleUrl(options: { redirect_uri: string }): Promise<{ url: string }>;
-    googleCallbackWithCookie(req: Request, redirectTo?: string): Promise<Response>;
-    logoutWithCookie(req: Request): Promise<{ ok: boolean }>;
     fromRequest(req: Request): Promise<AppUser | null>;
   };
   db: {
@@ -96,68 +86,13 @@ export interface Runtime {
 }
 `;
 
-const AUTH_FUNCTION = `import type { Runtime } from '../_lib/runtime';
+const AUTH_FUNCTION = `import {
+  somewhereAuth,
+  type SwAuthNamespace,
+} from '@somewhere-tech/sdk/server';
 
-// Source of truth:
-// worker/src/runtime/auth.ts:388 loginWithCookie
-// worker/src/runtime/auth.ts:398 signupWithCookie
-// worker/src/runtime/auth.ts:410 googleCallbackWithCookie
-// worker/src/runtime/auth.ts:448 logoutWithCookie
-// worker/src/runtime/auth.ts:728 fromRequest
-// These helpers set/refresh HttpOnly cookies on the response; no credential is
-// returned to browser JavaScript.
-export default async function auth(req: Request, sw: Runtime): Promise<Response> {
-  const url = new URL(req.url);
-  const subpath = url.pathname.replace(/^.*\\/api\\/auth/, '') || '/';
-  const json = (value: unknown, status = 200) => Response.json(value, { status });
-  const body = async (): Promise<Record<string, unknown>> => {
-    try {
-      return await req.json() as Record<string, unknown>;
-    } catch {
-      return {};
-    }
-  };
-
-  if (req.method === 'POST' && subpath === '/login') {
-    const input = await body();
-    const user = await sw.auth.loginWithCookie(
-      req,
-      String(input.email ?? ''),
-      String(input.password ?? ''),
-    );
-    return json({ user, cookie_session: true });
-  }
-
-  if (req.method === 'POST' && subpath === '/signup') {
-    const input = await body();
-    const user = await sw.auth.signupWithCookie(
-      req,
-      String(input.email ?? ''),
-      String(input.password ?? ''),
-      { display_name: typeof input.display_name === 'string' ? input.display_name : undefined },
-    );
-    return json({ user, cookie_session: true });
-  }
-
-  if (req.method === 'GET' && subpath === '/google-url') {
-    return json(await sw.auth.googleUrl({
-      redirect_uri: url.origin + '/api/auth/callback',
-    }));
-  }
-
-  if (req.method === 'GET' && subpath === '/callback') {
-    return sw.auth.googleCallbackWithCookie(req, '/');
-  }
-
-  if (req.method === 'POST' && subpath === '/logout') {
-    return json(await sw.auth.logoutWithCookie(req));
-  }
-
-  if (req.method === 'GET' && subpath === '/me') {
-    return json({ user: await sw.auth.fromRequest(req) });
-  }
-
-  return json({ error: 'NOT_FOUND', message: 'Auth route not found.' }, 404);
+export default function auth(req: Request, sw: SwAuthNamespace): Promise<Response> {
+  return somewhereAuth(req, sw);
 }
 `;
 
@@ -226,10 +161,7 @@ const AUTH_SERVICE = `import {
 } from '@somewhere-tech/sdk/auth';
 import type { ServerGreeting, UploadResult } from '../types/app';
 
-export const authClient = createSomewhereAuth({
-  authPath: '/api/auth',
-  mode: 'cookie',
-});
+export const authClient = createSomewhereAuth();
 
 export function signIn(
   auth: SomewhereAuth,
@@ -252,7 +184,9 @@ export function signOut(auth: SomewhereAuth) {
 }
 
 export async function startGoogleSignIn(auth: SomewhereAuth): Promise<void> {
-  window.location.assign(await auth.googleSignInUrl());
+  window.location.assign(await auth.googleSignInUrl({
+    redirectUri: window.location.origin + '/auth/callback',
+  }));
 }
 
 async function requireOk(response: Response): Promise<Response> {
@@ -379,13 +313,15 @@ function Workspace() {
 }
 `;
 
-const APP = `import { BrowserRouter, Route, Routes } from 'react-router-dom';
+const APP = `import { AuthCallback } from '@somewhere-tech/sdk/react';
+import { BrowserRouter, Route, Routes } from 'react-router-dom';
 import { HomePage } from './pages/HomePage';
 
 export function App() {
   return (
     <BrowserRouter>
       <Routes>
+        <Route path="/auth/callback" element={<AuthCallback provider="google" />} />
         <Route path="*" element={<HomePage />} />
       </Routes>
     </BrowserRouter>
@@ -438,12 +374,13 @@ const AGENT_GUIDE = `# somewhere.tech project contract
 
 This starter is intentionally the one happy path:
 
-- Browser authentication is a same-origin HttpOnly cookie. The backend route
-  uses \`sw.auth.*WithCookie\` and \`sw.auth.fromRequest\`; browser JavaScript
-  holds no access token, refresh token, or developer key.
+- Browser authentication is owned by \`@somewhere-tech/sdk\`: the backend route
+  mounts \`@somewhere-tech/sdk/server\` and the browser uses the default client.
+  Browser JavaScript holds no access token, refresh token, or developer key.
 - Browser data and file calls go to \`api/*\`. Only those server functions call
   \`sw.db\` and \`sw.fs\`; do not move SQL or platform credentials into \`src/\`.
-- Use the one package: \`@somewhere-tech/sdk/auth\` for the client and
+- Use the one package: \`@somewhere-tech/sdk/auth\` for the client,
+  \`@somewhere-tech/sdk/server\` for the auth route, and
   \`@somewhere-tech/sdk/react\` for providers/hooks/gates.
 - Deploy raw source from this directory with \`somewhere deploy\`. Do not run a
   build first and never deploy \`dist/\` or \`build/\`; the platform compiles
