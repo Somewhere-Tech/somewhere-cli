@@ -629,10 +629,13 @@ test('init creates the happy-path starter in an empty directory and preserves ex
     });
     assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
     assert.deepEqual(JSON.parse(created.stdout), project);
+    const authHandler = readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8');
     assert.match(
-      readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8'),
-      /loginWithCookie/,
+      authHandler,
+      /from '@somewhere-tech\/sdk\/server'/,
     );
+    assert.match(authHandler, /return somewhereAuth\(req, sw\)/);
+    assert.doesNotMatch(authHandler, /loginWithCookie|signupWithCookie|logoutWithCookie/);
     assert.equal(
       JSON.parse(readFileSync(join(empty, 'package.json'), 'utf8'))
         .dependencies['@somewhere-tech/sdk'],
