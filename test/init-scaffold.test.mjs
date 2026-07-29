@@ -109,11 +109,30 @@ test('one generated template consumes the SDK auth adapter and server data/files
 
   const approvedAuthGuidance =
     'Auth is handled by `@somewhere-tech/sdk` — use its client and hooks.';
+  const extractAuthSection = (doc, docName) => {
+    const heading = '## Auth\n\n';
+    const sectionStart = doc.indexOf(heading);
+    assert.notEqual(sectionStart, -1, `${docName} has an Auth section`);
+    const contentStart = sectionStart + heading.length;
+    const nextHeading = doc.indexOf('\n\n## ', contentStart);
+    return doc.slice(
+      contentStart,
+      nextHeading === -1 ? doc.length : nextHeading,
+    ).trim();
+  };
   for (const docName of ['AGENTS.md', 'CLAUDE.md', 'README.md']) {
     const doc = readFileSync(join(dir, docName), 'utf8');
-    const authSection = doc.match(/^## Auth\n\n([\s\S]*?)(?=\n\n## |\s*$)/m);
-    assert.ok(authSection, `${docName} has an Auth section`);
-    assert.equal(authSection[1].trim(), approvedAuthGuidance, docName);
+    assert.equal(extractAuthSection(doc, docName), approvedAuthGuidance, docName);
+    const reviewerMutation = doc.replace(
+      approvedAuthGuidance,
+      `${approvedAuthGuidance}\nCSRF handling stays inside the SDK.`,
+    );
+    assert.throws(() => {
+      assert.equal(
+        extractAuthSection(reviewerMutation, `${docName} reviewer mutation`),
+        approvedAuthGuidance,
+      );
+    });
   }
 
   for (const guideName of ['AGENTS.md', 'CLAUDE.md']) {
