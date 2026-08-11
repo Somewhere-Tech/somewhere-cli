@@ -48,6 +48,9 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
 | `somewhere deploy --force` | Intentionally overwrite remote changes made since this machine last deployed |
+| `somewhere git connect [owner/repo]` | Install/authorize the GitHub App if needed, deploy repository HEAD, then deploy every push |
+| `somewhere git status` | Show connected repo, commit, deploy status, logs link, and live URL |
+| `somewhere git disconnect` | Stop push-to-deploy; the currently deployed site stays live |
 | `somewhere pull` | Download a project's live deployed source + scaffold tsconfig/package.json for local typechecking |
 | `somewhere typecheck` | Loads the pulled `tsconfig.json` explicitly (equivalent to project-wide `tsc --noEmit`) — catches a dropped import (TS2304) with file:line; do not append source-file args, which bypass the project config |
 | `somewhere logs` | Show recent logs |
@@ -158,6 +161,23 @@ Files under `public/` deploy at the site root, matching Vite's convention: `publ
 To exclude local-only files from deploy, add gitignore-style patterns to `.somewhereignore` in the project root. The CLI also respects the root `.gitignore`. `.somewhereignore` is applied after `.gitignore`, so it can add deploy-only excludes or `!` re-includes. Built-in safety excludes such as `node_modules`, `.git`, `.env`, `dist`, and dotfiles still apply.
 
 After each successful linked deploy or pull, the CLI records the current deployed version in `.somewhere.json`. If the project changed elsewhere since that version, the next deploy refuses before overwriting anything and names the changed files. Run `somewhere pull` to bring remote source back locally, or `somewhere deploy --force --yes` to overwrite intentionally.
+
+## GitHub push-to-deploy
+
+```bash
+somewhere git connect owner/repo
+```
+
+The CLI uses the GitHub App, not a pasted personal access token. It opens
+GitHub only when the account or repository still needs authorization, resumes
+automatically, deploys the repository's default-branch HEAD immediately, and
+waits for that exact commit before printing its status, logs link, and live
+URL. Later pushes to the connected branch deploy automatically.
+
+Use `--project <id-or-slug>` outside a linked directory, `--branch <name>` for
+a non-default branch, and `--root <directory>` for a monorepo app. `connect`,
+`status`, and `disconnect` support `--json`. Disconnecting stops future GitHub
+deploys but does not undeploy the current site.
 
 ### Deploy options
 

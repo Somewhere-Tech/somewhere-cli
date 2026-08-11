@@ -35,6 +35,7 @@ import { registerTasks } from './commands/tasks.js';
 import { registerFeedback } from './commands/feedback.js';
 import { registerGrep } from './commands/grep.js';
 import { registerUsage } from './commands/usage.js';
+import { registerGit } from './commands/git.js';
 import { collectNotices } from './lib/notify/index.js';
 import { error, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 
@@ -93,6 +94,7 @@ registerTasks(program);
 registerFeedback(program);
 registerGrep(program);
 registerUsage(program);
+registerGit(program);
 
 // User-notification pipeline (update-available, advisories, announcements…).
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
