@@ -10,6 +10,7 @@ import { createInterface } from 'node:readline';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
+const sourceIndex = join(repoRoot, 'src', 'index.ts');
 
 function listen(server) {
   return new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -31,7 +32,11 @@ function writeConfig(home, token, refreshToken, accessExpiresAt) {
 }
 
 function startBridge(home, mcpUrl, apiUrl) {
-  const child = spawn(process.execPath, [distIndex, 'mcp'], {
+  const sourceRunner = process.env.SOMEWHERE_TEST_SOURCE_RUNNER;
+  const child = spawn(
+    sourceRunner ?? process.execPath,
+    sourceRunner ? [sourceIndex, 'mcp'] : [distIndex, 'mcp'],
+    {
     cwd: repoRoot,
     env: {
       ...process.env,
@@ -42,8 +47,9 @@ function startBridge(home, mcpUrl, apiUrl) {
       CI: '1',
       SOMEWHERE_NO_NOTIFICATIONS: '1',
     },
-    stdio: ['pipe', 'pipe', 'pipe'],
-  });
+      stdio: ['pipe', 'pipe', 'pipe'],
+    },
+  );
   const messages = [];
   const waiters = [];
   let stderr = '';

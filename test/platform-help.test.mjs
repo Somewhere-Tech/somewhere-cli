@@ -9,10 +9,19 @@ import { fileURLToPath } from 'node:url';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
+const sourceIndex = join(repoRoot, 'src', 'index.ts');
+
+function cliInvocation(args) {
+  const sourceRunner = process.env.SOMEWHERE_TEST_SOURCE_RUNNER;
+  return sourceRunner
+    ? { command: sourceRunner, args: [sourceIndex, ...args] }
+    : { command: process.execPath, args: [distIndex, ...args] };
+}
 
 function run(args, env) {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [distIndex, ...args], {
+    const invocation = cliInvocation(args);
+    const child = spawn(invocation.command, invocation.args, {
       cwd: repoRoot,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });

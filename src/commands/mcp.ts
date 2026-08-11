@@ -6,6 +6,7 @@ import { spawnSync } from 'node:child_process';
 // so a top-level import would make `somewhere deploy`/`run` pay for the MCP
 // bridge they never use. Types are erased at compile, so they stay static.
 import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js';
+import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {
   CURSOR_MCP_PATH,
   hasCursorMcpConfig,
@@ -16,6 +17,12 @@ import {
 } from '../lib/config.js';
 import { ApiClient } from '../lib/client.js';
 import { dim, error, info, success, teal } from '../lib/output.js';
+import {
+  createPlatformMcpTransport,
+  isMcpAuthRejection,
+  mcpAccessExpiresSoon,
+  refreshMcpAccessToken,
+} from '../lib/platform-tools.js';
 
 const UPSTREAM_URL =
   process.env.SOMEWHERE_MCP_URL?.replace(/\/$/, '') || 'https://mcp.somewhere.tech/mcp';
@@ -74,28 +81,15 @@ async function runStdioBridge(): Promise<void> {
   }
 
   // Lazy-load the SDK only when the bridge actually runs (see import note above).
-  const [
-    { StdioServerTransport },
-    { StreamableHTTPClientTransport, StreamableHTTPError },
-    { UnauthorizedError },
-  ] =
-    await Promise.all([
-      import('@modelcontextprotocol/sdk/server/stdio.js'),
-      import('@modelcontextprotocol/sdk/client/streamableHttp.js'),
-      import('@modelcontextprotocol/sdk/client/auth.js'),
-    ]);
+  const { StdioServerTransport } =
+    await import('@modelcontextprotocol/sdk/server/stdio.js');
 
   const stdioTransport = new StdioServerTransport();
-  const apiClient = new ApiClient(config.token);
 
   let shuttingDown = false;
   let fatalInFlight = false;
   let refreshInFlight: Promise<void> | null = null;
-  let httpTransport: InstanceType<typeof StreamableHTTPClientTransport>;
-
-  const isAuthRejection = (err: unknown): boolean =>
-    err instanceof UnauthorizedError
-    || (err instanceof StreamableHTTPError && err.code === 401);
+  let httpTransport: StreamableHTTPClientTransport;
 
   const shutdown = async () => {
     if (shuttingDown) return;
@@ -105,7 +99,7 @@ async function runStdioBridge(): Promise<void> {
   };
 
   const bindHttpTransport = (
-    transport: InstanceType<typeof StreamableHTTPClientTransport>,
+    transport: StreamableHTTPClientTransport,
   ): void => {
     transport.onmessage = (msg: JSONRPCMessage) => {
       stdioTransport.send(msg).catch((err: unknown) => {
@@ -120,31 +114,20 @@ async function runStdioBridge(): Promise<void> {
     transport.onerror = (err) => {
       // send() reports this same error to its caller; that path owns the
       // single-flight refresh + retry so it is not logged or handled twice.
-      if (isAuthRejection(err)) return;
+      if (isMcpAuthRejection(err)) return;
       process.stderr.write(`[somewhere mcp] upstream error: ${String(err)}\n`);
     };
   };
 
-  const createHttpTransport = (
+  const createHttpTransport = async (
     token: string,
-  ): InstanceType<typeof StreamableHTTPClientTransport> => {
-    const transport = new StreamableHTTPClientTransport(new URL(UPSTREAM_URL), {
-      requestInit: {
-        headers: { Authorization: `Bearer ${token}` },
-      },
-    });
+  ): Promise<StreamableHTTPClientTransport> => {
+    const transport = await createPlatformMcpTransport(token);
     bindHttpTransport(transport);
     return transport;
   };
 
-  httpTransport = createHttpTransport(config.token);
-
-  const accessExpiresSoon = (): boolean => {
-    const current = loadConfig();
-    if (!current?.refresh_token || !current.access_expires_at) return false;
-    const expiresAt = Date.parse(current.access_expires_at);
-    return Number.isFinite(expiresAt) && expiresAt <= Date.now() + 60_000;
-  };
+  httpTransport = await createHttpTransport(config.token);
 
   const renewHttpTransport = async (preemptive = false): Promise<void> => {
     if (refreshInFlight) return refreshInFlight;
@@ -153,22 +136,9 @@ async function runStdioBridge(): Promise<void> {
       // API confirms API_KEY_EXPIRED, or just before the server-provided access
       // expiry. Both paths rotate and persist the replacement smtr_ pair.
       // INVALID_API_KEY or a revoked refresh credential stays terminal.
-      if (preemptive) {
-        const refreshed = await apiClient.refreshAccessKey(10_000);
-        if (!refreshed) {
-          throw new Error('Session renewal returned an incomplete credential pair.');
-        }
-      } else {
-        await apiClient.call('GET', '/auth/whoami', undefined, undefined, {
-          timeoutMs: 10_000,
-        });
-      }
-      const renewed = loadConfig();
-      if (!renewed?.token) {
-        throw new Error('Session renewal completed without a saved access key.');
-      }
+      const renewedToken = await refreshMcpAccessToken(preemptive);
       const previous = httpTransport;
-      const next = createHttpTransport(renewed.token);
+      const next = await createHttpTransport(renewedToken);
       await next.start();
       httpTransport = next;
       await previous.close();
@@ -184,14 +154,14 @@ async function runStdioBridge(): Promise<void> {
     // New login configs carry the exact access expiry. Renew before forwarding
     // so a mutating MCP request is never replayed merely because it crossed
     // the 24-hour auth boundary. Older configs retain the 401 fallback below.
-    if (accessExpiresSoon()) {
+    if (mcpAccessExpiresSoon()) {
       await renewHttpTransport(true);
     }
     try {
       await httpTransport.send(msg);
       return;
     } catch (err) {
-      if (!isAuthRejection(err)) throw err;
+      if (!isMcpAuthRejection(err)) throw err;
     }
     await renewHttpTransport();
     // Exactly one replay. If the replacement is also rejected, fail cleanly;

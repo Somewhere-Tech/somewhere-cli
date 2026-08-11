@@ -30,8 +30,13 @@ import { registerFs } from './commands/fs.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
+import { registerCall } from './commands/call.js';
+import { registerTasks } from './commands/tasks.js';
+import { registerFeedback } from './commands/feedback.js';
+import { registerGrep } from './commands/grep.js';
+import { registerUsage } from './commands/usage.js';
 import { collectNotices } from './lib/notify/index.js';
-import { printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
+import { error, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -83,6 +88,11 @@ registerFs(program);
 registerMcp(program);
 registerSwpx(program);
 registerUpdate(program);
+registerCall(program);
+registerTasks(program);
+registerFeedback(program);
+registerGrep(program);
+registerUsage(program);
 
 // User-notification pipeline (update-available, advisories, announcements…).
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
@@ -106,6 +116,9 @@ try {
       printJsonError('USAGE_ERROR', stripAnsi(err.message.replace(/^error:\s*/i, '')));
       process.exitCode = err.exitCode || 1;
     }
+  } else if (err instanceof Error) {
+    error(err.message);
+    process.exitCode = 1;
   } else {
     throw err;
   }

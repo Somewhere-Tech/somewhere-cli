@@ -2,6 +2,8 @@ import { Command } from 'commander';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, statusDot, teal, timeAgo } from '../lib/output.js';
+import { callPlatformTool } from '../lib/platform-tools.js';
+import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
 
 export function registerStatus(program: Command) {
   program
@@ -29,6 +31,8 @@ export function registerStatus(program: Command) {
         updated_at?: string;
       } | null = null;
       let projectError: string | null = null;
+      let deploymentStatus: Record<string, unknown> | null = null;
+      let deploymentError: string | null = null;
       let workspaceStatus: {
         status: string;
         terminal_url?: string | null;
@@ -59,6 +63,36 @@ export function registerStatus(program: Command) {
       }
 
       try {
+        const deployment = unwrapPlatformData(await callPlatformTool(
+          'deploy_status',
+          { project_id: projectId },
+          { allTools: true },
+        ));
+        if (!isRecord(deployment)) throw new Error('deploy_status returned an unexpected response.');
+        deploymentStatus = deployment;
+        if (!opts.json) {
+          const prodVersion = typeof deployment.prod_version === 'number'
+            ? deployment.prod_version
+            : typeof deployment.dev_version === 'number' && deployment.in_sync === true
+              ? deployment.dev_version
+              : null;
+          if (prodVersion !== null) info(`Production version: ${teal(String(prodVersion))}`);
+          if (typeof deployment.active_release_id === 'string') {
+            info(`Active release: ${dim(deployment.active_release_id)}`);
+          }
+          if (deployment.dev_ahead === true) {
+            info(`Draft: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);
+          } else if (deployment.in_sync === true) {
+            info('Deploy state: dev and production are in sync');
+          }
+        }
+      } catch (err) {
+        deploymentError = err instanceof Error ? err.message : String(err);
+        if (!opts.json) error(`Deploy status: ${deploymentError}`);
+        process.exitCode = 1;
+      }
+
+      try {
         const ws = await client.call<{
           status: string;
           terminal_url?: string | null;
@@ -84,8 +118,10 @@ export function registerStatus(program: Command) {
       if (opts.json) {
         printJson({
           project: projectStatus,
+          deployment: deploymentStatus,
           workspace: workspaceStatus,
           project_error: projectError,
+          deployment_error: deploymentError,
         });
       } else {
         console.log('');
