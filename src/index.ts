@@ -30,6 +30,7 @@ import { registerFs } from './commands/fs.js';
 import { registerMcp } from './commands/mcp.js';
 import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
+import { registerGit } from './commands/git.js';
 import { collectNotices } from './lib/notify/index.js';
 import { printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 
@@ -83,6 +84,7 @@ registerFs(program);
 registerMcp(program);
 registerSwpx(program);
 registerUpdate(program);
+registerGit(program);
 
 // User-notification pipeline (update-available, advisories, announcements…).
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
