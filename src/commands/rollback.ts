@@ -8,8 +8,20 @@ import { dim, error, info, printJson, printJsonError, success, teal, warn } from
 interface RollbackResult {
   restored_at: string;
   version: number;
-  files_restored: number;
+  files_restored?: number | null;
   message?: string | null;
+}
+
+export function formatRollbackSuccess(
+  result: Pick<RollbackResult, 'version' | 'files_restored'>,
+): string {
+  const version = typeof result.version === 'number' && Number.isFinite(result.version)
+    ? ` to v${result.version}`
+    : '';
+  const restored = typeof result.files_restored === 'number' && Number.isFinite(result.files_restored)
+    ? ` (${result.files_restored} file${result.files_restored === 1 ? '' : 's'} restored)`
+    : '';
+  return `Rolled back${version}${restored}`;
 }
 
 export function registerRollback(program: Command) {
@@ -69,7 +81,7 @@ export function registerRollback(program: Command) {
           printJson(r);
           return;
         }
-        success(`Rolled back to v${r.version} (${r.files_restored} file${r.files_restored === 1 ? '' : 's'} restored)`);
+        success(formatRollbackSuccess(r));
         if (r.message) info(dim(`Version notes: ${r.message}`));
       } catch (err) {
         spinner?.fail('Rollback failed');
