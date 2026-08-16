@@ -5,6 +5,7 @@ import { ApiClient, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import open from '../lib/open.js';
 import { dim, error, info, printJson, success, teal } from '../lib/output.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 
 interface GitHubInstallation {
   installation_id: number;
@@ -201,9 +202,9 @@ async function waitForDeploy(
   throw new Error(`Deploy of ${commitSha.slice(0, 7)} is still running after 10 minutes. Check the project logs.`);
 }
 
-function urls(projectId: string, subdomain: string): { live_url: string; logs_url: string } {
+function urls(projectId: string, servingUrl: string | null): { live_url: string | null; logs_url: string } {
   return {
-    live_url: `https://${subdomain}.somewhere.tech`,
+    live_url: servingUrl,
     logs_url: `${DASHBOARD}/projects/${encodeURIComponent(projectId)}?tab=logs`,
   };
 }
@@ -241,7 +242,8 @@ export function registerGit(program: Command) {
         if (!commitSha) throw new Error('GitHub connected, but the repository deploy did not start.');
         const connection = await waitForDeploy(client, started.project_id || resolvedProjectId, commitSha);
         const connectedProjectId = started.project_id || resolvedProjectId;
-        const links = urls(connectedProjectId, project.subdomain);
+        const servingUrl = await getProjectServingUrl(client, connectedProjectId);
+        const links = urls(connectedProjectId, servingUrl);
         const result = {
           connected: true,
           project_id: connectedProjectId,
@@ -258,7 +260,7 @@ export function registerGit(program: Command) {
           success(`Deployed ${connection.repo}@${commitSha.slice(0, 7)}`);
           info(`Status: ${connection.last_status}`);
           info(`Logs: ${dim(links.logs_url)}`);
-          info(`Live: ${teal(links.live_url)}`);
+          if (links.live_url) info(`Live: ${teal(links.live_url)}`);
         }
       } catch (err) {
         error(err instanceof Error ? err.message : String(err));
@@ -275,11 +277,12 @@ export function registerGit(program: Command) {
       try {
         const client = new ApiClient(getToken());
         const ref = projectRef(opts.project || project);
-        const [connection, summary] = await Promise.all([
+        const [connection, summary, servingUrl] = await Promise.all([
           client.call<GitHubConnection>('GET', '/github/connection', undefined, { project_id: ref }),
           client.call<ProjectSummary>('GET', `/projects/${encodeURIComponent(ref)}`),
+          getProjectServingUrl(client, ref),
         ]);
-        const links = urls(summary.id || connection.project_id || ref, summary.subdomain);
+        const links = urls(summary.id || connection.project_id || ref, servingUrl);
         const result = { ...connection, ...links };
         if (opts.json) {
           printJson(result);
@@ -292,7 +295,7 @@ export function registerGit(program: Command) {
           info(`Status: ${connection.last_status || 'waiting for first deploy'}`);
           if (connection.last_error) info(`Error: ${connection.last_error}`);
           info(`Logs: ${dim(links.logs_url)}`);
-          info(`Live: ${teal(links.live_url)}`);
+          if (links.live_url) info(`Live: ${teal(links.live_url)}`);
           console.log('');
         }
       } catch (err) {

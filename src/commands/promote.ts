@@ -10,6 +10,7 @@ import {
   type ProjectConfigEntry,
 } from '../lib/config.js';
 import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 
 interface PromoteResult {
   version: number;
@@ -91,14 +92,11 @@ export function registerPromote(program: Command) {
         // closes the loop on "what exactly went live" at the highest-trust moment.
         const fromDraft = draftId ?? r.promoted_draft_id;
         if (fromDraft) info(dim(`Promoted from preview ${teal(fromDraft)}`));
-        // The promote response carries no URL — resolve the live URL from the
-        // project's subdomain (best-effort; never fail a successful promote on it).
+        // The promote response carries no URL — resolve the platform's canonical
+        // fallback URL (best-effort; never fail a successful promote on it).
         try {
-          const p = await client.call<{ subdomain?: string }>(
-            'GET',
-            `/projects/${encodeURIComponent(projectId)}`,
-          );
-          if (p.subdomain) info(`Live at ${teal(`https://${p.subdomain}.somewhere.tech`)}`);
+          const servingUrl = await getProjectServingUrl(client, projectId);
+          if (servingUrl) info(`Live at ${teal(servingUrl)}`);
         } catch {
           // ignore — the promote already succeeded
         }

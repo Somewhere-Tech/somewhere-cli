@@ -4,6 +4,7 @@ import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, statusDot, teal, timeAgo } from '../lib/output.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 
 export function registerStatus(program: Command) {
   program
@@ -47,11 +48,11 @@ export function registerStatus(program: Command) {
         }>('GET', `/projects/${encodeURIComponent(projectId)}`);
         projectStatus = p;
 
+        const servingUrl = await getProjectServingUrl(client, projectId).catch(() => null);
+
         if (!opts.json) {
           console.log(`\n  Project: ${teal(p.name)} (${statusDot(p.status)})`);
-          if (p.subdomain) {
-            info(`URL: https://${p.subdomain}.somewhere.tech`);
-          }
+          if (servingUrl) info(`URL: ${servingUrl}`);
           if (p.updated_at) {
             info(`Last deploy: ${timeAgo(p.updated_at)}`);
           }

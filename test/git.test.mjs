@@ -53,6 +53,9 @@ test('git connect deploys repository HEAD and reports commit, logs, and live URL
       if (req.method === 'GET' && url.pathname === '/v1/projects/proj-1') {
         return sendJson(res, { ok: true, data: { id: 'proj-1', name: 'Throwaway', subdomain: 'throwaway-github' } });
       }
+      if (req.method === 'GET' && url.pathname === '/v1/projects/proj-1/urls') {
+        return sendJson(res, { ok: true, data: { prod_fallback: 'https://throwaway-github.somewhere.site' } });
+      }
       if (req.method === 'GET' && url.pathname === '/v1/github/app/installations') {
         return sendJson(res, { ok: true, data: {
           app_configured: true,
@@ -120,7 +123,7 @@ test('git connect deploys repository HEAD and reports commit, logs, and live URL
     assert.equal(output.commit_sha, 'abcdef1234567890');
     assert.equal(output.status, 'deployed');
     assert.equal(output.logs_url, 'https://somewhere.tech/dashboard/projects/proj-1?tab=logs');
-    assert.equal(output.live_url, 'https://throwaway-github.somewhere.tech');
+    assert.equal(output.live_url, 'https://throwaway-github.somewhere.site');
     assert.equal(result.stderr, '');
 
     const status = await run(
@@ -128,7 +131,9 @@ test('git connect deploys repository HEAD and reports commit, logs, and live URL
       { HOME: home, USERPROFILE: home, SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1` },
     );
     assert.equal(status.status, 0, `stdout:\n${status.stdout}\nstderr:\n${status.stderr}`);
-    assert.equal(JSON.parse(status.stdout).last_status, 'deployed');
+    const statusOutput = JSON.parse(status.stdout);
+    assert.equal(statusOutput.last_status, 'deployed');
+    assert.equal(statusOutput.live_url, 'https://throwaway-github.somewhere.site');
 
     const disconnect = await run(
       ['git', 'disconnect', '--project', 'proj-1', '--yes', '--json'],

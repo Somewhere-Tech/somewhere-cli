@@ -51,6 +51,13 @@ test('project list does not print obsolete deploy slot counts', async () => {
       }));
       return;
     }
+    if (req.method === 'GET' && req.url === '/v1/projects/alpha/urls') {
+      res.end(JSON.stringify({
+        ok: true,
+        data: { prod_fallback: 'https://alpha.somewhere.site' },
+      }));
+      return;
+    }
     res.statusCode = 404;
     res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND', message: 'missing' }));
   });
@@ -67,7 +74,7 @@ test('project list does not print obsolete deploy slot counts', async () => {
     });
 
     assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-    assert.match(result.stdout, /alpha\.somewhere\.tech/);
+    assert.match(result.stdout, /https:\/\/alpha\.somewhere\.site/);
     assert.doesNotMatch(result.stdout, /deploy slots used/);
     assert.doesNotMatch(result.stdout, /undefined/);
   } finally {

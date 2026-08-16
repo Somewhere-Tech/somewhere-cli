@@ -101,12 +101,10 @@ export function registerInit(program: Command) {
         const subRes = await prompts({
           type: 'text',
           name: 'subdomain',
-          message: 'Deploy to',
+          message: 'Subdomain',
           initial: name.toLowerCase().replace(/[^a-z0-9-]/g, '-'),
-          format: (v: string) => `${v}.somewhere.tech`,
         });
         subdomain = (subRes.subdomain as string)
-          ?.replace('.somewhere.tech', '')
           .trim();
         if (!subdomain) return;
       }

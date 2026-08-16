@@ -14,6 +14,7 @@ import {
   teal,
   timeAgo,
 } from '../lib/output.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 
 export function registerProject(program: Command) {
   const proj = program
@@ -86,9 +87,10 @@ export function registerProject(program: Command) {
           printJson(p);
           return;
         }
+        const servingUrl = await getProjectServingUrl(client, id).catch(() => null);
         console.log(`\n  ${teal(String(p.name))}`);
         info(`Status:    ${statusDot(String(p.status ?? ''))}`);
-        if (p.subdomain) info(`URL:       https://${p.subdomain}.somewhere.tech`);
+        if (servingUrl) info(`URL:       ${servingUrl}`);
         if (p.created_at) info(`Created:   ${String(p.created_at)}`);
       } catch (err) {
         error(err instanceof Error ? err.message : String(err));
@@ -253,6 +255,7 @@ async function listProjects(opts: { json?: boolean } = {}) {
   try {
     const result = await client.call<{
       projects: Array<{
+        id?: string;
         name: string;
         status: string;
         subdomain: string;
@@ -272,16 +275,18 @@ async function listProjects(opts: { json?: boolean } = {}) {
       return;
     }
 
+    const servingUrls = await Promise.all(result.projects.map(async (project) => {
+      const ref = project.id ?? project.slug ?? project.subdomain;
+      if (!ref) return null;
+      return getProjectServingUrl(client, ref).catch(() => null);
+    }));
+
     table(
       ['Name', 'Status', 'URL', 'Updated'],
-      result.projects.map((p) => [
+      result.projects.map((p, index) => [
         p.name,
         statusDot(p.status),
-        p.subdomain
-          ? `${p.subdomain}.somewhere.tech`
-          : p.slug
-            ? `${dim('…/' + p.slug)}`
-            : '',
+        servingUrls[index] ?? (p.slug ? `${dim('…/' + p.slug)}` : ''),
         p.updated_at ? timeAgo(p.updated_at) : '',
       ]),
     );

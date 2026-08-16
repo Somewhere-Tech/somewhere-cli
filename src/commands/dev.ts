@@ -17,6 +17,7 @@ import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
 import { showProjectNotices } from '../lib/project-notices.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -462,12 +463,15 @@ async function runLegacyExec(cmdParts: string[]) {
   await showProjectNotices(client, config.project_id);
   const spinner = ora('Loading project context from somewhere.tech...').start();
   try {
-    const result = await client.call<{ keys?: Array<{ key: string }>; vars?: Array<{ key: string }> }>(
-      'GET',
-      '/env',
-      undefined,
-      { project_id: config.project_id },
-    );
+    const [result, servingUrl] = await Promise.all([
+      client.call<{ keys?: Array<{ key: string }>; vars?: Array<{ key: string }> }>(
+        'GET',
+        '/env',
+        undefined,
+        { project_id: config.project_id },
+      ),
+      getProjectServingUrl(client, config.project_id),
+    ]);
     const vars = result.keys ?? result.vars ?? [];
     spinner.stop();
     success(`${vars.length} env vars available (values stay server-side)`);
@@ -483,7 +487,7 @@ async function runLegacyExec(cmdParts: string[]) {
         ...process.env,
         SOMEWHERE_PROJECT_ID: config.project_id,
         SOMEWHERE_SUBDOMAIN: config.subdomain,
-        SOMEWHERE_URL: `https://${config.subdomain}.somewhere.tech`,
+        ...(servingUrl ? { SOMEWHERE_URL: servingUrl } : {}),
       },
     });
     child.on('exit', (code) => process.exit(code ?? 0));
