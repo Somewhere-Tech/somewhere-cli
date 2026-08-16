@@ -127,3 +127,91 @@ test('status prints the canonical serving host returned as prod_fallback', async
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
 });
+
+test('status falls back to the project .site host when URL lookup fails', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-status-fallback-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
+    token: 'smt_status_fallback',
+    user: { email: 'status@example.com', username: 'status' },
+  }) + '\n');
+
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://local');
+      if (req.method === 'GET' && url.pathname === '/v1/projects/proj-host') {
+        sendJson(res, { ok: true, data: {
+          name: 'Serving Fixture',
+          status: 'deployed',
+          subdomain: 'fallback-slug',
+          slug: 'fallback-slug',
+          updated_at: new Date().toISOString(),
+        } });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/projects/proj-host/urls') {
+        sendJson(res, { ok: false, error: 'TEMPORARY_URL_FAILURE', message: 'try again' }, 503);
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/hosted/status') {
+        sendJson(res, { ok: false, error: 'NOT_FOUND', message: 'No workspace' }, 404);
+        return;
+      }
+      if (req.method === 'POST' && url.pathname === '/mcp') {
+        const rpc = JSON.parse(body);
+        if (rpc.method === 'initialize') {
+          sendJson(res, {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              protocolVersion: '2024-11-05',
+              capabilities: { tools: {} },
+              serverInfo: { name: 'status-output-test', version: '1.0.0' },
+            },
+          });
+          return;
+        }
+        if (rpc.method === 'notifications/initialized') {
+          sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: {} });
+          return;
+        }
+        if (rpc.method === 'tools/call') {
+          sendJson(res, {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  ok: true,
+                  data: { prod_version: 7, in_sync: true },
+                }),
+              }],
+            },
+          });
+          return;
+        }
+      }
+      sendJson(res, { ok: false, error: 'NOT_FOUND', message: `${req.method} ${url.pathname}` }, 404);
+    });
+  });
+
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  try {
+    const result = await run(['status', 'proj-host'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1`,
+      SOMEWHERE_MCP_URL: `http://127.0.0.1:${port}/mcp`,
+    });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /URL: https:\/\/fallback-slug\.somewhere\.site/);
+    assert.doesNotMatch(result.stdout, /fallback-slug\.somewhere\.tech/);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});

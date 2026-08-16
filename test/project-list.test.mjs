@@ -31,6 +31,7 @@ test('project list does not print obsolete deploy slot counts', async () => {
     user: { email: 'dev@example.com', username: 'dev' },
   }) + '\n');
 
+  let urlsRequests = 0;
   const server = createServer((req, res) => {
     res.setHeader('Content-Type', 'application/json');
     if (req.method === 'GET' && req.url === '/v1/projects') {
@@ -52,9 +53,11 @@ test('project list does not print obsolete deploy slot counts', async () => {
       return;
     }
     if (req.method === 'GET' && req.url === '/v1/projects/alpha/urls') {
+      urlsRequests += 1;
       res.end(JSON.stringify({
-        ok: true,
-        data: { prod_fallback: 'https://alpha.somewhere.site' },
+        ok: false,
+        error: 'UNEXPECTED_URL_LOOKUP',
+        message: 'project list should not make per-project URL requests',
       }));
       return;
     }
@@ -75,6 +78,7 @@ test('project list does not print obsolete deploy slot counts', async () => {
 
     assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /https:\/\/alpha\.somewhere\.site/);
+    assert.equal(urlsRequests, 0, 'project list should derive .site URLs without N+1 /urls calls');
     assert.doesNotMatch(result.stdout, /deploy slots used/);
     assert.doesNotMatch(result.stdout, /undefined/);
   } finally {

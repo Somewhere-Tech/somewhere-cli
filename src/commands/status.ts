@@ -4,7 +4,7 @@ import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, statusDot, teal, timeAgo } from '../lib/output.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
-import { getProjectServingUrl } from '../lib/project-urls.js';
+import { fallbackProjectServingUrl, getProjectServingUrl } from '../lib/project-urls.js';
 
 export function registerStatus(program: Command) {
   program
@@ -29,6 +29,7 @@ export function registerStatus(program: Command) {
         name: string;
         status: string;
         subdomain: string;
+        slug?: string;
         updated_at?: string;
       } | null = null;
       let projectError: string | null = null;
@@ -44,11 +45,14 @@ export function registerStatus(program: Command) {
           name: string;
           status: string;
           subdomain: string;
+          slug?: string;
           updated_at?: string;
         }>('GET', `/projects/${encodeURIComponent(projectId)}`);
         projectStatus = p;
 
-        const servingUrl = await getProjectServingUrl(client, projectId).catch(() => null);
+        const servingUrl = await getProjectServingUrl(client, projectId).catch(() =>
+          fallbackProjectServingUrl(p),
+        );
 
         if (!opts.json) {
           console.log(`\n  Project: ${teal(p.name)} (${statusDot(p.status)})`);

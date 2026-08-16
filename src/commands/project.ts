@@ -14,7 +14,7 @@ import {
   teal,
   timeAgo,
 } from '../lib/output.js';
-import { getProjectServingUrl } from '../lib/project-urls.js';
+import { fallbackProjectServingUrl, getProjectServingUrl } from '../lib/project-urls.js';
 
 export function registerProject(program: Command) {
   const proj = program
@@ -87,7 +87,9 @@ export function registerProject(program: Command) {
           printJson(p);
           return;
         }
-        const servingUrl = await getProjectServingUrl(client, id).catch(() => null);
+        const servingUrl = await getProjectServingUrl(client, id).catch(() =>
+          fallbackProjectServingUrl(p),
+        );
         console.log(`\n  ${teal(String(p.name))}`);
         info(`Status:    ${statusDot(String(p.status ?? ''))}`);
         if (servingUrl) info(`URL:       ${servingUrl}`);
@@ -275,18 +277,12 @@ async function listProjects(opts: { json?: boolean } = {}) {
       return;
     }
 
-    const servingUrls = await Promise.all(result.projects.map(async (project) => {
-      const ref = project.id ?? project.slug ?? project.subdomain;
-      if (!ref) return null;
-      return getProjectServingUrl(client, ref).catch(() => null);
-    }));
-
     table(
       ['Name', 'Status', 'URL', 'Updated'],
-      result.projects.map((p, index) => [
+      result.projects.map((p) => [
         p.name,
         statusDot(p.status),
-        servingUrls[index] ?? (p.slug ? `${dim('…/' + p.slug)}` : ''),
+        fallbackProjectServingUrl(p) ?? (p.slug ? `${dim('…/' + p.slug)}` : ''),
         p.updated_at ? timeAgo(p.updated_at) : '',
       ]),
     );
