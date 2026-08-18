@@ -6,7 +6,7 @@ import { existsSync, mkdtempSync, mkdirSync, writeFileSync, readFileSync } from 
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { formatStaleBaseExplanation } from '../dist/commands/deploy.js';
+import { formatStaleBaseExplanation, formatStaleReleaseBaseExplanation } from '../dist/commands/deploy.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
@@ -760,5 +760,253 @@ test('promote writes the returned version to the linked project state', async ()
     assert.equal(project.last_deploy.project_id, 'proj_stale_base');
     assert.equal(project.last_deploy.last_deployed_version, 21);
     assert.ok(Number.isFinite(new Date(project.last_deploy.at).getTime()), 'promote state timestamp should be ISO-like');
+  });
+});
+
+// --- Release-native CAS (STALE_RELEASE_BASE) — the live path base_version alone
+// does NOT protect (tsk_5e729c8): the platform enforces staleness on the
+// release-native deploy via base_release_id, returning 409 STALE_RELEASE_BASE.
+// The CLI must anchor the release it last deployed and refuse when it moved.
+
+test('stale-release-base refusal copy names the remote change and the pull/--force next steps', () => {
+  const rendered = formatStaleReleaseBaseExplanation({
+    base_release_id: 'rel_old',
+    active_release_id: 'rel_new',
+  });
+  assert.match(rendered, /This project changed since your last deploy from this machine/);
+  assert.match(rendered, /another publish landed first/);
+  assert.match(rendered, /Your deploy was NOT applied\./);
+  assert.match(rendered, /somewhere deploy --dry-run/);
+  assert.match(rendered, /somewhere pull/);
+  assert.match(rendered, /somewhere deploy --force/);
+});
+
+test('release-native mixed surface: deploy anchors base_release_id and a STALE_RELEASE_BASE is refused, never silently applied', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-relbase-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-relbase-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir);
+  writeFixture(fixtureDir);
+
+  const bodies = [];
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        const parsed = JSON.parse(body);
+        bodies.push(parsed);
+        if (bodies.length === 1) {
+          // First-ever deploy: no anchor yet, returns the release to anchor on.
+          sendJson(res, 200, {
+            ok: true,
+            data: {
+              version: 1,
+              active_release_id: 'rel_first',
+              files: 1,
+              url: 'https://stale-base.somewhere.tech',
+              has_functions: false,
+            },
+          });
+        } else {
+          // Second deploy carried the anchor but the remote moved: refuse.
+          sendJson(res, 409, {
+            ok: false,
+            error: 'STALE_RELEASE_BASE',
+            message: `This deploy declares base release ${parsed.base_release_id}, but rel_second is live — another publish landed first. Nothing was changed.`,
+            data: { base_release_id: parsed.base_release_id, active_release_id: 'rel_second' },
+          });
+        }
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+
+    const first = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+    assert.equal('base_release_id' in bodies[0], false, 'first-ever deploy has no release to anchor on');
+    const afterFirst = readProject(fixtureDir);
+    assert.equal(afterFirst.last_deploy.last_deployed_version, 1);
+    assert.equal(afterFirst.last_deploy.release_id, 'rel_first', 'deploy must persist the active_release_id');
+
+    const second = await run(['deploy'], { cwd: fixtureDir, env });
+    assert.equal(second.status, 1, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.equal(bodies[1].base_release_id, 'rel_first', 'second deploy must anchor on the last deployed release');
+    assert.match(second.stderr, /This project changed since your last deploy from this machine/);
+    assert.match(second.stderr, /somewhere deploy --force/);
+    assert.doesNotMatch(second.stderr, /\[STALE_RELEASE_BASE/);
+    // A refused deploy must not advance the saved state.
+    assert.equal(readProject(fixtureDir).last_deploy.last_deployed_version, 1);
+    assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_first');
+  });
+});
+
+test('deploy --force --yes omits base_release_id so the overwrite is auto-adopted', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-relbase-force-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-relbase-force-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 4,
+      release_id: 'rel_old',
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 5, active_release_id: 'rel_forced', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+    const result = await run(['deploy', '--force', '--yes', '--json'], { cwd: fixtureDir, env });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(deployBody.force, true);
+    assert.equal(deployBody.base_version, 4, 'base_version is still sent under --force');
+    assert.equal('base_release_id' in deployBody, false, '--force must omit base_release_id so the server auto-adopts current');
+    // A successful force deploy re-anchors on the new release.
+    assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_forced');
+  });
+});
+
+test('a normal deploy anchors base_release_id from saved release_id', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-relbase-anchor-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-relbase-anchor-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      release_id: 'rel_anchor',
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 8, active_release_id: 'rel_next', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+    const result = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(deployBody.base_release_id, 'rel_anchor');
+    assert.equal(deployBody.base_version, 7);
+    assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_next');
+  });
+});
+
+test('a plain (non-json) deploy also persists the release_id anchor', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-relbase-plain-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-relbase-plain-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir);
+  writeFixture(fixtureDir);
+
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 1, active_release_id: 'rel_plain', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+    const result = await run(['deploy'], { cwd: fixtureDir, env });
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_plain');
+  });
+});
+
+test('pull persists active_release_id so the next deploy anchors base_release_id', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-relbase-pull-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-relbase-pull-fixture-'));
+  writeLogin(HOME);
+  writeProject(fixtureDir, {
+    last_deploy: {
+      project_id: 'proj_stale_base',
+      last_deployed_version: 7,
+      release_id: 'rel_old',
+      at: '2026-07-07T09:00:00.000Z',
+    },
+  });
+  writeFixture(fixtureDir);
+
+  let deployBody = null;
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/deploy/source') {
+        sendJson(res, 200, {
+          ok: true,
+          data: {
+            project_id: 'proj_stale_base',
+            env: 'prod',
+            version: 9,
+            active_release_id: 'rel_pulled',
+            static_files: { 'index.html': '<html><body>remote current</body></html>\n' },
+            binary_files: {},
+            functions: {},
+            counts: { static_files: 1, binary_files: 0, functions: 0 },
+          },
+        });
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        deployBody = JSON.parse(body);
+        sendJson(res, 200, {
+          ok: true,
+          data: { version: 10, active_release_id: 'rel_after_pull', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+    const pull = await run(['pull', '--force', '--json'], { cwd: fixtureDir, env });
+    assert.equal(pull.status, 0, `stdout:\n${pull.stdout}\nstderr:\n${pull.stderr}`);
+    assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_pulled');
+
+    const deploy = await run(['deploy', '--json'], { cwd: fixtureDir, env });
+    assert.equal(deploy.status, 0, `stdout:\n${deploy.stdout}\nstderr:\n${deploy.stderr}`);
+    assert.equal(deployBody.base_release_id, 'rel_pulled');
   });
 });

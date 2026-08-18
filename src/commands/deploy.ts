@@ -239,6 +239,22 @@ export function formatStaleBaseExplanation(
   ].filter((line): line is string => line !== null).join('\n');
 }
 
+// The release-native staleness guard. Unlike STALE_BASE, the server's
+// STALE_RELEASE_BASE envelope carries only the declared vs. live release ids —
+// no file/version diff — so instead of inventing a change summary we point the
+// user at the tools that show the actual diff. This is the guard that fires on
+// the live path when a dashboard/MCP/agent edit landed after the last CLI
+// deploy (tsk_5e729c8): base_version alone does not protect it.
+export function formatStaleReleaseBaseExplanation(): string {
+  return [
+    'This project changed since your last deploy from this machine — another publish landed first (via the dashboard, an MCP agent, or another machine). Your deploy was NOT applied.',
+    '',
+    'Next steps:',
+    '  Run `somewhere deploy --dry-run` to see exactly what differs, or `somewhere pull` to bring the latest deployed source into this directory, then deploy again.',
+    '  Run `somewhere deploy --force` to overwrite those remote changes intentionally.',
+  ].join('\n');
+}
+
 function findProjectConfigEntry(targetDir: string): ProjectConfigEntry | null {
   const targetEntry = loadProjectConfigEntry(targetDir);
   if (targetEntry) return targetEntry;
@@ -539,6 +555,15 @@ export function registerDeploy(program: Command) {
         if (deployState) {
           body.base_version = deployState.last_deployed_version;
           body.source = 'cli';
+          // The release-native path enforces staleness via base_release_id
+          // (STALE_RELEASE_BASE), not base_version — so anchor on the release we
+          // last put live. Omitted under --force: the server also refuses a
+          // stale base_release_id when force is set, so the only way to
+          // intentionally overwrite is to NOT declare a base (the server then
+          // auto-adopts the current active release).
+          if (!opts.force && typeof deployState.release_id === 'string' && deployState.release_id) {
+            body.base_release_id = deployState.release_id;
+          }
         }
         if (opts.force) {
           body.force = true;
@@ -591,7 +616,12 @@ export function registerDeploy(program: Command) {
             process.exit(1);
           }
           if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
-            saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
+            saveProjectDeployState(
+              deployStateEntry.dir,
+              deployStateEntry.config.project_id,
+              result.version,
+              result.active_release_id ?? result.release_id,
+            );
           }
           return;
         }
@@ -683,15 +713,25 @@ export function registerDeploy(program: Command) {
           process.exit(1);
         }
         if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
-          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, result.version);
+          saveProjectDeployState(
+            deployStateEntry.dir,
+            deployStateEntry.config.project_id,
+            result.version,
+            result.active_release_id ?? result.release_id,
+          );
         }
       } catch (err) {
-        if (err instanceof CliApiError && err.code === 'STALE_BASE') {
+        if (
+          err instanceof CliApiError &&
+          (err.code === 'STALE_BASE' || err.code === 'STALE_RELEASE_BASE')
+        ) {
           spinner?.stop();
-          const details = readStaleBaseDetails(err.data);
-          const message = formatStaleBaseExplanation(details);
+          const message =
+            err.code === 'STALE_RELEASE_BASE'
+              ? formatStaleReleaseBaseExplanation()
+              : formatStaleBaseExplanation(readStaleBaseDetails(err.data));
           if (opts.json) {
-            printJson({ ok: false, error: 'STALE_BASE', message, ...(err.data ?? {}) });
+            printJson({ ok: false, error: err.code, message, ...(err.data ?? {}) });
           } else {
             console.error(message);
           }

@@ -23,6 +23,7 @@ interface SourceResponse {
   project_id: string;
   env: 'dev' | 'prod';
   version: number;
+  active_release_id?: string;
   static_files: Record<string, string>;
   binary_files: Record<string, string>;
   functions: Record<string, string>;
@@ -120,7 +121,7 @@ export function registerPull(program: Command) {
         Number.isInteger(body.version) &&
         body.version >= 1
       ) {
-        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version);
+        saveProjectDeployState(deployStateEntry.dir, body.project_id, body.version, body.active_release_id);
       }
 
       const total = body.counts.static_files + body.counts.binary_files + body.counts.functions;
