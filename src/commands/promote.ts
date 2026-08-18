@@ -53,6 +53,20 @@ export function registerPromote(program: Command) {
       }
 
       if (!opts.yes) {
+        // Fail fast in a non-interactive shell instead of blocking forever on a
+        // prompt no one can answer (A-F07): an inherited pipe never delivers a
+        // keystroke, so `prompts` hangs. Match deploy's --force guard — exit
+        // with actionable -y/--yes guidance rather than a mute wedge.
+        if (!process.stdin.isTTY) {
+          const message =
+            'Refusing to promote without confirmation in a non-interactive shell. Pass -y/--yes to promote intentionally (e.g. `somewhere promote <draft_id> <candidate_release_id> --yes`).';
+          if (opts.json) {
+            printJsonError('CONFIRMATION_REQUIRED', message);
+          } else {
+            error(message);
+          }
+          process.exit(1);
+        }
         const { ok } = await prompts({
           type: 'confirm',
           name: 'ok',
