@@ -150,19 +150,24 @@ export function saveProjectDeployState(
   dir: string,
   projectId: string,
   version: number,
+  releaseId?: string,
   at = new Date().toISOString(),
 ): ProjectConfig | null {
   if (!Number.isInteger(version) || version < 1) return null;
   const config = loadProjectConfig(dir);
   if (!config || config.project_id !== projectId) return null;
-  const next: ProjectConfig = {
-    ...config,
-    last_deploy: {
-      project_id: projectId,
-      last_deployed_version: version,
-      at,
-    },
+  const last_deploy: ProjectDeployState = {
+    project_id: projectId,
+    last_deployed_version: version,
+    at,
   };
+  // Only record the anchor when the server actually returned one — keep the
+  // legacy 3-field shape otherwise so an older release/response never plants a
+  // phantom release_id.
+  if (typeof releaseId === 'string' && releaseId.trim()) {
+    last_deploy.release_id = releaseId.trim();
+  }
+  const next: ProjectConfig = { ...config, last_deploy };
   saveProjectConfig(dir, next);
   return next;
 }

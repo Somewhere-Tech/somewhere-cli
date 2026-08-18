@@ -41,6 +41,11 @@ export interface ProjectDeployState {
   project_id: string;
   last_deployed_version: number;
   at: string;
+  // The release this machine last put live. The platform enforces deploy
+  // staleness on the release-native path via base_release_id (409
+  // STALE_RELEASE_BASE), NOT via last_deployed_version — so this is the anchor
+  // that actually protects against overwriting a remote MCP/dashboard edit.
+  release_id?: string;
 }
 
 export interface ApiError {

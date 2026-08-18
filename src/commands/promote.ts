@@ -17,6 +17,8 @@ interface PromoteResult {
   files_promoted: number;
   has_functions: boolean;
   promoted_draft_id?: string;
+  active_release_id?: string;
+  release_id?: string;
 }
 
 export function registerPromote(program: Command) {
@@ -95,7 +97,12 @@ export function registerPromote(program: Command) {
         });
         spinner?.stop();
         if (deployStateEntry) {
-          saveProjectDeployState(deployStateEntry.dir, deployStateEntry.config.project_id, r.version);
+          saveProjectDeployState(
+            deployStateEntry.dir,
+            deployStateEntry.config.project_id,
+            r.version,
+            r.active_release_id ?? r.release_id,
+          );
         }
         if (opts.json) {
           printJson(r);
