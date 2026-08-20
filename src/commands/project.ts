@@ -325,11 +325,19 @@ async function resolveDeleteTarget(client: ApiClient, ref: string): Promise<Proj
 
 async function requestDeleteConfirmationCode(client: ApiClient, projectId: string): Promise<string> {
   try {
-    await client.call(
+    // New server contract (platform tsk_7575b68a, A-F11/B-O16): step 1 of the
+    // two-step delete SUCCEEDS with { ok:true, status:'needs_confirmation',
+    // code } — read the code from the success body. The catch below keeps the
+    // old ok:false CONFIRMATION_REQUIRED shape working against older workers.
+    const result = (await client.call(
       'DELETE',
       `/projects/${encodeURIComponent(projectId)}`,
       {},
-    );
+    )) as { status?: string; code?: unknown; data?: { code?: unknown } };
+    const fresh = result?.code ?? result?.data?.code;
+    if (result?.status === 'needs_confirmation' && typeof fresh === 'string' && fresh.trim()) {
+      return fresh.trim();
+    }
   } catch (err) {
     if (err instanceof CliApiError && err.code === 'CONFIRMATION_REQUIRED') {
       const code = err.data?.code;
