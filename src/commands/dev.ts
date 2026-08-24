@@ -238,7 +238,8 @@ async function runHotDeploy(opts: { project?: string }) {
     // Non-fatal: fall through with no base. The deploy below still validates.
   }
   let candidateReleaseId: string | null = null;
-  let url: string;
+  let url: string;        // stable address to show the developer
+  let openUrl: string;    // URL to auto-open (one-time capability exchange)
   try {
     // Exact-draft complete-snapshot contract (DRAFT_COMPLETE_SNAPSHOT_REQUIRED):
     // scope:"all", the complete files/binary_files/functions maps (empty maps
@@ -263,7 +264,29 @@ async function runHotDeploy(opts: { project?: string }) {
       throw new Error('The platform did not return the exact draft candidate created by this session.');
     }
     candidateReleaseId = res.candidate_release_id;
+    // The raw preview_url is capability-gated: opening it directly is a 404
+    // until an owner capability has set the __Host-sw_draft_cap session cookie.
+    // Mint a one-time capability and open THAT — it exchanges the token, sets
+    // the cookie, and serves the draft. Show the stable dev-host address (not
+    // the one-time token URL) as the preview location. Fall back to the raw
+    // URL if minting is unavailable.
+    openUrl = res.preview_url;
     url = res.preview_url;
+    try {
+      const cap = await client.call<{ preview_url?: string }>(
+        'POST',
+        `/projects/${encodeURIComponent(projectId)}/preview/mint`,
+        { draft_id: draftId, candidate_release_id: candidateReleaseId },
+      );
+      if (cap && typeof cap.preview_url === 'string') {
+        const stableAddress = `${new URL(res.preview_url).origin}/`;
+        openUrl = cap.preview_url;
+        url = stableAddress;
+      }
+    } catch {
+      // Minting unavailable — keep the raw URL; viewing it may require a
+      // manual capability exchange.
+    }
     spinner.stop();
     const n = typeof res.files_deployed === 'number'
       ? res.files_deployed
@@ -286,7 +309,7 @@ async function runHotDeploy(opts: { project?: string }) {
   console.log(dim('   private to you — save a file and the preview updates. Not live to users.'));
   console.log(dim(`   publish this exact preview with \`somewhere promote ${draftId} ${candidateReleaseId}\`.`));
   console.log(dim('   Ctrl-C to stop.\n'));
-  open(url).catch(() => {});
+  open(openUrl).catch(() => {});
 
   // Debounced batch of changes. Saving three files in quick succession ships
   // one patch, not three.
