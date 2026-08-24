@@ -30,7 +30,8 @@ export function registerRollback(program: Command) {
     .description(
       'Revert production to the previous deployed version. Use this when a ' +
         'promote shipped a bad build — it restores the version that was live ' +
-        'before, including its functions. (Requires at least two promotes.)',
+        'before, including its functions. (Requires a previous production ' +
+        'version to return to.)',
     )
     .option('-y, --yes', 'Skip the confirmation prompt')
     .option('--json', 'Print the raw rollback response as JSON')
