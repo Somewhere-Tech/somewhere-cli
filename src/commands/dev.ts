@@ -18,6 +18,8 @@ import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
+import { callPlatformTool } from '../lib/platform-tools.js';
+import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -220,19 +222,40 @@ async function runHotDeploy(opts: { project?: string }) {
   const { files, binaryFiles, functions } = collectFiles(cwd);
   const draftId = `draft_${randomUUID()}`;
   const firstOperationId = `draftop_${randomUUID()}`;
+  // The first draft snapshot must name the live release it was read from
+  // (base_release_id) — the platform binds the draft to that exact production
+  // release. Read it from deploy_status; a project that has never published to
+  // production has no base and starts the draft from empty.
+  let baseReleaseId: string | null = null;
+  try {
+    const status = unwrapPlatformData(
+      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+    );
+    if (isRecord(status) && typeof status.active_release_id === 'string') {
+      baseReleaseId = status.active_release_id;
+    }
+  } catch {
+    // Non-fatal: fall through with no base. The deploy below still validates.
+  }
   let candidateReleaseId: string | null = null;
   let url: string;
   try {
+    // Exact-draft complete-snapshot contract (DRAFT_COMPLETE_SNAPSHOT_REQUIRED):
+    // scope:"all", the complete files/binary_files/functions maps (empty maps
+    // when there are none), and replace_functions:true. All bytes inline.
     const body: Record<string, unknown> = {
       project_id: projectId,
+      scope: 'all',
       files,
+      binary_files: binaryFiles,
+      functions,
+      replace_functions: true,
       preview: true,
       draft_id: draftId,
       draft_operation_id: firstOperationId,
       expected_candidate_release_id: null,
+      base_release_id: baseReleaseId,
     };
-    if (Object.keys(binaryFiles).length) body.binary_files = binaryFiles;
-    if (Object.keys(functions).length) body.functions = functions;
     const res = await callDraftCandidate<DeployResult>(client, '/deploy', body);
     if (res.draft_id !== draftId
         || typeof res.candidate_release_id !== 'string'
