@@ -98,7 +98,16 @@ test('status prints the canonical serving host returned as prod_fallback', async
                 type: 'text',
                 text: JSON.stringify({
                   ok: true,
-                  data: { prod_version: 7, in_sync: true },
+                  data: {
+                    prod_version: 7,
+                    in_sync: true,
+                    preview_candidates: [{
+                      draft_id: 'draft-current',
+                      candidate_release_id: 'rel-current',
+                      preview_origin: 'https://canonical-serving-dev.somewhere.site',
+                      expires_at: '2026-09-01T00:00:00.000Z',
+                    }],
+                  },
                 }),
               }],
             },
@@ -123,6 +132,10 @@ test('status prints the canonical serving host returned as prod_fallback', async
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /URL: https:\/\/canonical-serving\.somewhere\.site/);
     assert.doesNotMatch(result.stdout, /stale-slug\.somewhere\.tech/);
+    assert.match(result.stdout, /Preview candidate: draft-current/);
+    assert.match(result.stdout, /Candidate release: rel-current/);
+    assert.match(result.stdout, /Preview host: https:\/\/canonical-serving-dev\.somewhere\.site/);
+    assert.match(result.stdout, /Promote: somewhere promote draft-current rel-current/);
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }

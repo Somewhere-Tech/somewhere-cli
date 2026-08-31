@@ -6,6 +6,33 @@ import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
 import { fallbackProjectServingUrl, getProjectServingUrl } from '../lib/project-urls.js';
 
+export interface PreviewCandidateStatus {
+  draft_id: string;
+  candidate_release_id: string;
+  preview_origin?: string;
+  expires_at?: string;
+}
+
+export function previewCandidatesFromDeployment(
+  deployment: Record<string, unknown>,
+): PreviewCandidateStatus[] {
+  const raw = Array.isArray(deployment.preview_candidates)
+    ? deployment.preview_candidates
+    : isRecord(deployment.draft)
+        ? [deployment.draft]
+        : [];
+  return raw.filter(isRecord).flatMap((candidate) => {
+    if (typeof candidate.draft_id !== 'string'
+        || typeof candidate.candidate_release_id !== 'string') return [];
+    return [{
+      draft_id: candidate.draft_id,
+      candidate_release_id: candidate.candidate_release_id,
+      ...(typeof candidate.preview_origin === 'string' ? { preview_origin: candidate.preview_origin } : {}),
+      ...(typeof candidate.expires_at === 'string' ? { expires_at: candidate.expires_at } : {}),
+    }];
+  });
+}
+
 export function registerStatus(program: Command) {
   program
     .command('status [project]')
@@ -89,6 +116,14 @@ export function registerStatus(program: Command) {
             info(`Draft: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);
           } else if (deployment.in_sync === true) {
             info('Deploy state: dev and production are in sync');
+          }
+          const previewCandidates = previewCandidatesFromDeployment(deployment);
+          for (const [index, candidate] of previewCandidates.entries()) {
+            info(`Preview candidate${previewCandidates.length > 1 ? ` ${index + 1}` : ''}: ${teal(candidate.draft_id)}`);
+            info(`Candidate release: ${dim(candidate.candidate_release_id)}`);
+            if (candidate.preview_origin) info(`Preview host: ${candidate.preview_origin}`);
+            info(`Promote: ${dim(`somewhere promote ${candidate.draft_id} ${candidate.candidate_release_id}`)}`);
+            if (candidate.expires_at) info(`Preview expires: ${candidate.expires_at}`);
           }
         }
       } catch (err) {

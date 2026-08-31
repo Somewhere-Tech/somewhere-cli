@@ -29,4 +29,6 @@ test('CLI never substitutes the current release into an unanchored request', () 
   // handling, both asserted absent above).
   assert.match(devSource, /base_release_id: baseReleaseId/);
   assert.doesNotMatch(devSource, /current_release/);
+  assert.match(devSource, /initialAutoOpenUrl = \(await mintPreviewHandoff\([\s\S]*initialHandoff = await mintPreviewHandoff/);
+  assert.match(devSource, /const handoff = await mintPreviewHandoff\(client, projectId, draftId, nextCandidate\);[\s\S]*printPreviewHandoff\(handoff\)/);
 });
