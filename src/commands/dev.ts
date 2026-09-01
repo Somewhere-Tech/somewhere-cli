@@ -279,6 +279,42 @@ async function runHotDeploy(opts: { project?: string }) {
   } catch {
     // Non-fatal: fall through with no base. The deploy below still validates.
   }
+  // An exact preview builds a private CANDIDATE against the project's live
+  // version. A project that has never been published has no live version, so
+  // there is nothing for the first candidate to build on and the platform
+  // refuses with PREVIEW_REQUIRES_BASE_RELEASE. Publish once here — announced,
+  // never silently — so `somewhere dev` works on a brand-new project. Every
+  // preview after this stays private and never changes what is live.
+  if (!baseReleaseId) {
+    spinner.stop();
+    info('This project has never been published, so there is no live version for a private preview to build on.');
+    info('Publishing it once now to create the first version. After this, every preview stays private to you.');
+    try {
+      await callDraftCandidate<DeployResult>(client, '/deploy', {
+        project_id: projectId,
+        scope: 'all',
+        files,
+        binary_files: binaryFiles,
+        functions,
+        replace_functions: true,
+      });
+      const status = unwrapPlatformData(
+        await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+      );
+      if (isRecord(status) && typeof status.active_release_id === 'string') {
+        baseReleaseId = status.active_release_id;
+      }
+      success('Published — this project now has a live version.');
+    } catch (err) {
+      if (!(isBuildError(err) && renderBuildError(err, cwd))) {
+        error(err instanceof Error ? err.message : String(err));
+      }
+      error('Could not publish the first version, so the private preview has nothing to build on.');
+      process.exit(1);
+    }
+    spinner.start('Syncing to preview...');
+  }
+
   let candidateReleaseId: string | null = null;
   let initialHandoff: PreviewCandidateHandoff;
   let initialAutoOpenUrl: string;
