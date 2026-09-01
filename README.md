@@ -23,6 +23,7 @@ name works too: `npx @somewhere-tech/cli deploy`.
 ```bash
 somewhere login          # OAuth in browser, stores API key
 somewhere init           # Create project, write .somewhere.json + .mcp.json
+somewhere dev            # Serve your app on localhost, compiled by the platform
 somewhere deploy         # Deploy current directory
 somewhere logs           # Stream logs
 somewhere open           # Open in browser
@@ -44,6 +45,9 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere project create <name>` | Create a new project |
 | `somewhere project view [name]` | Show project details |
 | `somewhere project delete <name>` | Delete with email confirmation |
+| `somewhere dev` | Serve your app on localhost, compiled by the platform's own compiler; save a file and the page updates in milliseconds |
+| `somewhere dev --cloud` | Deploy every save to a shareable private preview URL instead of serving locally |
+| `somewhere dev <cmd...>` | Run your own command locally with the project's env vars injected |
 | `somewhere deploy` | Deploy current directory to linked project |
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
 | `somewhere deploy --scope functions` | Deploy backend only (leave the site untouched) |
@@ -199,19 +203,55 @@ somewhere deploy --scope functions    # ship a backend fix without touching the 
 somewhere deploy --force --yes        # overwrite remote edits intentionally
 ```
 
-## Optional cloud development
+## Development: `somewhere dev`
 
-The default workflow is `somewhere pull` → edit → `somewhere typecheck` →
-`somewhere deploy`, followed by verification on the public live URL. Database,
-files, one-off scripts, deployed functions, and Browser all use that same live
-project.
+`somewhere dev` serves your app on localhost and compiles it with the
+platform's own compiler — the same one that compiles your deploy — so what
+renders locally is what deploy produces, not a lookalike built by a second
+toolchain. Save a file and the page updates in milliseconds.
 
-`somewhere dev`, `somewhere dev --local`, `somewhere exec`, and
-`somewhere promote` are preserved advanced commands for the isolated
-cloud-development environment. Cloud development is off by default, including
-on paid accounts, and requires both a paid plan and explicit platform
-enablement. Without it, these commands return `CLOUD_DEV_NOT_ENABLED` before
-creating cloud-development resources.
+```bash
+somewhere dev              # serve on http://localhost:8787
+somewhere dev --port 3000  # pick the port
+somewhere dev --open       # open the browser once it is serving
+```
+
+There is no dev version of your app. From the first file you are building the
+production app against real data: `api/` functions run in local Node, and
+`sw.db`, `sw.fs`, `sw.ai` and `sw.auth` inside them call your real project.
+Same app, same data, same build. Functions run on your machine's Node during
+the loop rather than on the platform's runtime, so a deploy is still what
+proves a function in production.
+
+Nothing to install and nothing to build first. Your app's dependencies resolve
+from the project's `node_modules` when it exists, and otherwise from a cache
+the CLI manages for you. A compile error prints the file and line in the
+terminal and shows on the page, with the last working page still underneath; a
+function that throws returns its stack trace.
+
+Environment variables come from a `.env` in the project directory. Run
+`somewhere env pull` to write the list of keys the project expects (values stay
+on the platform), then fill in the ones you want locally. `somewhere dev`
+names any key the project expects that has no local value.
+
+### `--cloud`
+
+`somewhere dev --cloud` deploys every save to a shareable private preview URL
+instead of serving locally, and prints the preview capability URL and the
+`somewhere promote` command after each update. Use it when you want a URL to
+send someone, or when the agent doing the work reaches the platform only over
+MCP and has no local machine to serve from. It needs the development
+environment, which is on the Pro and Scale plans and is enabled per account;
+without it the command returns `CLOUD_DEV_NOT_ENABLED` before creating any
+resources. Serving locally has no such requirement, on any plan.
+
+`somewhere dev --local` is accepted for compatibility and does what bare
+`somewhere dev` does.
+
+### Running your own command
+
+`somewhere dev <cmd...>` runs a command of your choosing with the project's
+environment variables injected — for example `somewhere dev npm run dev`.
 
 ## Client-side code: use the SDK
 
@@ -231,8 +271,8 @@ Inside deployed functions you use the `sw` runtime directly (`sw.db.query(...)`,
 
 ## What the CLI does NOT do
 
-- No hosting or running code (the platform does that)
-- No building or compiling — **deploy raw source; the platform compiles it**
+- No hosting or running production code (the platform does that)
+- No build step before deploy — **deploy raw source; the platform compiles it.** `somewhere dev` compiles locally to serve the loop, using the platform's own compiler, and never asks you to run a build
 - No application AI calls (the `advisor` command only exposes the platform-help expert)
 - No workspace management (dashboard)
 - No billing (dashboard)

@@ -118,20 +118,25 @@ export function registerDev(program: Command) {
     .description(
       'Your app on localhost, compiled by the platform\'s own compiler — so what you see is what deploy ' +
         'produces, not a lookalike built by a second toolchain. Save a file and the page updates in ' +
-        'milliseconds; api/ functions run in local Node with sw.db/sw.fs/sw.ai/sw.auth talking to your ' +
-        'REAL project. Same app, same data, same build. ' +
-        '--cloud uses the old watcher instead (each save deploys to your private preview). ' +
+        'milliseconds; api/ functions run in local Node with sw.db/sw.fs/sw.ai/sw.auth calling your ' +
+        'real project. There is no dev version of your app: from the first file you are building the ' +
+        'production app against real data, and this is a faster window onto it. ' +
+        'Same app, same data, same build. ' +
+        '--cloud deploys every save to a shareable private preview URL instead of serving locally. ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
     )
     .option('--project <id>', 'Override project ID')
-    .option('--cloud', 'Deploy every save to your private preview instead of serving locally')
+    .option(
+      '--cloud',
+      'Deploy every save to a shareable private preview URL instead of serving locally — the loop for an agent that reaches the platform only over MCP',
+    )
     .option('--port <port>', 'Port to serve on (default 8787)')
     .option('--open', 'Open the app in your browser once it is serving')
     .option(
       '--check',
       'Typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning',
     )
-    .option('--local', 'Deprecated alias — this is the default now')
+    .option('--local', 'Accepted for compatibility — serving locally is what bare `somewhere dev` already does')
     .action(
       async (
         cmdParts: string[] | undefined,

@@ -61,7 +61,7 @@ export function registerEnv(program: Command) {
     .description(
       'Write a local .env file listing the env vars this project expects (for ' +
         'the local-dev loop). Values are NOT included — the platform never ' +
-        'returns secret values; fill them in for `somewhere dev --local`.',
+        'returns secret values; fill them in for `somewhere dev`.',
     )
     .option('--project <id>', 'Project ID')
     .option('--out <file>', 'Output path', '.env')

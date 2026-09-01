@@ -58,7 +58,7 @@ export function assertNodeSupport(): void {
   const ok = major >= 24 || (major === 23 && minor >= 6) || (major === 22 && minor >= 18);
   if (!ok) {
     throw new Error(
-      `somewhere dev --local needs Node >= 22.18 (or >= 23.6) for TypeScript support and module hooks — you're on ${process.versions.node}. Upgrade Node and retry.`,
+      `somewhere dev needs Node >= 22.18 (or >= 23.6) for TypeScript support and module hooks — you're on ${process.versions.node}. Upgrade Node and retry.`,
     );
   }
 }
