@@ -131,7 +131,7 @@ export function registerInit(program: Command) {
           printJson(project);
           return;
         }
-        success(`Project created: ${teal(project.name)} (draft)`);
+        success(`Project created: ${teal(project.name)} (preview)`);
 
         saveProjectConfig(dir, {
           project_id: project.id,

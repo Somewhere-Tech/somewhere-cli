@@ -122,7 +122,7 @@ export function registerRollback(program: Command) {
 function rollbackErrorMessage(err: unknown): string {
   const message = err instanceof Error ? err.message : String(err);
   if (err instanceof CliApiError && /no restorable snapshot/i.test(message)) {
-    return 'Rollback is unavailable because the platform could not find a restorable previous live release. No changes were made. Redeploy the source you want live, or try another recorded release.';
+    return 'Rollback is unavailable because the platform could not find a restorable previous production release. No changes were made. Redeploy the source you want in production, or try another recorded release.';
   }
   return message;
 }

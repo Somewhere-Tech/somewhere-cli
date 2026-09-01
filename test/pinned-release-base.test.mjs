@@ -17,13 +17,13 @@ test('CLI never substitutes the current release into an unanchored request', () 
   assert.doesNotMatch(devSource, /callWithPinnedReleaseRetry|BASE_RELEASE_REQUIRED/);
   assert.match(devSource, /callDraftCandidate<DeployResult>\(client, '\/deploy', body\)/);
   assert.match(devSource, /callDraftCandidate<PatchResult>\(client, '\/deploy\/patch', body\)/);
-  assert.match(devSource, /draft_operation_id: firstOperationId/);
-  assert.match(devSource, /expected_candidate_release_id: null/);
-  assert.match(devSource, /expected_candidate_release_id: expectedCandidateReleaseId/);
-  // The first draft MUST anchor to its base release (backend contract
+  assert.match(devSource, /preview_operation_id: firstOperationId/);
+  assert.match(devSource, /expected_preview_id: null/);
+  assert.match(devSource, /expected_preview_id: expectedCandidateReleaseId/);
+  // The first preview MUST anchor to its base release (backend contract
   // DRAFT_SOURCE_SNAPSHOT_REQUIRED): dev reads the current active release up
   // front from deploy_status and sends it once as base_release_id — the safe,
-  // explicit anchor (matches the proven founder-drafts flow). What stays banned
+  // explicit anchor (matches the proven preview flow). What stays banned
   // is the HIDDEN retry that substituted the CURRENT release into an unanchored
   // request on error (the removed pinned-release-retry helper + BASE_RELEASE_REQUIRED
   // handling, both asserted absent above).

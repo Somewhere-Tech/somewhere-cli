@@ -754,8 +754,8 @@ test('promote writes the returned version to the linked project state', async ()
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.equal(promoteBody.project_id, 'proj_stale_base');
-    assert.equal(promoteBody.draft_id, draftId);
-    assert.equal(promoteBody.candidate_release_id, candidateReleaseId);
+    assert.equal(promoteBody.preview_session_id, draftId);
+    assert.equal(promoteBody.preview_id, candidateReleaseId);
     const project = readProject(fixtureDir);
     assert.equal(project.last_deploy.project_id, 'proj_stale_base');
     assert.equal(project.last_deploy.last_deployed_version, 21);
@@ -774,7 +774,7 @@ test('stale-release-base refusal copy names the remote change and the pull/--for
     active_release_id: 'rel_new',
   });
   assert.match(rendered, /This project changed since your last deploy from this machine/);
-  assert.match(rendered, /another publish landed first/);
+  assert.match(rendered, /another production update landed first/);
   assert.match(rendered, /Your deploy was NOT applied\./);
   assert.match(rendered, /somewhere deploy --dry-run/);
   assert.match(rendered, /somewhere pull/);
@@ -813,7 +813,7 @@ test('release-native mixed surface: deploy anchors base_release_id and a STALE_R
           sendJson(res, 409, {
             ok: false,
             error: 'STALE_RELEASE_BASE',
-            message: `This deploy declares base release ${parsed.base_release_id}, but rel_second is live — another publish landed first. Nothing was changed.`,
+            message: `This deploy declares base release ${parsed.base_release_id}, but rel_second is production — another production update landed first. Nothing was changed.`,
             data: { base_release_id: parsed.base_release_id, active_release_id: 'rel_second' },
           });
         }

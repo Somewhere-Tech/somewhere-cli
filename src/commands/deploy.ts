@@ -240,14 +240,14 @@ export function formatStaleBaseExplanation(
 }
 
 // The release-native staleness guard. Unlike STALE_BASE, the server's
-// STALE_RELEASE_BASE envelope carries only the declared vs. live release ids —
+// STALE_RELEASE_BASE envelope carries only the declared vs. production release ids —
 // no file/version diff — so instead of inventing a change summary we point the
 // user at the tools that show the actual diff. This is the guard that fires on
 // the live path when a dashboard/MCP/agent edit landed after the last CLI
 // deploy (tsk_5e729c8): base_version alone does not protect it.
 export function formatStaleReleaseBaseExplanation(): string {
   return [
-    'This project changed since your last deploy from this machine — another publish landed first (via the dashboard, an MCP agent, or another machine). Your deploy was NOT applied.',
+    'This project changed since your last deploy from this machine — another production update landed first (via the dashboard, an MCP agent, or another machine). Your deploy was NOT applied.',
     '',
     'Next steps:',
     '  Run `somewhere deploy --dry-run` to see exactly what differs, or `somewhere pull` to bring the latest deployed source into this directory, then deploy again.',

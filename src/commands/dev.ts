@@ -32,6 +32,8 @@ interface DeployResult {
   has_functions?: boolean;
   build_log?: string[];
   warnings?: string[];
+  preview_session_id?: string;
+  preview_id?: string;
   draft_id?: string;
   candidate_release_id?: string;
 }
@@ -43,6 +45,8 @@ interface PatchResult {
   function_errors?: Array<{ route?: string; error?: string } | string>;
   bundle_error?: string;
   status?: 'success' | 'partial' | 'compile_degraded' | 'functions_degraded';
+  preview_session_id?: string;
+  preview_id?: string;
   draft_id?: string;
   candidate_release_id?: string;
 }
@@ -70,7 +74,7 @@ export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
     .description(
-      'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing to prod, no version bump). ' +
+      'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing reaches production, no version bump). ' +
         '--local runs your functions in local Node with sw.* talking to the real project (no deploy in the loop); ' +
         'it typechecks before starting and on every reload so a dropped import surfaces in the terminal, not as a 500 ' +
         '(add --check to EXIT on type errors). ' +
@@ -221,8 +225,8 @@ async function runHotDeploy(opts: { project?: string }) {
   const spinner = ora('Syncing to preview...').start();
   const { files, binaryFiles, functions } = collectFiles(cwd);
   const draftId = `draft_${randomUUID()}`;
-  const firstOperationId = `draftop_${randomUUID()}`;
-  // The first draft snapshot must name the live release it was read from
+  const firstOperationId = `previewop_${randomUUID()}`;
+  // The first preview snapshot must name the production release it was read from
   // (base_release_id) — the platform binds the draft to that exact production
   // release. Read it from deploy_status; a project that has never published to
   // production has no base and starts the draft from empty.
@@ -252,18 +256,20 @@ async function runHotDeploy(opts: { project?: string }) {
       functions,
       replace_functions: true,
       preview: true,
-      draft_id: draftId,
-      draft_operation_id: firstOperationId,
-      expected_candidate_release_id: null,
+      preview_session_id: draftId,
+      preview_operation_id: firstOperationId,
+      expected_preview_id: null,
       base_release_id: baseReleaseId,
     };
     const res = await callDraftCandidate<DeployResult>(client, '/deploy', body);
-    if (res.draft_id !== draftId
-        || typeof res.candidate_release_id !== 'string'
+    const returnedPreviewSessionId = res.preview_session_id ?? res.draft_id;
+    const returnedPreviewId = res.preview_id ?? res.candidate_release_id;
+    if (returnedPreviewSessionId !== draftId
+        || typeof returnedPreviewId !== 'string'
         || typeof res.preview_url !== 'string') {
-      throw new Error('The platform did not return the exact draft candidate created by this session.');
+      throw new Error('The platform did not return the exact preview created by this session.');
     }
-    candidateReleaseId = res.candidate_release_id;
+    candidateReleaseId = returnedPreviewId;
     // The raw preview_url is capability-gated: opening it directly is a 404
     // until an owner capability has set the __Host-sw_draft_cap session cookie.
     // Mint a one-time capability and open THAT — it exchanges the token, sets
@@ -276,7 +282,7 @@ async function runHotDeploy(opts: { project?: string }) {
       const cap = await client.call<{ preview_url?: string }>(
         'POST',
         `/projects/${encodeURIComponent(projectId)}/preview/mint`,
-        { draft_id: draftId, candidate_release_id: candidateReleaseId },
+        { preview_session_id: draftId, preview_id: candidateReleaseId },
       );
       if (cap && typeof cap.preview_url === 'string') {
         const stableAddress = `${new URL(res.preview_url).origin}/`;
@@ -306,8 +312,8 @@ async function runHotDeploy(opts: { project?: string }) {
   console.log('');
   console.log(`${green('👀')} ${bold('Watching')} ${dim(cwd)} ${dim('for changes')}`);
   console.log(`${teal('🌐')} ${bold('Preview:')} ${teal(url)}`);
-  console.log(dim('   private to you — save a file and the preview updates. Not live to users.'));
-  console.log(dim(`   publish this exact preview with \`somewhere promote ${draftId} ${candidateReleaseId}\`.`));
+  console.log(dim('   private to you — save a file and the preview updates. Not in production.'));
+  console.log(dim(`   promote this exact preview with \`somewhere promote ${draftId} ${candidateReleaseId}\`.`));
   console.log(dim('   Ctrl-C to stop.\n'));
   open(openUrl).catch(() => {});
 
@@ -409,13 +415,13 @@ async function deployBatch(
   }
   for (const rel of deleted) deleteKeys.push(classifyKey(rel).key);
 
-  const operationId = `draftop_${randomUUID()}`;
+  const operationId = `previewop_${randomUUID()}`;
   const body: Record<string, unknown> = {
     project_id: projectId,
     preview: true,
-    draft_id: draftId,
-    draft_operation_id: operationId,
-    expected_candidate_release_id: expectedCandidateReleaseId,
+    preview_session_id: draftId,
+    preview_operation_id: operationId,
+    expected_preview_id: expectedCandidateReleaseId,
   };
   if (Object.keys(updateFiles).length) body.update_files = updateFiles;
   if (Object.keys(updateFunctions).length) body.update_functions = updateFunctions;
@@ -434,10 +440,12 @@ async function deployBatch(
 
   try {
     const r = await callDraftCandidate<PatchResult>(client, '/deploy/patch', body);
-    if (r.draft_id !== draftId || typeof r.candidate_release_id !== 'string') {
-      throw new Error('The platform did not return the exact updated draft candidate.');
+    const returnedPreviewSessionId = r.preview_session_id ?? r.draft_id;
+    const returnedPreviewId = r.preview_id ?? r.candidate_release_id;
+    if (returnedPreviewSessionId !== draftId || typeof returnedPreviewId !== 'string') {
+      throw new Error('The platform did not return the exact updated preview.');
     }
-    const nextCandidate = r.candidate_release_id;
+    const nextCandidate = returnedPreviewId;
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');

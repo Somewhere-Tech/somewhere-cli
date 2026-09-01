@@ -472,7 +472,7 @@ test('rollback replaces stale snapshot wording while preserving JSON', async () 
     const payload = JSON.parse(result.stdout);
     assert.equal(result.status, 1);
     assert.equal(payload.error, 'NOT_FOUND');
-    assert.match(payload.message, /could not find a restorable previous live release/);
+    assert.match(payload.message, /could not find a restorable previous production release/);
     assert.doesNotMatch(payload.message, /before snapshots covered this path/);
   });
 });

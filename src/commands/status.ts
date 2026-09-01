@@ -86,9 +86,9 @@ export function registerStatus(program: Command) {
             info(`Active release: ${dim(deployment.active_release_id)}`);
           }
           if (deployment.dev_ahead === true) {
-            info(`Draft: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);
+            info(`Preview: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);
           } else if (deployment.in_sync === true) {
-            info('Deploy state: dev and production are in sync');
+            info('Deploy state: preview and production are in sync');
           }
         }
       } catch (err) {
