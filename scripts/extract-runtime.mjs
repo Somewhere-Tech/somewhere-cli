@@ -1,6 +1,8 @@
 #!/usr/bin/env node
 /**
- * Vendor the deployed-function runtime out of the platform monorepo.
+ * Vendor the platform's own code out of the monorepo — the FUNCTION RUNTIME
+ * and the COMPILER — so `somewhere dev` / `somewhere exec` run what deploy
+ * runs, not a local reimplementation of it.
  *
  * The platform's deploy pipeline embeds the entire `sw`/`ctx` runtime as JS
  * inside the worker. `somewhere dev --local` / `somewhere exec` run user
@@ -34,7 +36,8 @@
  * that drops slot stamping (or vendoring against a pre-slot monorepo) breaks the
  * vendor step instead of silently shipping a prod-binding local runtime.
  */
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { execSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import { join, dirname } from 'node:path';
@@ -154,3 +157,100 @@ writeFileSync(
 );
 
 console.log(`Vendored runtime @ ${commit} → runtime/sw-init.mjs, runtime/platform-context.mjs`);
+
+/* ─── The COMPILER ─────────────────────────────────────────────────────────
+ *
+ * `somewhere dev` compiles the project with the platform's OWN compiler, so
+ * what renders on localhost is the deploy artifact rather than something a
+ * second toolchain produced that looks similar. The compiler is the same
+ * host-parameterized module the compile container runs
+ * (worker/containers/compile/compile-core.cjs + its two dependency-free
+ * helpers); the CLI supplies a different `host` — its own dependency cache
+ * instead of the baked image — and gets identical output for the same tree.
+ *
+ * Copied verbatim, never adapted. The manifest below records each file's
+ * sha256 and the monorepo commit, and test/compiler-vendor.test.mjs asserts
+ * the shipped copy still hashes to it — so a hand-edit to the vendored
+ * compiler is a failing test, not a silent local/deploy divergence.
+ */
+const COMPILER_FILES = ['compile-core.cjs', 'graph-contract.cjs', 'typed-functions.cjs'];
+const compilerSrcDir = join(monorepo, 'worker/containers/compile');
+const compilerOutDir = join(outDir, 'compiler');
+
+// Drift guard 1: the core must still expose the host contract this CLI builds
+// against. If the extraction is ever reverted (the compiler folded back into
+// server.js) or the factory renamed, vendoring fails here instead of shipping
+// a compiler the CLI cannot construct.
+const coreSource = readFileSync(join(compilerSrcDir, 'compile-core.cjs'), 'utf8');
+if (!/module\.exports\s*=\s*\{[\s\S]*\bcreateCompileCore\b/.test(coreSource)) {
+  throw new Error(
+    'worker/containers/compile/compile-core.cjs does not export createCompileCore. The CLI builds the ' +
+      'compiler by handing it a host; without that factory there is no way to run the platform compiler ' +
+      'locally. Re-vendor against a monorepo that has the compile-core extraction.',
+  );
+}
+
+// Drift guard 2: esbuild is the compiler. A CLI on a different esbuild than
+// the container is a compiler that produces different bytes for the same
+// source — exactly the divergence the local loop exists to eliminate — and it
+// would show up as a mystery parity failure, not as a version mismatch. Fail
+// the vendor step instead.
+const containerEsbuild = JSON.parse(readFileSync(join(compilerSrcDir, 'package.json'), 'utf8')).dependencies?.esbuild;
+const cliManifestPath = join(__dirname, '..', 'package.json');
+const cliManifest = JSON.parse(readFileSync(cliManifestPath, 'utf8'));
+// The CLI runs esbuild-WASM, not native esbuild. Not a preference: the
+// published CLI's supply-chain invariant is that every production dependency
+// sits inside the signed artifact (validateLockedClosure), and native esbuild
+// ships 24 optional PLATFORM packages of which only the build machine's own
+// can ever be installed. esbuild-wasm is one platform-independent package that
+// satisfies it. The VERSION must still match exactly — esbuild is the
+// compiler, and the CLI/container parity fixture proves the two builds of that
+// version emit identical bytes.
+const cliEsbuild = cliManifest.dependencies?.['esbuild-wasm'];
+if (!containerEsbuild) throw new Error('the compile container no longer pins esbuild in its dependencies');
+if (cliEsbuild !== containerEsbuild) {
+  throw new Error(
+    `esbuild pin mismatch: the compile container pins esbuild ${containerEsbuild}, this CLI pins ` +
+      `esbuild-wasm ${cliEsbuild ?? '(none)'}. The local dev loop must run the container's EXACT esbuild ` +
+      'version or it compiles the same source to different bytes. Set ' +
+      `"esbuild-wasm": "${containerEsbuild}" in the CLI's dependencies and re-run.`,
+  );
+}
+
+/* The container's TOOLCHAIN pins. The compiler treats the build toolchain as
+ * its own concern, never the app's (TOOLCHAIN_DEPS is excluded from the
+ * per-build install), so the CLI must run the SAME typescript / postcss /
+ * autoprefixer / tailwind versions the container does — a project's own
+ * tailwind 3.3 or typescript 5.2 would compile to different CSS and resolve
+ * aliases differently, which is exactly the local-vs-deploy divergence the
+ * local loop exists to remove. Recorded here rather than hard-coded in the CLI
+ * so a container bump reaches the local loop through re-vendoring. */
+const containerDeps = JSON.parse(readFileSync(join(compilerSrcDir, 'package.json'), 'utf8')).dependencies ?? {};
+const tw4Deps = JSON.parse(readFileSync(join(compilerSrcDir, 'tw4', 'package.json'), 'utf8')).dependencies ?? {};
+const toolchain = {
+  base: {
+    typescript: containerDeps.typescript,
+    postcss: containerDeps.postcss,
+    autoprefixer: containerDeps.autoprefixer,
+  },
+  tw3: { tailwindcss: containerDeps.tailwindcss },
+  tw4: { tailwindcss: tw4Deps.tailwindcss, '@tailwindcss/postcss': tw4Deps['@tailwindcss/postcss'] },
+};
+for (const [group, pins] of Object.entries(toolchain)) {
+  for (const [name, range] of Object.entries(pins)) {
+    if (!range) throw new Error(`the compile image no longer pins ${name} (toolchain group ${group})`);
+  }
+}
+
+rmSync(compilerOutDir, { recursive: true, force: true });
+mkdirSync(compilerOutDir, { recursive: true });
+const compilerManifest = { commit, esbuild: containerEsbuild, toolchain, files: {} };
+for (const name of COMPILER_FILES) {
+  const bytes = readFileSync(join(compilerSrcDir, name));
+  writeFileSync(join(compilerOutDir, name), bytes);
+  compilerManifest.files[name] = createHash('sha256').update(bytes).digest('hex');
+}
+writeFileSync(join(compilerOutDir, 'VENDOR.json'), JSON.stringify(compilerManifest, null, 2) + '\n');
+console.log(
+  `Vendored compiler @ ${commit} (esbuild ${containerEsbuild}) → runtime/compiler/{${COMPILER_FILES.join(', ')}}`,
+);

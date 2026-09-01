@@ -1,0 +1,23 @@
+{
+  "commit": "d29ba262",
+  "esbuild": "0.24.0",
+  "toolchain": {
+    "base": {
+      "typescript": "5.6.3",
+      "postcss": "8.4.47",
+      "autoprefixer": "10.4.20"
+    },
+    "tw3": {
+      "tailwindcss": "3.4.14"
+    },
+    "tw4": {
+      "tailwindcss": "^4.0.0",
+      "@tailwindcss/postcss": "^4.0.0"
+    }
+  },
+  "files": {
+    "compile-core.cjs": "136209fbe0c53d5f90afdfbd71c6746f842bf3869770104ff9154b5eaa5fd536",
+    "graph-contract.cjs": "aaeebc34f486ee5f639444de5757accfc283de641e631908ccd8d8c688bfb5c0",
+    "typed-functions.cjs": "3e96aff7daad4ccbb67907f79e7cbac42cef2397a18431776495c377b604ab8a"
+  }
+}
