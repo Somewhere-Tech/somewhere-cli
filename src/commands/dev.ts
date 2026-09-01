@@ -194,7 +194,15 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
 
   // Node's type STRIPPING runs the functions, so a dropped import sails through
   // and only crashes at request time. Surface it in the terminal first.
-  if (existsSync(join(cwd, 'tsconfig.json'))) {
+  //
+  // Not when node_modules is absent, though. tsc then cannot resolve ANY
+  // package types and reports every JSX element as TS7026 — 47 red lines on
+  // the untouched init scaffold, none of them real, burying the two lines that
+  // matter and teaching a first-time developer that this command's type errors
+  // are noise (tsk_8796c588). The local loop's whole promise is that no
+  // install is needed to run; the typecheck simply needs one to be meaningful.
+  const hasModules = existsSync(join(cwd, 'node_modules'));
+  if (existsSync(join(cwd, 'tsconfig.json')) && hasModules) {
     const spinner = ora('Typechecking (tsc --noEmit)...').start();
     const result = await runTypecheck(cwd);
     spinner.stop();
@@ -204,8 +212,14 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
       process.exit(1);
     }
   } else if (opts.check) {
-    error('--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).');
+    error(
+      hasModules
+        ? '--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).'
+        : '--check needs your dependencies installed — without node_modules tsc cannot resolve any package types. Run `npm install` here first.',
+    );
     process.exit(1);
+  } else if (!hasModules) {
+    info(dim('Typecheck skipped — no node_modules here, so tsc could not resolve your package types. `npm install` enables it.'));
   }
 
   const token = getToken();
@@ -238,8 +252,13 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
   try {
     const { detectTailwind } = readCompileCore();
     await compiler.prepare(pkg, detectTailwind(sources.files));
+    // Functions resolve packages from the SAME search path the compiler used,
+    // so `import { createClient } from '@somewhere-tech/sdk'` works in api/
+    // without a project npm install — the frontend already needed none, and a
+    // loop where only half the app can find its dependencies is worse than one
+    // where neither can (tsk_3269026d).
     // Functions are optional: a static React app with no api/ still runs.
-    installLoader(cwd);
+    installLoader(cwd, compiler.moduleSearchPath);
     await loadVendoredRuntime();
     state = await prepareLocalProject(client, token, projectId, cwd);
     spinner.stop();

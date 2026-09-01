@@ -20,7 +20,7 @@
  * line — so a typo mid-edit leaves the running app on screen instead of a
  * blank page.
  */
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import type { IncomingMessage, ServerResponse } from 'node:http';
 import { readFileSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { extname, join, relative, resolve, sep } from 'node:path';
@@ -30,6 +30,7 @@ import { bold, dim, green, red, teal, warn, yellow } from '../lib/output.js';
 import { bumpGeneration } from './loader.js';
 import { dispatchRequest, refreshRoutes, type LocalProjectState } from './runtime.js';
 import { CompileFailure, LocalCompiler, type CompileOutput } from './compiler.js';
+import { serveLoopback } from './loopback.js';
 
 const STATIC_MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -360,7 +361,7 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
     return null;
   }
 
-  const server = createServer((req, res) => {
+  const handleRequest = (req: IncomingMessage, res: ServerResponse): void => {
     void (async () => {
       // The reload channel is a long-lived stream, not a request/response.
       if ((req.url ?? '').split('?')[0] === RELOAD_PATH) {
@@ -432,20 +433,11 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
       if (!res.headersSent) res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: false, error: 'DEV_SERVER_ERROR', message: 'See terminal.' }));
     });
-  });
+  };
 
-  await new Promise<void>((resolveListen, rejectListen) => {
-    server.once('error', (err: NodeJS.ErrnoException) => {
-      if (err.code === 'EADDRINUSE') {
-        console.error(red(`Port ${port} is already in use — pass --port <n> to pick another.`));
-        process.exit(1);
-      }
-      rejectListen(err);
-    });
-    // Loopback only: functions here run with the developer's real CLI token
-    // against the real project, so binding the LAN would let anyone on the
-    // network act as them.
-    server.listen(port, '127.0.0.1', () => resolveListen());
+  const { servers } = await serveLoopback(handleRequest, port, (p) => {
+    console.error(red(`Port ${p} is already in use — pass --port <n> to pick another.`));
+    process.exit(1);
   });
 
   const url = `http://localhost:${port}`;
@@ -538,6 +530,7 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
 
   process.on('SIGINT', () => {
     console.log(`\n${dim('Stopped.')}`);
+    for (const s of servers) s.close();
     watcher.close().finally(() => process.exit(0));
   });
 }

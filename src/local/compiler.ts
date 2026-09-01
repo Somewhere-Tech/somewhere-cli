@@ -318,6 +318,16 @@ export class LocalCompiler {
    * Resolve everything the compiler needs before the first build, so every
    * rebuild afterwards is pure compile time. Idempotent.
    */
+  /**
+   * The node_modules dirs the compiler resolves the app's dependencies from,
+   * in order. The local FUNCTION runtime resolves against the same list, so a
+   * function and a component import the same copy of a package (tsk_3269026d).
+   * Empty until prepare() has run.
+   */
+  get moduleSearchPath(): string[] {
+    return this.searchPath;
+  }
+
   async prepare(pkg: { dependencies?: Record<string, string> }, tailwindVersion: number): Promise<void> {
     if (this.core) return;
     const root = packageRoot();

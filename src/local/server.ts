@@ -6,8 +6,7 @@
  * an SPA fallback to index.html). Raw TSX/JSX is NOT compiled here — that's the
  * deploy pipeline's job (CLAUDE.md rule 11); see serveStaticFile below.
  */
-import { createServer } from 'node:http';
-import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { IncomingMessage, RequestListener, ServerResponse } from 'node:http';
 import { readFileSync, statSync } from 'node:fs';
 import { Readable } from 'node:stream';
 import { extname, join, relative, resolve, sep } from 'node:path';
@@ -16,6 +15,7 @@ import { IGNORE } from '../lib/files.js';
 import { bold, dim, green, red, teal, warn, yellow } from '../lib/output.js';
 import { bumpGeneration } from './loader.js';
 import { dispatchRequest, refreshRoutes, type LocalProjectState } from './runtime.js';
+import { serveLoopback } from './loopback.js';
 
 const RELOAD_EXTS = /\.(ts|tsx|mts|js|mjs|jsx|json)$/i;
 
@@ -215,7 +215,7 @@ function serveStaticFile(
 export function startLocalServer(state: LocalProjectState, opts: LocalServerOptions): void {
   const { port } = opts;
 
-  const server = createServer((req, res) => {
+  const handleRequest: RequestListener = (req, res) => {
     void (async () => {
       const t0 = Date.now();
       let request: Request;
@@ -251,13 +251,18 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
       }
       res.end(JSON.stringify({ ok: false, error: 'LOCAL_SERVER_ERROR', message: 'See terminal.' }));
     });
-  });
+  };
 
   // Bind loopback only: these functions run with the developer's real CLI token
-  // (PROJECT_API_KEY) and hit the real project, so exposing them on the LAN would
-  // let anyone on the network invoke sw.db/sw.email etc. as the developer. A
-  // `--host` opt-in can be added later for the deliberate device-testing case.
-  server.listen(port, '127.0.0.1', () => {
+  // (PROJECT_API_KEY) and hit the real project, so exposing them on the LAN
+  // would let anyone on the network invoke sw.db/sw.email etc. as the
+  // developer. A `--host` opt-in can be added later for the deliberate
+  // device-testing case. Both loopback FAMILIES though — see loopback.ts
+  // (tsk_737ff0d2).
+  void serveLoopback(handleRequest, port, (p) => {
+    console.error(red(`Port ${p} is already in use — pass --port <n> to pick another.`));
+    process.exit(1);
+  }).then(() => {
     console.log('');
     console.log(`${green('▲')} ${bold('Local function runtime')} ${dim('— functions run here, sw.* talks to the real project')}`);
     console.log(`${teal('🌐')} ${bold('Listening:')} ${teal(`http://localhost:${port}`)}`);
@@ -277,14 +282,6 @@ export function startLocalServer(state: LocalProjectState, opts: LocalServerOpti
       );
     }
     console.log(dim('   save a file to hot-reload. Ctrl-C to stop.\n'));
-  });
-
-  server.on('error', (err: NodeJS.ErrnoException) => {
-    if (err.code === 'EADDRINUSE') {
-      console.error(red(`Port ${port} is already in use — pass --port <n> to pick another.`));
-      process.exit(1);
-    }
-    throw err;
   });
 
   // Hot reload: any source change bumps the module generation; add/remove

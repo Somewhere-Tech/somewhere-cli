@@ -918,7 +918,22 @@ function createCompileCore(host) {
     }
   }
 
-  /** Make the implicit project root explicit for path aliases. */
+  /**
+ * Build-CONFIG files, which are never in the browser graph.
+ *
+ * The platform IS the bundler, so a project's vite/rollup/webpack/postcss/
+ * tailwind config is never executed by anything the compiler emits. Scanning
+ * them for phantom imports produced a warning whose own premise was false —
+ * "if that code path runs, your app will fail to load it", for a code path
+ * that cannot run — on our OWN init scaffold, whose vite.config.ts imports
+ * vite and @vitejs/plugin-react (tsk_424174be).
+ */
+function isBuildConfigFile(filePath) {
+  const base = filePath.split('/').pop() || '';
+  return /^(?:vite|vitest|rollup|webpack|next|nuxt|svelte|astro|remix|tailwind|postcss|babel|jest|playwright|cypress|eslint|prettier|stylelint)\.config\.[cm]?[jt]sx?$/i.test(base);
+}
+
+/** Make the implicit project root explicit for path aliases. */
   function normalizeTsconfigText(tsconfigText) {
     if (typeof tsconfigText !== 'string') return tsconfigText;
     try {
@@ -940,9 +955,10 @@ function createCompileCore(host) {
    * Wrapped in compile() so any unexpected error degrades to 0 findings, never
    * a crash (same discipline as reviewDependencies).
    */
-  function detectPhantomImports(frontendFiles, root, aliasMatchers = []) {
+  function detectPhantomImports(frontendFiles, root, aliasMatchers = [], declaredDevDeps = []) {
     const buildRootNm = path.join(root, 'node_modules');
     const polyfillKeys = new Set(Object.keys(NODE_POLYFILLS));
+    const devDeclared = new Set(declaredDevDeps);
     const isAliased = (spec) =>
       aliasMatchers.some((a) => spec === a || spec.startsWith(a + '/'));
     // Map<rootPkg, string[]> — files that import a phantom package
@@ -951,6 +967,8 @@ function createCompileCore(host) {
       if (typeof content !== 'string') continue;
       // Only scan JS-family source files — CSS @import is a different resolver
       if (!/\.(tsx?|jsx?|mjs|cjs|js)$/i.test(filePath)) continue;
+      // A build config is not in the browser graph at all (tsk_424174be).
+      if (isBuildConfigFile(filePath)) continue;
       for (const spec of extractBareSpecifiers(content)) {
         // node: builtins are handled by NODE_POLYFILLS aliases; skip independently
         // (node:path is not a polyfillKey but is caught by the URL-shaped :// test
@@ -961,6 +979,12 @@ function createCompileCore(host) {
         // (aliases like `@/App` have no npm-style root package).
         if (isAliased(spec)) continue;
         const rootPkg = specRootPkg(spec);
+        // DECLARED in devDependencies. ensureDeps deliberately installs only
+        // `dependencies` (the build toolchain is the platform's job, not the
+        // app's), so a devDependency is never resolvable here — but it IS
+        // declared, and "add it to your package.json" is already done. Warning
+        // about it is a false positive with wrong remediation (tsk_424174be).
+        if (devDeclared.has(rootPkg)) continue;
         // Resolvable through NODE_POLYFILLS alias (e.g. 'buffer', 'process')
         if (polyfillKeys.has(rootPkg)) continue;
         // Resolvable from per-build install (declared in package.json + installed)
@@ -1570,7 +1594,9 @@ function createCompileCore(host) {
       // 0 findings, never a crash.
       try {
         const aliasMatchers = tsconfigAliasMatchers(tsconfigText);
-        const phantom = detectPhantomImports(frontendFiles, root, aliasMatchers);
+        const phantom = detectPhantomImports(
+          frontendFiles, root, aliasMatchers, Object.keys((pkg && pkg.devDependencies) || {}),
+        );
         for (const [pkg, files] of phantom) {
           const uniq = [...new Set(files)];
           const where = uniq.slice(0, 2).join(', ') + (uniq.length > 2 ? ` and ${uniq.length - 2} other file(s)` : '');
