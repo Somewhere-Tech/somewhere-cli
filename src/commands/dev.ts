@@ -47,6 +47,48 @@ interface PatchResult {
   candidate_release_id?: string;
 }
 
+export interface PreviewCandidateHandoff {
+  draftId: string;
+  candidateReleaseId: string;
+  capabilityUrl: string;
+  promoteCommand: string;
+}
+
+export async function mintPreviewHandoff(
+  client: ApiClient,
+  projectId: string,
+  draftId: string,
+  candidateReleaseId: string,
+): Promise<PreviewCandidateHandoff> {
+  const cap = await client.call<{ preview_url?: string }>(
+    'POST',
+    `/projects/${encodeURIComponent(projectId)}/preview/mint`,
+    { draft_id: draftId, candidate_release_id: candidateReleaseId },
+  );
+  if (!cap || typeof cap.preview_url !== 'string' || !cap.preview_url.includes('/__sw_cap?t=')) {
+    throw new Error('The platform created the candidate but did not return its preview capability URL.');
+  }
+  return {
+    draftId,
+    candidateReleaseId,
+    capabilityUrl: cap.preview_url,
+    promoteCommand: `somewhere promote ${draftId} ${candidateReleaseId}`,
+  };
+}
+
+function printPreviewHandoff(handoff: PreviewCandidateHandoff): void {
+  console.log(`${teal('🌐')} ${bold('Preview capability:')} ${teal(handoff.capabilityUrl)}`);
+  console.log(dim(`   draft_id: ${handoff.draftId}`));
+  console.log(dim(`   candidate_release_id: ${handoff.candidateReleaseId}`));
+  console.log(dim(`   promote command: \`${handoff.promoteCommand}\``));
+}
+
+function printPreviewIdentity(draftId: string, candidateReleaseId: string): void {
+  console.log(dim(`   draft_id: ${draftId}`));
+  console.log(dim(`   candidate_release_id: ${candidateReleaseId}`));
+  console.log(dim(`   promote command: \`somewhere promote ${draftId} ${candidateReleaseId}\``));
+}
+
 export async function callDraftCandidate<T>(
   client: ApiClient,
   path: '/deploy' | '/deploy/patch',
@@ -238,8 +280,8 @@ async function runHotDeploy(opts: { project?: string }) {
     // Non-fatal: fall through with no base. The deploy below still validates.
   }
   let candidateReleaseId: string | null = null;
-  let url: string;        // stable address to show the developer
-  let openUrl: string;    // URL to auto-open (one-time capability exchange)
+  let initialHandoff: PreviewCandidateHandoff;
+  let initialAutoOpenUrl: string;
   try {
     // Exact-draft complete-snapshot contract (DRAFT_COMPLETE_SNAPSHOT_REQUIRED):
     // scope:"all", the complete files/binary_files/functions maps (empty maps
@@ -264,29 +306,16 @@ async function runHotDeploy(opts: { project?: string }) {
       throw new Error('The platform did not return the exact draft candidate created by this session.');
     }
     candidateReleaseId = res.candidate_release_id;
-    // The raw preview_url is capability-gated: opening it directly is a 404
-    // until an owner capability has set the __Host-sw_draft_cap session cookie.
-    // Mint a one-time capability and open THAT — it exchanges the token, sets
-    // the cookie, and serves the draft. Show the stable dev-host address (not
-    // the one-time token URL) as the preview location. Fall back to the raw
-    // URL if minting is unavailable.
-    openUrl = res.preview_url;
-    url = res.preview_url;
-    try {
-      const cap = await client.call<{ preview_url?: string }>(
-        'POST',
-        `/projects/${encodeURIComponent(projectId)}/preview/mint`,
-        { draft_id: draftId, candidate_release_id: candidateReleaseId },
-      );
-      if (cap && typeof cap.preview_url === 'string') {
-        const stableAddress = `${new URL(res.preview_url).origin}/`;
-        openUrl = cap.preview_url;
-        url = stableAddress;
-      }
-    } catch {
-      // Minting unavailable — keep the raw URL; viewing it may require a
-      // manual capability exchange.
-    }
+    // Keep the printed capability usable: auto-open consumes a one-time token,
+    // so mint a separate token for the browser before minting the handoff shown
+    // in the terminal.
+    initialAutoOpenUrl = (await mintPreviewHandoff(
+      client,
+      projectId,
+      draftId,
+      candidateReleaseId,
+    )).capabilityUrl;
+    initialHandoff = await mintPreviewHandoff(client, projectId, draftId, candidateReleaseId);
     spinner.stop();
     const n = typeof res.files_deployed === 'number'
       ? res.files_deployed
@@ -305,11 +334,10 @@ async function runHotDeploy(opts: { project?: string }) {
 
   console.log('');
   console.log(`${green('👀')} ${bold('Watching')} ${dim(cwd)} ${dim('for changes')}`);
-  console.log(`${teal('🌐')} ${bold('Preview:')} ${teal(url)}`);
+  printPreviewHandoff(initialHandoff);
   console.log(dim('   private to you — save a file and the preview updates. Not live to users.'));
-  console.log(dim(`   publish this exact preview with \`somewhere promote ${draftId} ${candidateReleaseId}\`.`));
   console.log(dim('   Ctrl-C to stop.\n'));
-  open(openUrl).catch(() => {});
+  open(initialAutoOpenUrl).catch(() => {});
 
   // Debounced batch of changes. Saving three files in quick succession ships
   // one patch, not three.
@@ -460,9 +488,16 @@ async function deployBatch(
     if (r.warnings?.length) {
       console.log(`${dim(stamp())} ${label} ${yellow('⚠ preview')} ${dim(`(${secs}s)`)}`);
       for (const w of r.warnings) warn(w);
-      return nextCandidate;
+    } else {
+      console.log(`${dim(stamp())} ${label} ${green('✓ preview')} ${dim(`(${secs}s)`)}`);
     }
-    console.log(`${dim(stamp())} ${label} ${green('✓ preview')} ${dim(`(${secs}s)`)}`);
+    try {
+      const handoff = await mintPreviewHandoff(client, projectId, draftId, nextCandidate);
+      printPreviewHandoff(handoff);
+    } catch (err) {
+      error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`);
+      printPreviewIdentity(draftId, nextCandidate);
+    }
     return nextCandidate;
   } catch (err) {
     const secs = ((Date.now() - t0) / 1000).toFixed(1);

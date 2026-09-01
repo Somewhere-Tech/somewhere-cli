@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { callDraftCandidate } from '../dist/commands/dev.js';
+import { callDraftCandidate, mintPreviewHandoff } from '../dist/commands/dev.js';
 import { CliApiError } from '../dist/lib/client.js';
 
 test('draft transport retries one exact operation after a lost response', async () => {
@@ -45,4 +45,27 @@ test('draft transport never retries a server refusal', async () => {
     (error) => error?.code === 'DRAFT_CANDIDATE_CONFLICT',
   );
   assert.equal(calls, 1);
+});
+
+test('preview handoff exposes the exact candidate capability and promote command', async () => {
+  const calls = [];
+  const client = {
+    async call(method, path, body) {
+      calls.push({ method, path, body });
+      return { preview_url: 'https://fixture-dev.somewhere.site/__sw_cap?t=one-time' };
+    },
+  };
+
+  const handoff = await mintPreviewHandoff(client, 'project id', 'draft-current', 'rel-current');
+  assert.deepEqual(calls, [{
+    method: 'POST',
+    path: '/projects/project%20id/preview/mint',
+    body: { draft_id: 'draft-current', candidate_release_id: 'rel-current' },
+  }]);
+  assert.deepEqual(handoff, {
+    draftId: 'draft-current',
+    candidateReleaseId: 'rel-current',
+    capabilityUrl: 'https://fixture-dev.somewhere.site/__sw_cap?t=one-time',
+    promoteCommand: 'somewhere promote draft-current rel-current',
+  });
 });
