@@ -159,7 +159,9 @@ const CLIENT_SCRIPT = `
     var rows = (err.locations||[]).map(function(l){
       var where = l.file + (l.line ? ':' + l.line + (l.column ? ':' + l.column : '') : '');
       return '<div style="margin:14px 0"><div style="color:#7fd1ff">' + esc(where) + '</div>'
-        + '<div style="color:#ffb4a2;white-space:pre-wrap">' + esc(l.text) + '</div></div>';
+        + '<div style="color:#ffb4a2;white-space:pre-wrap">' + esc(l.text) + '</div>'
+        + (l.hint ? '<div style="color:#8b949e;white-space:pre-wrap;margin-top:4px">' + esc(l.hint) + '</div>' : '')
+        + '</div>';
     }).join('');
     box.innerHTML = '<div style="color:#ff6b6b;font-weight:600;letter-spacing:.02em">COMPILE FAILED</div>'
       + (rows || '<div style="margin:14px 0;white-space:pre-wrap">' + esc(err.message) + '</div>')
@@ -203,6 +205,7 @@ function printCompileFailure(failure: CompileFailure, cwd: string): void {
         if (loc.column) console.log(dim(`           │ ${' '.repeat(Math.max(0, loc.column - 1))}^`));
       }
     }
+    if (loc.hint) console.log(`      ${loc.hint}`);
   }
   console.log(dim('    the last working page is still up — fix and save again'));
 }
