@@ -45,6 +45,7 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
 import semver from 'semver';
+import { readPlatformModules } from './compiler-core.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -67,11 +68,21 @@ export interface CompileOutput {
   artifacts: Array<{ path: string; kind: string; bytes: number; sha256: string }>;
 }
 
+/** One reported spot in the developer's source, with what to do about it. */
+export interface FailureLocation {
+  file: string;
+  line?: number;
+  column?: number;
+  text: string;
+  /** One sentence naming the fix, when the error class has a known one. */
+  hint?: string;
+}
+
 /** A compile that failed, located in the developer's own source. */
 export class CompileFailure extends Error {
   constructor(
     message: string,
-    readonly locations: Array<{ file: string; line?: number; column?: number; text: string }>,
+    readonly locations: FailureLocation[],
   ) {
     super(message);
     this.name = 'CompileFailure';
@@ -96,6 +107,72 @@ interface CompileResultShape {
 function packageRoot(): string {
   // dist/local/compiler.js → package root is two levels up.
   return join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
+// ─── The esbuild-wasm bridge, and why it must never speak ───────────────────
+
+interface EsbuildModule {
+  version: string;
+  build: (options: Record<string, unknown>) => Promise<unknown>;
+  context: (options: Record<string, unknown>) => Promise<unknown>;
+  transform: (input: string, options?: Record<string, unknown>) => Promise<unknown>;
+  stop?: () => void;
+  [key: string]: unknown;
+}
+
+/**
+ * esbuild-wasm, forbidden from writing to its own stderr.
+ *
+ * esbuild-wasm is not a library call: it is a child `node` process running the
+ * WASM build, spoken to over a length-prefixed stdio protocol. That child is
+ * spawned by esbuild's own code as `stdio: ['pipe', 'pipe', 'inherit']` — its
+ * stderr is OUR file descriptor 2, whatever ours happens to be.
+ *
+ * The child's entry shim monkey-patches `fs.writeSync` to route fd 1 and fd 2
+ * through `process.stdout.write` / `process.stderr.write`. That patch is only
+ * sound while those streams are sockets or TTYs. When fd 2 is a plain FILE —
+ * `somewhere dev 2> dev.log`, any agent or CI harness that captures output to a
+ * file, a session recorder — node backs `process.stderr` with a SyncWriteStream
+ * whose `_write` calls `fs.writeSync`, which the patch has redirected back to
+ * `process.stderr.write`. Each write re-enters the stream it is servicing, the
+ * pending-write array grows without bound, and `Array.push` finally throws
+ * `RangeError: Invalid array length` — an unhandled 'error' event that kills the
+ * child. To the CLI the service simply stopped, and every later rebuild fails
+ * with "The service is no longer running": one bad import took the loop down for
+ * the rest of the session (tsk_d63b3b6a).
+ *
+ * Which builds write to stderr decides which builds crash, and that is exactly
+ * the reported split. The core parses every source file with
+ * `logLevel: 'silent'`, so a SYNTAX error is reported cleanly and the loop
+ * survives. The bundle step passes no logLevel, so esbuild's default ('warning')
+ * prints the "Could not resolve" banner — and any warning — to stderr. An
+ * unresolvable import therefore crashed on every input.
+ *
+ * We cannot choose the child's stdio, so we remove its reason to write.
+ * `logLevel: 'silent'` costs nothing: errors and warnings come back over the
+ * protocol in `result.errors` / `result.warnings`, which is where the CLI has
+ * always read them from — the banner was duplicate output that only ever
+ * appeared on a terminal. This is a host difference, so it belongs here with the
+ * other three, not in the vendored core.
+ */
+export function silenceEsbuild(esbuild: EsbuildModule): EsbuildModule {
+  const silent = (options: Record<string, unknown> | undefined) => ({ ...(options ?? {}), logLevel: 'silent' });
+  return {
+    ...esbuild,
+    build: (options) => esbuild.build(silent(options)),
+    context: (options) => esbuild.context(silent(options)),
+    transform: (input, options) => esbuild.transform(input, silent(options)),
+  };
+}
+
+/**
+ * True when the error says the bridge itself is gone rather than the source is
+ * bad. esbuild reports both service death and post-mortem calls with these two
+ * sentences and no structured errors.
+ */
+export function isServiceDeath(err: unknown): boolean {
+  const message = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  return /The service (?:was stopped|is no longer running)/i.test(message);
 }
 
 export interface VendorManifest {
@@ -402,6 +479,7 @@ export class LocalCompiler {
   private core: { compile: (body: Record<string, unknown>) => Promise<CompileResultShape> } | null = null;
   private searchPath: string[] = [];
   private depCacheDir = '';
+  private esbuild: EsbuildModule | null = null;
 
   constructor(private readonly opts: LocalCompilerOptions) {}
 
@@ -441,10 +519,13 @@ export class LocalCompiler {
     const requireTw4 = toolchainDirs.tw4 ? requireToolchain('tw4') : null;
 
     const { createCompileCore } = requireVendored('./compile-core.cjs') as CompileCoreModule;
+    // esbuild-wasm at the container's exact version. Loaded through the CLI's
+    // own require so it comes from the CLI's bundled tree, never the project's,
+    // and silenced so the WASM child never writes to an inherited stderr —
+    // see silenceEsbuild.
+    this.esbuild = requireCli('esbuild-wasm') as EsbuildModule;
     this.core = createCompileCore({
-      // esbuild-wasm at the container's exact version. Loaded through the CLI's
-      // own require so it comes from the CLI's bundled tree, never the project's.
-      esbuild: requireCli('esbuild-wasm'),
+      esbuild: silenceEsbuild(this.esbuild),
       imageNodeModules: this.searchPath,
       // No isolated React-19 set locally: it exists in the image to skip a cold
       // install of react/react-dom, and here those either sit in the project's
@@ -489,22 +570,43 @@ export class LocalCompiler {
     const transformEntries = [...collectModuleEntryScripts(files)].filter((path) => path !== entry);
     if (!this.core) throw new Error('LocalCompiler.prepare() must run before compile()');
 
+    const body = {
+      project_id: 'somewhere-dev-local',
+      build_id: 'somewhere-dev-local',
+      entry,
+      files,
+      binary_files: binaryFiles,
+      function_entries: [],
+      transform_entries: transformEntries,
+      package_json: files['package.json'],
+      tsconfig: files['tsconfig.json'],
+      vite_env: this.opts.viteEnv ?? {},
+    };
+
     let result: CompileResultShape;
     try {
-      result = await this.core.compile({
-        project_id: 'somewhere-dev-local',
-        build_id: 'somewhere-dev-local',
-        entry,
-        files,
-        binary_files: binaryFiles,
-        function_entries: [],
-        transform_entries: transformEntries,
-        package_json: files['package.json'],
-        tsconfig: files['tsconfig.json'],
-        vite_env: this.opts.viteEnv ?? {},
-      });
+      result = await this.core.compile(body);
     } catch (err) {
-      throw toCompileFailure(err);
+      // A dead bridge is not the developer's bug and must not end the session.
+      // esbuild caches one long-lived service per process, so once its child
+      // is gone EVERY later rebuild fails with the same sentence until the
+      // service is dropped. Drop it and build again: one save should never cost
+      // more than one build (tsk_d63b3b6a).
+      if (!isServiceDeath(err)) throw toCompileFailure(err);
+      try {
+        this.esbuild?.stop?.();
+      } catch {
+        // stop() is best-effort teardown of an already-dead child.
+      }
+      try {
+        result = await this.core.compile(body);
+      } catch (retryErr) {
+        if (!isServiceDeath(retryErr)) throw toCompileFailure(retryErr);
+        throw new CompileFailure(
+          'The local compiler service stopped and could not be restarted. Re-run `somewhere dev`; if it keeps happening, `somewhere feedback` with this message.',
+          [],
+        );
+      }
     }
     if (!result.entry_chunk) throw new CompileFailure('The compiler produced no entry chunk.', []);
 
@@ -533,8 +635,42 @@ export class LocalCompiler {
  * {file, line, column, text} so the terminal and the browser overlay can point
  * at the exact line instead of printing a paragraph.
  */
+/**
+ * Root package name for a specifier: `@scope/pkg/sub` → `@scope/pkg`,
+ * `pkg/sub` → `pkg`. Mirrors the vendored core's specRootPkg, so the CLI and
+ * the compiler agree on what "the package" is in an import.
+ */
+function rootPackage(spec: string): string {
+  return spec.startsWith('@') ? spec.split('/').slice(0, 2).join('/') : spec.split('/')[0];
+}
+
+/**
+ * One sentence saying what to do about an unresolvable import.
+ *
+ * Two cases, and they need opposite advice. A normal npm package is missing
+ * from the tree and `npm install` fixes it. A PLATFORM specifier is not on npm
+ * at all — `npm install somewhere` fetches an unrelated package — so the fix is
+ * always the import path, never an install. Which is which comes from the
+ * vendored compiler's own PLATFORM_MODULES list (readPlatformModules), the same
+ * enumeration that builds the compiler's virtual-module resolver, so the CLI
+ * cannot drift into calling one of our own modules a missing dependency.
+ *
+ * Returns undefined for anything that is not an unresolved-import error, which
+ * leaves every other message exactly as esbuild wrote it.
+ */
+export function resolutionHint(text: string): string | undefined {
+  const match = /^Could not resolve "([^"]+)"/.exec(text);
+  if (!match) return undefined;
+  const spec = match[1];
+  const platformRoots = new Set(readPlatformModules().map(rootPackage));
+  if (platformRoots.has(rootPackage(spec)) || readPlatformModules().includes(spec)) {
+    return `\`${spec}\` is provided by the platform, not npm — do not add it to package.json. Check the import path: platform modules are only available where the platform supplies them (\`somewhere/db\` belongs in db/schema.ts, which the deploy reads as data and never bundles).`;
+  }
+  return `Add \`${rootPackage(spec)}\` to the dependencies in your package.json and run \`npm install\`.`;
+}
+
 export function toCompileFailure(err: unknown): CompileFailure {
-  const locations: Array<{ file: string; line?: number; column?: number; text: string }> = [];
+  const locations: FailureLocation[] = [];
   // The compiler's own parse phase hands back {file, line, column, message}
   // per bad file (source_errors). Use it verbatim — it is the most precise
   // location available, and it is what a syntax error produces.
@@ -553,6 +689,7 @@ export function toCompileFailure(err: unknown): CompileFailure {
         line: e.location?.line,
         column: e.location ? e.location.column + 1 : undefined,
         text: e.text,
+        hint: resolutionHint(e.text),
       });
     }
     return new CompileFailure(esbuildErrors[0].text, locations);
@@ -563,11 +700,17 @@ export function toCompileFailure(err: unknown): CompileFailure {
     // `src/App.tsx: Expected ...` the parse phase produces.
     const withPos = /^([^\s:]+\.[a-z]+):(\d+):(\d+):\s*(.+)$/i.exec(part);
     if (withPos) {
-      locations.push({ file: withPos[1], line: Number(withPos[2]), column: Number(withPos[3]), text: withPos[4] });
+      locations.push({
+        file: withPos[1],
+        line: Number(withPos[2]),
+        column: Number(withPos[3]),
+        text: withPos[4],
+        hint: resolutionHint(withPos[4]),
+      });
       continue;
     }
     const fileOnly = /^([^\s:]+\.[a-z]+):\s*(.+)$/i.exec(part);
-    if (fileOnly) locations.push({ file: fileOnly[1], text: fileOnly[2] });
+    if (fileOnly) locations.push({ file: fileOnly[1], text: fileOnly[2], hint: resolutionHint(fileOnly[2]) });
   }
   return new CompileFailure(message, locations);
 }

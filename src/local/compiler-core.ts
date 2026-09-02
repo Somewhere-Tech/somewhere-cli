@@ -24,10 +24,38 @@ export interface CompileCorePure {
 
 let cached: CompileCorePure | null = null;
 
+function vendoredRoot(root?: string): string {
+  return root ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
+}
+
 export function readCompileCore(root?: string): CompileCorePure {
   if (cached) return cached;
-  const packageRoot = root ?? join(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const corePath = join(packageRoot, 'runtime', 'compiler', 'compile-core.cjs');
+  const corePath = join(vendoredRoot(root), 'runtime', 'compiler', 'compile-core.cjs');
   cached = createRequire(corePath)('./compile-core.cjs') as CompileCorePure;
   return cached;
+}
+
+let cachedPlatformModules: readonly string[] | null = null;
+
+/**
+ * The specifiers the PLATFORM provides, read from the vendored compiler's own
+ * `PLATFORM_MODULES` — the single enumeration that also builds the compiler's
+ * virtual-module resolver and its phantom-import exemption. Reading it here
+ * rather than restating it is the point: a hand-kept second list is how the CLI
+ * ends up telling a developer that `somewhere/db` is a missing npm package
+ * (tsk_53badecfb7).
+ *
+ * Never throws. A CLI whose diagnostics depend on this must still be able to
+ * print a diagnostic when the vendored file cannot be read.
+ */
+export function readPlatformModules(root?: string): readonly string[] {
+  if (cachedPlatformModules) return cachedPlatformModules;
+  try {
+    const path = join(vendoredRoot(root), 'runtime', 'compiler', 'typed-functions.cjs');
+    const mod = createRequire(path)('./typed-functions.cjs') as { PLATFORM_MODULES?: string[] };
+    cachedPlatformModules = Array.isArray(mod.PLATFORM_MODULES) ? mod.PLATFORM_MODULES : [];
+  } catch {
+    cachedPlatformModules = [];
+  }
+  return cachedPlatformModules;
 }
