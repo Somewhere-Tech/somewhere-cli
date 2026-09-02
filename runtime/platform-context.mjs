@@ -1,4 +1,4 @@
-// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 008ab86e
+// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 1bf981dd
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 // ── Primordial freeze (tsk_327fe8a4, opinionated-not-greenfield) ───────────
@@ -128,9 +128,13 @@ function __sw_initTrace(request) {
       traceId: inbound ? inbound.traceId : __sw_randHex(16),
       spanId: __sw_randHex(8),
       parentSpanId: inbound ? inbound.parentSpanId : null,
-      // A function has no sampling policy of its own: it honors an inbound
-      // decision and otherwise records. The platform is the single place the
-      // 1-in-N rate is configured, and it applies that rate to its own spans.
+      // A function has no sampling policy of its own. An inbound decision to
+      // DROP is honored; otherwise this is "no opinion", not "store this" --
+      // the platform applies TRACE_SAMPLE_RATE deterministically on the trace
+      // id, both on its own hops and when these spans are posted to
+      // /v1/traces, so the whole chain is kept or dropped together
+      // (tsk_07a7465a). Before that this true was load-bearing and exempted
+      // every runtime-originated request from sampling entirely.
       sampled: inbound ? inbound.sampled : true,
       tracestate: __sw_traceHeader(request, 'tracestate', 512),
       baggage: __sw_traceHeader(request, 'baggage', 8192),
@@ -1069,6 +1073,24 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
           err.__sw_expose = true;
           return err;
         }
+        // A PLAN answer, not a connection failure. The platform refuses the
+        // local loop's database calls on a plan without the local-dev database
+        // entitlement, and its message already names the plans, this account's
+        // plan, and that deploying is unaffected. Surfacing it verbatim is the
+        // whole fix: this used to fall through to connectionNotReady below,
+        // whose copy tells the developer to redeploy the function — a
+        // remediation that has never changed this answer (tsk_4df056ea).
+        function planGateError(body) {
+          const code = body && (body.error || body.code);
+          if (code !== 'LOCAL_DEV_DB_NOT_ENABLED' && code !== 'CLOUD_DEV_NOT_ENABLED') return null;
+          const err = new Error((body && body.message) ||
+            'This plan does not include reaching the project database from `somewhere dev`. `somewhere deploy` publishes on every plan.');
+          err.code = code;
+          err.status = 403;
+          err.retryable = false;
+          err.__sw_expose = true;
+          return err;
+        }
         function connectionNotReady(operation, response, body) {
           const upstreamCode = body && (body.error || body.code);
           if (response.status !== 401 && response.status !== 403) return null;
@@ -1095,6 +1117,8 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
             try { j = txt ? JSON.parse(txt) : null; } catch (_) { j = null; }
             const managedErr = managedCapabilityError(j);
             if (managedErr) throw managedErr;
+            const planErr = planGateError(j);
+            if (planErr) throw planErr;
             const responseCode = j && (j.error || j.code);
             const isolationCode = draftExecution && responseCode === 'DRAFT_DB_NOT_ISOLATED'
               ? 'DRAFT_DB_NOT_ISOLATED'
@@ -1181,6 +1205,8 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
           if (!r.ok || !j || j.ok === false) {
             const managedErr = managedCapabilityError(j);
             if (managedErr) throw managedErr;
+            const planErr = planGateError(j);
+            if (planErr) throw planErr;
             const connectionErr = connectionNotReady('batch', r, j);
             if (connectionErr) throw connectionErr;
             const sizeErr = responseSizeError(r, j, 'The database rejected this batch because an input exceeded a size limit.');
@@ -2728,6 +2754,20 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         }
         return v; // unknown declared type: fail open on typing, never on transport
       }
+      // Refuse BEFORE the write a whole number the database cannot store as one
+      // (tsk_daf4d6d2). Whole numbers are kept as 64-bit values; anything past
+      // that range is stored as an approximate decimal and can never be read
+      // back exactly, so it must be refused up front rather than discovered
+      // after the row has already landed. A column declared as a decimal
+      // ('number') is exempt: large decimals are legitimate there.
+      function __sw_structAssertStorableWholeNumber(verb, table, column, v, col) {
+        if (typeof v !== 'number' || !Number.isInteger(v)) return;
+        if (col && col.t === 'number') return;
+        if (v < 9223372036854775808 && v >= -9223372036854775808) return;
+        __sw_structThrowSchema('DATABASE_VALUE_TOO_LARGE',
+          'sw.db.' + verb + ' on "' + table + '": the value for "' + column + '" is outside the range of whole numbers this database stores ' +
+          '(-9223372036854775808 to 9223372036854775807). Keep the value inside that range, or store it as text.');
+      }
       function __sw_structAssertKnownColumn(verb, table, shape, ownerColumn, name, where) {
         if (ownerColumn && __sw_lower(name) === __sw_lower(ownerColumn)) return;
         if (__sw_structFindDeclaredColumn(shape, name)) return;
@@ -2749,6 +2789,7 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
             if (v !== null && typeof v === 'object') {
               __sw_structThrow('sw.db.' + verb + ' value for "' + ir.values[i].column + '": values must be a string, number, boolean, or null (got object).');
             }
+            __sw_structAssertStorableWholeNumber(verb, table, ir.values[i].column, v, null);
           }
           return;
         }
@@ -2761,6 +2802,7 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
           for (let i = 0; i < ir.values.length; i++) {
             __sw_structAssertKnownColumn(verb, table, shape, null, ir.values[i].column, verb === 'update' ? 'set' : 'values');
             const col = __sw_structFindDeclaredColumn(shape, ir.values[i].column);
+            __sw_structAssertStorableWholeNumber(verb, table, ir.values[i].column, ir.values[i].value, col);
             ir.values[i].value = __sw_structCheckWriteValue(verb, table, col, ir.values[i].value);
           }
         }
@@ -2902,8 +2944,19 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
             __sw_structThrow403('TABLE_INTENT_INVALID',
               'sw.db.' + verb + ' on "' + table + '": the table is declared user-owned but its ownership column is missing. Repair the scope declaration (sw.db.scope / db_scope_set), then redeploy.');
           }
+          // Name the file AND the step that applies it (tsk_883e3ede). The old
+          // message pointed only at sw.db.scope / db_scope_set, so a developer
+          // who had already declared the table in db/schema.ts and was running
+          // local dev read it as "your schema file does not count" and
+          // abandoned the managed API for raw SQL. db/schema.ts is applied on a
+          // production deploy only — never from local dev, a preview, or a dry
+          // run — so "declared but not yet deployed" is the single most likely
+          // reason to be reading this, and the message has to say so.
           __sw_structThrow403('TABLE_INTENT_REQUIRED',
-            'sw.db.' + verb + ' on "' + table + '": this table has no declared intent, so the platform cannot prove how to access it safely. Declare it user-owned (sw.db.scope / db_scope_set) to scope it to the signed-in user, or shared for intentional cross-user access — or use raw sw.db.query(sql, params) for manual access.');
+            'sw.db.' + verb + ' on "' + table + '": this table has no declared intent, so the platform cannot prove how to access it safely. ' +
+            'Declare it in db/schema.ts — table({ ... }, { scope: owner() }) for per-user rows, shared() for intentional cross-user access, serverOnly() for trusted server access — then run `somewhere deploy`, which is the step that applies db/schema.ts. ' +
+            'Already declared it there? It needs that one production deploy: local dev, previews and dry runs do not apply the schema file, so the table still reads as undeclared here. ' +
+            'Not using a schema file? sw.db.scope / db_scope_set declares a table immediately. For manual access, use raw sw.db.query(sql, params).');
         }
         if (asServer === true) {
           // Trusted server code reading cross-user, explicitly. No principal
@@ -2986,12 +3039,83 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         }
       }
 
-      // THE renderer: a pure function of (IR, principalId). Identifiers are
-      // validated + double-quoted; every value — including LIMIT/OFFSET — is a
+      // ── Whole-number fidelity on the affected-row RETURNING read (tsk_daf4d6d2) ──
+      // The database stores whole numbers as 64-bit values; a JavaScript number
+      // is only exact to 9007199254740991. On a READ the platform recovers the
+      // exact value by re-running the SELECT with a cast-to-text projection
+      // (db-result-fidelity.ts). A WRITE cannot be re-run, so the same guard has
+      // to be INSIDE the statement: the platform composes the RETURNING list
+      // itself and casts any out-of-range whole number to text there, so the
+      // affected row comes back exactly as the read path would return it.
+      // Before this, a write whose affected row held a 64-bit id COMMITTED and
+      // THEN threw DATABASE_VALUE_TOO_LARGE from the read-back — a successful
+      // write reported as a failure, and no structured update to such a row was
+      // possible even when it did not touch that column.
+      //
+      // Column names come from the declared schema when the table is managed
+      // (free) and otherwise from ONE table-shape read, cached for this request.
+      // If the shape cannot be read, or carries a name this builder would not
+      // quote, the statement keeps its long-standing RETURNING * (rule 9: the
+      // fidelity guard must never turn a working write into a failing one).
+      const __sw_returningShapeCache = new Map();
+
+      // The column list RETURNING must project, or null to keep RETURNING *.
+      async function __sw_structReturningColumns(label, table) {
+        const key = __sw_lower(table);
+        if (__sw_returningShapeCache.has(key)) return __sw_returningShapeCache.get(key);
+        let cols = null;
+        const shape = __sw_structManagedShape(table);
+        if (shape) {
+          cols = [];
+          for (let i = 0; i < shape.columns.length; i++) {
+            cols.push({ n: shape.columns[i].n, guard: shape.columns[i].t === 'integer' });
+          }
+          const ownerColumn = __sw_structResolveOwnerColumn(table);
+          if (ownerColumn) {
+            let present = false;
+            for (let i = 0; i < cols.length; i++) if (cols[i].n === __sw_lower(ownerColumn)) present = true;
+            if (!present) cols.push({ n: __sw_lower(ownerColumn), guard: false });
+          }
+        } else if (!__sw_quotableColumnName(table)) {
+          // Unreachable through the builder (the renderer quotes and validates
+          // the table first), and the only place a table name is spelled into
+          // SQL text rather than bound, so it is checked here on its own.
+          cols = null;
+        } else {
+          // hidden = 1 is a virtual table's hidden column, which SELECT * and
+          // RETURNING * both omit; generated columns (2/3) are included by both.
+          const shapeSql = "SELECT name, type, hidden FROM pragma_table_xinfo('" + table + "')";
+          try {
+            const r = await __sw_execOne(label, DB, shapeSql, []);
+            const rows = (r && r.results) || [];
+            const out = [];
+            for (let i = 0; i < rows.length; i++) {
+              const row = rows[i];
+              if (!row || typeof row !== 'object') { out.length = 0; break; }
+              if (Number(row.hidden) === 1) continue;
+              out.push({ n: row.name, guard: __sw_integerCapableAffinity(row.type) });
+            }
+            cols = out.length > 0 ? out : null;
+          } catch (_) {
+            cols = null;
+          }
+        }
+        if (cols) {
+          for (let i = 0; i < cols.length; i++) {
+            if (!__sw_quotableColumnName(cols[i].n)) { cols = null; break; }
+          }
+        }
+        __sw_returningShapeCache.set(key, cols);
+        return cols;
+      }
+
+      // THE renderer: a pure function of (IR, principalId, returning). Identifiers
+      // are validated + double-quoted; every value — including LIMIT/OFFSET — is a
       // bound ?. For 'user' scope it appends "ownerColumn" = ? (and, for
       // INSERT, adds the owner column + value itself). The owner predicate is
-      // NEVER in ir.where; the renderer owns it.
-      function __sw_renderIR(ir, principalId) {
+      // NEVER in ir.where; the renderer owns it. The 'returning' argument is the
+      // write-path column list resolved above (null keeps RETURNING *).
+      function __sw_renderIR(ir, principalId, returning) {
         // Only the 'project' table arm is renderable today. The IR reserves a
         // 'primitive' arm for future platform primitives (users/calendar/inbox/
         // files) that arrive pre-scoped — but the runtime must REJECT it
@@ -3132,7 +3256,7 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
               existsSql += ' AND ' + q(m.mg[i]) + ' = ?';
               params.push(gv);
             }
-            sql = 'INSERT INTO ' + tableSql + ' (' + colList + ') SELECT ' + placeholders + ' WHERE EXISTS (' + existsSql + ') RETURNING *';
+            sql = 'INSERT INTO ' + tableSql + ' (' + colList + ') SELECT ' + placeholders + ' WHERE EXISTS (' + existsSql + ')' + __sw_returningSql(returning);
             return { sql: sql, params: params };
           }
           sql = 'INSERT INTO ' + tableSql + ' (' + allCols.map(q).join(', ') + ') VALUES (' + allCols.map(function () { return '?'; }).join(', ') + ')';
@@ -3151,13 +3275,13 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
             sql += ' ON CONFLICT DO UPDATE SET ' + sets.join(', ');
             if (ir.scope.mode === 'user') { sql += ' WHERE ' + q(ir.scope.ownerColumn) + ' = ?'; params.push(principalId); }
           }
-          sql += ' RETURNING *';
+          sql += __sw_returningSql(returning);
         } else if (ir.kind === 'update') {
           if (ir.values.length === 0) __sw_structThrow('sw.db.update requires a non-empty set.');
           const assigns = ir.values.map(function (e) { params.push(e.value); return q(e.column) + ' = ?'; });
-          sql = 'UPDATE ' + tableSql + ' SET ' + assigns.join(', ') + whereSql() + ' RETURNING *';
+          sql = 'UPDATE ' + tableSql + ' SET ' + assigns.join(', ') + whereSql() + __sw_returningSql(returning);
         } else {
-          sql = 'DELETE FROM ' + tableSql + whereSql() + ' RETURNING *';
+          sql = 'DELETE FROM ' + tableSql + whereSql() + __sw_returningSql(returning);
         }
         return { sql: sql, params: params };
       }
@@ -3380,10 +3504,21 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         const __sw_t0 = Date.now();
         let rendered;
         try {
-          rendered = __sw_renderIR(ir, principalId);
+          rendered = __sw_renderIR(ir, principalId, null);
         } catch (err) {
           __sw_emitQueryEvent(ir, Date.now() - __sw_t0, 0, false, err && err.code);
           throw err;
+        }
+        // Writes project their affected row through a fidelity-guarded
+        // RETURNING list (tsk_daf4d6d2). Resolved AFTER the render above so a
+        // rejected call still reaches zero transport, and re-rendered rather
+        // than patched — the renderer is a pure function, so the second pass
+        // produces the same statement with the guarded projection and the
+        // identical bound params. Reads never take this path: same call, same
+        // SQL, same params as before.
+        if (ir.kind === 'insert' || ir.kind === 'update' || ir.kind === 'delete') {
+          const returning = await __sw_structReturningColumns(label, ir.table.name);
+          if (returning) rendered = __sw_renderIR(ir, principalId, returning);
         }
         let r;
         const liveReadFingerprint = ir.kind === 'select' ? __sw_structFingerprint(ir) : null;
@@ -3945,6 +4080,30 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         return err;
       }
 
+      // The same failure on a statement that has ALREADY RUN. Saying so is the
+      // whole point: a caller that reads 'failed' off a committed INSERT retries
+      // it and writes the row twice (tsk_daf4d6d2). Raw SQL is run exactly as
+      // written, so the platform cannot add the cast for the caller here — the
+      // composed writers (sw.db.insert / update / remove) do it themselves.
+      function __sw_exactIntegerWriteError(column) {
+        const err = new Error(
+          'The statement ran and its changes were applied, but the row it returned holds an integer outside ' +
+          "JavaScript's exact number range in column " + JSON.stringify(String(column)) + ', which cannot be read ' +
+          'back exactly afterwards. Do not retry the statement. Select the column as CAST(' +
+          __sw_quoteResultColumn(column) + ' AS TEXT) in the RETURNING list, or write through sw.db.insert / ' +
+          'sw.db.update / sw.db.remove, which compose that cast for you.'
+        );
+        err.code = 'DATABASE_VALUE_TOO_LARGE';
+        err.status = 400;
+        err.__sw_expose = true;
+        return err;
+      }
+
+      function __sw_dbStatementApplied(sql) {
+        const kind = __sw_dbStatementKind(sql);
+        return kind === 'INSERT' || kind === 'UPDATE' || kind === 'DELETE' || kind === 'REPLACE';
+      }
+
       // THE result-row decoding chokepoint for every sw.db transport and shape:
       // native binding, REST fallback, raw query, structured query, and batch
       // statement results all pass here before customer code can observe them.
@@ -3956,7 +4115,11 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
       async function __sw_decodeDbResult(database, sql, params, result) {
         const unsafeColumn = __sw_unsafeIntegerResultColumn(result);
         if (!unsafeColumn) return result;
-        if (__sw_dbStatementKind(sql) !== 'SELECT') throw __sw_exactIntegerReadError(unsafeColumn);
+        if (__sw_dbStatementKind(sql) !== 'SELECT') {
+          throw __sw_dbStatementApplied(sql)
+            ? __sw_exactIntegerWriteError(unsafeColumn)
+            : __sw_exactIntegerReadError(unsafeColumn);
+        }
 
         const first = result.results && result.results[0];
         if (!first || typeof first !== 'object' || __sw_arrayIsArray(first)) {
@@ -3978,6 +4141,38 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         }
         if (__sw_unsafeIntegerResultColumn(exact)) throw __sw_exactIntegerReadError(unsafeColumn);
         return exact;
+      }
+
+      // SQLite column affinity, from the declared type. Only INTEGER, NUMERIC
+      // and BLOB/none affinity can hold a whole number out of exact range —
+      // TEXT affinity stores it as text and REAL affinity as a decimal, neither
+      // of which the read path ever flags. Guarding only these keeps the
+      // composed RETURNING list short on wide tables.
+      function __sw_integerCapableAffinity(declaredType) {
+        const t = __sw_lower(String(declaredType == null ? '' : declaredType));
+        if (t.indexOf('int') !== -1) return true;
+        if (t.indexOf('char') !== -1 || t.indexOf('clob') !== -1 || t.indexOf('text') !== -1) return false;
+        if (t === '' || t.indexOf('blob') !== -1) return true;
+        if (t.indexOf('real') !== -1 || t.indexOf('floa') !== -1 || t.indexOf('doub') !== -1) return false;
+        return true;
+      }
+
+      function __sw_quotableColumnName(name) {
+        return typeof name === 'string' && name.length > 0 && name.length <= 64 &&
+          __sw_reMatch(__SW_STRUCT_IDENT_RE, name);
+      }
+
+      function __sw_returningSql(cols) {
+        if (!cols || cols.length === 0) return ' RETURNING *';
+        const parts = [];
+        for (let i = 0; i < cols.length; i++) {
+          const name = __sw_structQuote(cols[i].n);
+          parts.push(cols[i].guard
+            ? 'CASE WHEN typeof(' + name + ") = 'integer' AND (" + name + ' > 9007199254740991 OR ' +
+              name + ' < -9007199254740991) THEN CAST(' + name + ' AS TEXT) ELSE ' + name + ' END AS ' + name
+            : name);
+        }
+        return ' RETURNING ' + parts.join(', ');
       }
 
       function __sw_execOne(label, database, sql, params) {
@@ -6617,20 +6812,43 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
       // resolver; there is no parallel derivation.
       __sw_authResolveRequest = __sw_resolveRequestUser;
       __sw_authVerifyPrincipal = __sw_resolveRequestUser;
-      // Ambient visitor identity (tsk_99bec0b4). sw.db's owner() resolver calls
-      // this ONLY when there is no verified user AND the project's baked
-      // owner-identity mode is 'visitor'. It reads __Host-sw_anon_id from the FROZEN
-      // auth snapshot (the same source verified identity is derived from, so
-      // customer code cannot spoof or downgrade it), validates the format, and
-      // otherwise mints a fresh id AND queues the Set-Cookie itself — there is
-      // no caller Response to attach it to on the structured path. Never throws.
+      // Ambient visitor identity (tsk_99bec0b4; made reachable by tsk_11f8f791).
+      // sw.db's owner() resolver calls this ONLY when there is no verified user
+      // AND the project's baked owner-identity mode is 'visitor'. It reads
+      // __Host-sw_anon_id from the FROZEN auth snapshot (the same source verified
+      // identity is derived from, so customer code cannot spoof or downgrade it),
+      // validates the format, and otherwise mints a fresh id AND queues the
+      // Set-Cookie itself — there is no caller Response to attach it to on the
+      // structured path. Never throws.
+      //
+      // What binds the owner predicate, exactly (the security claim):
+      //  - ONE channel. The value is read from the __Host-sw_anon_id cookie on the
+      //    frozen snapshot and nowhere else — no header, query param, body field,
+      //    or sw.db argument can name a visitor. An id offered through any other
+      //    channel is not read, so the request is simply a visitor with no cookie
+      //    and the platform mints its own.
+      //  - NEVER over a verified user. The caller reaches this only when identity
+      //    resolution found no verified principal, so a cookie cannot downgrade or
+      //    impersonate a signed-in user.
+      //  - The anon_ prefix is mandatory, which is what keeps the visitor
+      //    namespace disjoint from the app-user namespace: an id shaped like an
+      //    app user's (a uuid) fails the test and is discarded, so a visitor
+      //    cannot address a signed-in user's rows by naming their id.
+      //  - Bounded (tsk_11f8f791): a conforming id is 37 chars; anything past 64
+      //    is not ours and is discarded rather than written into an owner column.
+      //  - Anything that fails the test is IGNORED, never repaired and never used:
+      //    the platform mints a fresh id, so a malformed or hostile cookie yields
+      //    a brand-new empty visitor, never a partial or borrowed one.
+      // The conforming value itself is a bearer credential with the same standing
+      // as a session cookie — HttpOnly, Secure, __Host-, 122 bits of entropy —
+      // and is stated as such in the docs. Holding it IS being that visitor.
       __sw_resolveVisitorIdentity = function () {
         let id = null;
         try {
           const ch = __sw_authSnapshotRequest.headers.get('cookie');
           __sw_expireLegacyAuthCookiesIfPresent(ch, request && request.url);
           const existing = __sw_readCookie(ch, '__Host-sw_anon_id');
-          if (existing && /^anon_[a-zA-Z0-9_-]{8,}$/.test(existing)) id = existing;
+          if (existing && /^anon_[a-zA-Z0-9_-]{8,64}$/.test(existing)) id = existing;
         } catch (_) { /* fall through and mint */ }
         if (!id) {
           id = 'anon_' + crypto.randomUUID().replace(/-/g, '');

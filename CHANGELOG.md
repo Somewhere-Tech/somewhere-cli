@@ -1,5 +1,83 @@
 # Changelog
 
+## 0.30.0
+
+### Added
+
+- `tsk_9ec50c84` — `somewhere browser` now drives a **localhost** target. The
+  app `somewhere dev` is serving used to be the one address this CLI's own
+  browser would not visit, so every visual and DOM check had to wait for a
+  production deploy. A loopback URL is now driven by the browser already
+  installed on your machine — no new dependency and nothing to download. Each
+  run gets an empty throwaway profile, so it never reads or writes your real
+  browser profile. If there is no browser at all, the CLI says so and names the
+  environment variable to point at one. Flags only the hosted browser can honour
+  (`--store`, `--session`, `--extract`, non-`dom` `--include`) are refused by
+  name rather than silently dropped from a report that still looks complete.
+- `tsk_70fd0f63` — `somewhere errors` gained a `kind` column and an
+  `--exceptions` flag, so you can see only what actually broke.
+
+### Fixed
+
+- `tsk_bdd72f02` — `somewhere browser --snapshot` now asks for the map it
+  prints. `--snapshot` renders the interactive-element outline, but it never
+  requested that section, so it printed whatever the response happened to carry
+  — usually nothing. `browser --wait button --snapshot` would match a button and
+  then report "dom: 0 interactive elements" on a page with three buttons and two
+  inputs. It now adds `dom` to the requested sections, merging with an explicit
+  `--include` rather than replacing it. The local outline comes from the
+  platform's own probe, so it is a preview of the hosted answer rather than a
+  second opinion.
+- `tsk_ea4274ca` — `somewhere errors` no longer calls a working auth gate an
+  exception. If you probed your own endpoint signed out — deliberately, to prove
+  the gate holds — your 401 was listed as the only exception in 24 hours. Rows
+  now show their kind: **refused** for a 4xx your handler returned on purpose,
+  **exception** for an uncaught throw or a 5xx, with the summary line splitting
+  the counts. Nothing is hidden by default.
+- `tsk_ea4274ca` — a stored screenshot printed as a storage path, which reads as
+  a URL and is not one, so the one value the command handed back for "here is
+  your screenshot" could not be used to see it. The report now leads with the
+  link that opens it and keeps the stored path on its own line, because that is
+  the handle for reading or replacing the file later.
+- `tsk_53badecf` — `somewhere dev --check` and `somewhere deploy` no longer
+  report the `somewhere/db` import from our own managed-schema documentation as
+  a missing npm package whose remedy is installing an unrelated package. The
+  specifiers the platform provides are now treated as provided. A genuinely
+  missing package still warns, and still names every file that imports it.
+- `tsk_a21bc829` — `somewhere dev` no longer asks you for a variable the
+  platform writes. It warned that `APP_URL` had no local value on projects whose
+  source never mentions `APP_URL` — it never would, because deploy writes that
+  key. The local loop now fills it with the local origin, or with the project's
+  public URL when nothing is being served locally. Keys you genuinely own are
+  still named, which is the point of that warning.
+- `tsk_6a2a09bc` / `tsk_320a0bc6` — the local loop now declares tables the way
+  deploy declares them. It kept only the owner column and dropped the intent, so
+  `sw.db.from` on a `shared()` table answered "this table has no declared
+  intent" locally while working fine on the same deployed project. Intents,
+  owner scopes and the owner-identity mode now cross over exactly as the deploy
+  bundle bakes them.
+- `tsk_4df056ea` — when your plan does not include reaching the project database
+  from the local loop, `somewhere dev` now says so **once, at startup**, before
+  you write a line of code. It previously started a clean serving loop and let
+  you discover at the first request that every `sw.db` call was refused — with a
+  message that called it a connection problem and suggested redeploying, which
+  could never help. The loop still runs: the frontend compiles and serves, hot
+  reload works, and every function that does not touch the database still runs.
+  Deploying is unaffected on every plan, and the deployed app reads and writes
+  its database normally. `somewhere status` reports the same answer, including a
+  `local_dev_db` object in `--json`.
+- `tsk_a21bc829` — `--check`'s help now says what the documentation says: it
+  needs a real `npm install`, because the typechecker reads package types out of
+  `node_modules` and the CLI's dependency cache does not stand in for that.
+
+### Changed
+
+- The vendored platform runtime and compiler are re-synced to the current
+  platform. For the local loop this brings `owner()` scoping on visitor-mode
+  projects, exact 64-bit integer fidelity on structured writes and batches, and
+  the plan-derived local-database answer above.
+
+
 ## 0.29.1
 
 ### Changed

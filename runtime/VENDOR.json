@@ -1,8 +1,8 @@
 {
-  "commit": "008ab86e",
+  "commit": "1bf981dd",
   "files": {
-    "sw-init.mjs": "fdbffd6556e6354081099da563401d38b993927f5a663d46dfb888646bbaac3c",
-    "platform-context.mjs": "e16d758d911afbcfdf7ec8fcfd9bb3537c98d6fcfe724e2262ace7209c9fe40f",
-    "browser-probes.mjs": "3cf46d2445dd1cc9700c1427ac49de14933eb4e6431fff2a4ca38dd3350801c3"
+    "sw-init.mjs": "352ebc523b769736f0ea1da0fa87d259553a35d472e0b779d862e4c85252071c",
+    "platform-context.mjs": "fe4dd3bd4fc3619e80d0da8d21df1e7146c416c154d8251d196bf32c007677a5",
+    "browser-probes.mjs": "3793cd63cb29e4f2fce3691f6cf41fe3855ef85454e7b55cd55cf086986fc26d"
   }
 }
