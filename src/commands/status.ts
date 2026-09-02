@@ -43,6 +43,44 @@ export function localDevDbPlanHint(plans: readonly string[] | undefined): string
   return `— included on the ${named} plan${plans.length === 1 ? '' : 's'}; \`somewhere deploy\` publishes on every plan`;
 }
 
+/** Codes the platform returns for "your plan does not include this", as
+ *  opposed to "this project is broken". `CLOUD_DEV_NOT_ENABLED` is the one
+ *  `somewhere dev --cloud` raises (see dev.ts); reaching this project's
+ *  database from a local dev session is a paid feature. A plan fact is not a
+ *  failure of the project, so it must not make `status` exit non-zero
+ *  (tsk_f250e561). */
+const PLAN_ENTITLEMENT_CODES = new Set([
+  'CLOUD_DEV_NOT_ENABLED',
+  'FEATURE_NOT_ON_PLAN',
+  'PLAN_REQUIRED',
+  'UPGRADE_REQUIRED',
+]);
+
+export interface PlanEntitlementNote {
+  code: string;
+  message: string;
+}
+
+/** Read a platform tool error as a plan-entitlement fact, or null when it is a
+ *  real problem (deploy failed, project missing, auth broken). Tool errors
+ *  arrive as `CODE: message`, the shape platform-tools.ts renders. */
+export function planEntitlementFromError(err: unknown): PlanEntitlementNote | null {
+  const text = err instanceof Error ? err.message : String(err);
+  const match = /^([A-Z][A-Z0-9_]{2,}):\s*(.*)$/s.exec(text.trim());
+  if (!match) return null;
+  if (!PLAN_ENTITLEMENT_CODES.has(match[1])) return null;
+  return { code: match[1], message: match[2].trim() || text.trim() };
+}
+
+/** One line that states the entitlement as information. The platform's own
+ *  wording is kept — it is the thing that knows which plans include it. */
+export function planEntitlementLine(note: PlanEntitlementNote): string {
+  const subject = note.code === 'CLOUD_DEV_NOT_ENABLED'
+    ? 'Cloud dev'
+    : 'Deploy status';
+  return `${subject}: not included on this plan — ${note.message}`;
+}
+
 export function registerStatus(program: Command) {
   program
     .command('status [project]')
@@ -74,6 +112,7 @@ export function registerStatus(program: Command) {
       let projectError: string | null = null;
       let deploymentStatus: Record<string, unknown> | null = null;
       let deploymentError: string | null = null;
+      let deploymentEntitlement: PlanEntitlementNote | null = null;
       let workspaceStatus: {
         status: string;
         terminal_url?: string | null;
@@ -149,9 +188,21 @@ export function registerStatus(program: Command) {
           }
         }
       } catch (err) {
-        deploymentError = err instanceof Error ? err.message : String(err);
-        if (!opts.json) error(`Deploy status: ${deploymentError}`);
-        process.exitCode = 1;
+        // A plan entitlement is an answer, not a failure. A healthy project on
+        // a plan without cloud dev must still exit 0 (tsk_f250e561); only a
+        // real problem — deploy failed, project unreachable, auth broken —
+        // exits non-zero.
+        deploymentEntitlement = planEntitlementFromError(err);
+        if (deploymentEntitlement) {
+          if (!opts.json) {
+            info(planEntitlementLine(deploymentEntitlement));
+            info(dim('— your deployed app and `somewhere deploy` are unaffected'));
+          }
+        } else {
+          deploymentError = err instanceof Error ? err.message : String(err);
+          if (!opts.json) error(`Deploy status: ${deploymentError}`);
+          process.exitCode = 1;
+        }
       }
 
       try {
@@ -184,6 +235,15 @@ export function registerStatus(program: Command) {
           workspace: workspaceStatus,
           project_error: projectError,
           deployment_error: deploymentError,
+          // A plan fact, reported separately from `deployment_error` so a
+          // script never reads "not on your plan" as a broken project.
+          deployment_entitlement: deploymentEntitlement === null
+            ? null
+            : {
+                code: deploymentEntitlement.code,
+                message: deploymentEntitlement.message,
+                deploy_affected: false,
+              },
           // Lifted to the top level so a script reads one key rather than
           // knowing the project shape — and so this surface, the `somewhere dev`
           // startup line and the platform's own refusal cannot drift apart.
