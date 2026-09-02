@@ -1,5 +1,55 @@
 # Changelog
 
+## 0.29.1
+
+### Changed
+
+- `tsk_0100d8e5` — the local loop now runs the CURRENT platform runtime. The
+  copy the CLI carried had frozen several months behind, so `somewhere dev` was
+  quietly running your `api/` functions against an older `sw.*` than your
+  deployed ones. Re-synced deliberately, with a hash guard so it cannot drift
+  silently again. What this changes for you is below.
+- `tsk_0100d8e5` — the structured database API works locally: `sw.db.from`,
+  `.insert`, `.update`, `.delete`, `.count`. Tables need a scope declaration for
+  the platform to scope them to the signed-in user; an undeclared table returns
+  a clear error naming the table.
+- `tsk_0100d8e5` — also newly available in the local loop: sign-in with GitHub
+  and Discord, roles and moderation (`sw.auth.requireRole`,
+  `sw.auth.moderation.*`), plans and entitlements (`sw.billing`), scheduling
+  (`sw.calendar`), contacts, and durable agents (`sw.agent`). Email gains
+  delivery `status` and `history`, payments gains `quote` and a per-user billing
+  portal, and search gains `add`.
+- `tsk_0312cf17` — `somewhere dev` now builds with the same React version the
+  deploy image builds with. It previously installed the lowest version your
+  range allowed (`^19.2.0` became 19.2.0) while deploy used 19.2.7, so the loop
+  and production could differ by a patch release you would only discover in
+  production.
+- `tsk_106f7ab1` — one vocabulary for previews across the CLI. Commands and
+  messages say **preview** and **production**; `somewhere promote` names its
+  arguments `preview_session_id` and `preview_id`. `--draft` still works as an
+  alias of `--preview`, so nothing you already type breaks.
+
+### Fixed
+
+- `tsk_8a9d2d1a` — `somewhere deploy` no longer tells you "Next.js apps don't
+  run here" when your app is not a Next.js app. Any project with a `src/pages/`
+  folder tripped it — including the app `somewhere init` creates, so this was
+  often the first thing a new project printed. A Next.js app is now identified
+  the way the platform identifies one: a `next` dependency or a `next.config`
+  file.
+- `tsk_cf48f4ab` — `somewhere dev --cloud` on a plan without private previews
+  now refuses before doing anything, instead of publishing a first production
+  version and only then telling you the command is unavailable. Nothing is
+  created.
+
+### Known difference
+
+- The JavaScript bundle `somewhere dev` builds and the one `somewhere deploy`
+  builds are the same code, built by the same compiler with the same dependency
+  versions — but they are not byte-identical. Build comments and source-map
+  entries record where each module was read from, which is your machine locally
+  and the build image on deploy. It has no effect on what your app does.
+
 ## 0.29.0
 
 ### Added
