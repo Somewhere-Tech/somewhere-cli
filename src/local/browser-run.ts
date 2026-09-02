@@ -87,6 +87,64 @@ async function domOutlineScript(): Promise<string> {
 const SETTLE_MS = 250;
 const POLL_MS = 100;
 
+/** How long the preflight waits for the target to answer at all. */
+const REACHABILITY_TIMEOUT_MS = 5_000;
+
+/** How long the page gets to finish loading before the run says so and moves on. */
+const NAVIGATION_TIMEOUT_MS = 30_000;
+
+/**
+ * Is this the browser's OWN favicon request rather than one the page made?
+ *
+ * Chrome fetches /favicon.ico for every document whether or not the page asks
+ * for one, so a 404 there says nothing about the app — and the hosted verdict
+ * never counted it, because a deployed project answers that path. Counting it
+ * locally made `somewhere init`'s own scaffold report FAIL with a clean page
+ * underneath (tsk_10be456b). A favicon the page DECLARES has initiator type
+ * `parser`, so a broken declared icon still fails, as it should.
+ */
+export function isBrowserOwnFaviconRequest(url: string | undefined, initiatorType: string | undefined): boolean {
+  if (initiatorType !== 'other') return false;
+  if (!url) return false;
+  try {
+    return new URL(url).pathname === '/favicon.ico';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Confirm something is actually serving the local address BEFORE launching a
+ * browser at it.
+ *
+ * Without this, a URL nothing is listening on (a stopped `somewhere dev`, the
+ * wrong port, another tool's server that never completes a document) reached
+ * the browser anyway, and the run drained its whole budget in silence. The
+ * check is a bounded request, and its failure is the one sentence that says
+ * what to run.
+ */
+export async function assertLocalTargetReachable(url: string, timeoutMs = REACHABILITY_TIMEOUT_MS): Promise<void> {
+  try {
+    await fetch(url, {
+      method: 'GET',
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+  } catch (err) {
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    if (timedOut) {
+      throw new Error(
+        `${url} accepted the connection but did not answer within ${Math.round(timeoutMs / 1000)}s, ` +
+        'so there was nothing to inspect. Check that the server on that port is healthy, then run this again.',
+      );
+    }
+    throw new Error(
+      `Nothing is serving ${url} on this machine. Start your app with \`somewhere dev\` and point this at the ` +
+      'address it prints — or check the deployed app instead with `somewhere browser --project <name>`.',
+    );
+  }
+}
+
 /**
  * Timers are unref'd: the load race below arms one for the whole remaining
  * budget, and a ref'd timer would hold the process open for the rest of it
@@ -124,6 +182,10 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
   const found = findBrowser();
   if (!found) throw new Error(NO_BROWSER_MESSAGE);
 
+  // Cheapest refusal first: no browser is launched at an address nothing serves.
+  const startUrl = req.path ? new URL(req.path, req.url).toString() : req.url;
+  await assertLocalTargetReachable(startUrl);
+
   const deadline = Date.now() + req.timeoutMs;
   const launched = await launchLocalBrowser({
     executablePath: found.path,
@@ -138,6 +200,7 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
   const steps: LocalStepResult[] = [];
   const screenshots: Array<{ label: string; path: string }> = [];
   const requestMethods = new Map<string, string>();
+  const requestInitiators = new Map<string, string | undefined>();
 
   try {
     session.on('Runtime.consoleAPICalled', (params) => {
@@ -157,13 +220,19 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
       const id = String(params['requestId'] ?? '');
       const request = params['request'] as { method?: string } | undefined;
       if (id) requestMethods.set(id, request?.method ?? 'GET');
+      const initiator = params['initiator'] as { type?: string } | undefined;
+      if (id) requestInitiators.set(id, initiator?.type);
     });
     session.on('Network.responseReceived', (params) => {
       const response = params['response'] as { status?: number; url?: string } | undefined;
       if (!response || typeof response.status !== 'number' || response.status < 400) return;
+      const requestId = String(params['requestId'] ?? '');
+      // The browser's own favicon fetch is not a request the page made.
+      if (response.status === 404
+          && isBrowserOwnFaviconRequest(response.url, requestInitiators.get(requestId))) return;
       failedRequests.push({
         status: response.status,
-        method: requestMethods.get(String(params['requestId'] ?? '')) ?? 'GET',
+        method: requestMethods.get(requestId) ?? 'GET',
         url: response.url,
       });
     });
@@ -186,25 +255,39 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
       mobile: false,
     });
 
-    const startUrl = req.path ? new URL(req.path, req.url).toString() : req.url;
+    let loadFired = false;
     const loaded = new Promise<void>((resolve) => {
-      session.on('Page.loadEventFired', () => resolve());
+      session.on('Page.loadEventFired', () => { loadFired = true; resolve(); });
     });
     await session.send('Page.navigate', { url: startUrl });
-    // Either the page loads or the budget runs out; whichever comes first, drop
-    // the other's timer rather than leaving it armed for the rest of the budget.
+    // Either the page loads or its own navigation budget runs out; whichever
+    // comes first, drop the other's timer rather than leaving it armed. The
+    // budget is the navigation's, NOT the whole run's: spending every second on
+    // a document that never loads and then reporting as if it had is what made
+    // this command look hung (tsk_a605ff7b).
+    const navigationBudgetMs = Math.max(0, Math.min(NAVIGATION_TIMEOUT_MS, deadline - Date.now()));
     let loadTimer: ReturnType<typeof setTimeout> | undefined;
     await Promise.race([
       loaded,
       new Promise<void>((resolve) => {
-        loadTimer = setTimeout(resolve, Math.max(0, deadline - Date.now()));
+        loadTimer = setTimeout(resolve, navigationBudgetMs);
         loadTimer.unref();
       }),
     ]);
     if (loadTimer) clearTimeout(loadTimer);
+    if (!loadFired) {
+      steps.push({
+        action: 'goto',
+        ok: false,
+        path: req.path,
+        error:
+          `${startUrl} did not finish loading within ${Math.round(navigationBudgetMs / 1000)}s. ` +
+          'Everything the page had produced by then is reported below.',
+      });
+    }
     await sleep(SETTLE_MS);
 
-    if (req.path) steps.push({ action: 'goto', ok: true, path: req.path });
+    if (req.path && loadFired) steps.push({ action: 'goto', ok: true, path: req.path });
 
     if (req.wait) {
       const selector = req.wait;

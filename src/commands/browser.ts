@@ -329,6 +329,10 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
   }
 
   const viewport = opts.viewport === 'mobile' ? VIEWPORTS.mobile : VIEWPORTS.desktop;
+  // Say which half is answering BEFORE the run, not after it: a command that
+  // prints nothing until it finishes is indistinguishable from a hung one, and
+  // that is exactly how the local path read (tsk_a605ff7b).
+  if (!opts.json) console.log(dim(`local browser — this machine, not the platform's — checking ${url}`));
   let report: LocalBrowserReport;
   try {
     report = await runLocalBrowser({
@@ -352,7 +356,6 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
     console.log(JSON.stringify(shaped, null, 2));
     process.exit(browserExitCode(shaped));
   }
-  console.log(dim(`local browser — this machine, not the platform's`));
   for (const line of formatBrowserReport(shaped, { snapshot: opts.snapshot })) {
     console.log(line);
   }

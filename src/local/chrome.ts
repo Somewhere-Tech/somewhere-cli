@@ -137,6 +137,14 @@ export const NO_BROWSER_MESSAGE =
   'Install Chrome, Chromium, Edge, or Brave, or point ' +
   `${BROWSER_PATH_ENV_VARS[0]} at a browser you already have.`;
 
+/**
+ * How long one DevTools command may wait for its reply. Nothing this command
+ * asks a browser to do is slow enough to need more; a command still waiting
+ * after this means the browser has stopped answering, not that the page is
+ * busy. The whole-run budget is separate and larger.
+ */
+export const DEVTOOLS_COMMAND_TIMEOUT_MS = 15_000;
+
 /** One request/response + event channel to a running browser. */
 export class DevToolsSession {
   private nextId = 1;
@@ -199,12 +207,43 @@ export class DevToolsSession {
     this.listeners.set(method, list);
   }
 
-  send(method: string, params: Record<string, unknown> = {}): Promise<Record<string, unknown>> {
+  /**
+   * Send one DevTools command and wait for its reply, BOUNDED.
+   *
+   * A reply only ever arrives from `onMessage` (matching id) or `failAll`
+   * (socket closed/errored). A browser that accepts the socket and then stops
+   * answering satisfies neither, so an unbounded wait here hung the whole
+   * command with nothing printed — the silent >90s stall. Every command now
+   * carries its own deadline, and the waiter is registered BEFORE the write so
+   * a reply can never land before there is anything to receive it.
+   */
+  send(
+    method: string,
+    params: Record<string, unknown> = {},
+    timeoutMs: number = DEVTOOLS_COMMAND_TIMEOUT_MS,
+  ): Promise<Record<string, unknown>> {
     if (this.closed) return Promise.reject(new Error('The connection to the browser is closed.'));
     const id = this.nextId++;
-    this.socket.send(JSON.stringify({ id, method, params, sessionId: this.sessionId }));
     return new Promise((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+      const timer = setTimeout(() => {
+        this.pending.delete(id);
+        reject(new Error(
+          `The browser did not answer \`${method}\` within ${Math.round(timeoutMs / 1000)}s. ` +
+          'The page may be stuck; run it again, and close any browser this command left behind.',
+        ));
+      }, timeoutMs);
+      timer.unref();
+      this.pending.set(id, {
+        resolve: (v) => { clearTimeout(timer); resolve(v); },
+        reject: (e) => { clearTimeout(timer); reject(e); },
+      });
+      try {
+        this.socket.send(JSON.stringify({ id, method, params, sessionId: this.sessionId }));
+      } catch (err) {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        reject(err instanceof Error ? err : new Error(String(err)));
+      }
     });
   }
 
