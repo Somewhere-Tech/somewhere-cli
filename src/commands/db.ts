@@ -1,7 +1,8 @@
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { Command } from 'commander';
 import ora from '../lib/spinner.js';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, success, table, teal, yellow } from '../lib/output.js';
 
@@ -14,6 +15,22 @@ interface QueryResult {
   changes?: number;
   rows_affected?: number;
   duration_ms?: number;
+}
+
+interface ApplySchemaResult {
+  applied?: boolean;
+  no_op?: boolean;
+  report_lines?: unknown;
+  reportLines?: unknown;
+}
+
+function schemaReportLines(result: ApplySchemaResult): string[] {
+  const candidate = Array.isArray(result.report_lines)
+    ? result.report_lines
+    : Array.isArray(result.reportLines)
+      ? result.reportLines
+      : [];
+  return candidate.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
 }
 
 export function registerDb(program: Command) {
@@ -79,6 +96,78 @@ export function registerDb(program: Command) {
       } catch (err) {
         spinner?.fail('Query failed');
         error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+
+  db
+    .command('apply-schema [path]')
+    .description('Apply db/schema.ts to the project database without publishing the app')
+    .option('--project <id>', 'Project ID (defaults to .somewhere.json)')
+    .option(
+      '--confirm-destructive',
+      'Confirm schema changes that remove declared tables or columns',
+    )
+    .option('--json', 'Print the raw apply result')
+    .action(async (
+      schemaPath: string | undefined,
+      opts: { project?: string; confirmDestructive?: boolean; json?: boolean },
+    ) => {
+      let projectId: string | undefined = opts.project;
+      if (!projectId) {
+        const config = loadProjectConfig();
+        if (!config) {
+          error('No project specified and no .somewhere.json found. Pass --project <id>.');
+          process.exit(1);
+        }
+        projectId = config.project_id;
+      }
+
+      const requestedPath = schemaPath ?? 'db/schema.ts';
+      const absolutePath = resolve(process.cwd(), requestedPath);
+      let schemaModule: string;
+      try {
+        schemaModule = readFileSync(absolutePath, 'utf8');
+      } catch {
+        error(`Could not read ${requestedPath}. Pass the path to your managed schema file.`);
+        process.exit(1);
+      }
+
+      const client = new ApiClient(getToken());
+      const spinner = opts.json ? null : ora('Applying database schema…').start();
+      try {
+        const result = await client.call<ApplySchemaResult>('POST', '/db/schema/apply', {
+          project_id: projectId,
+          schema_module: schemaModule,
+          target: 'production',
+          ...(opts.confirmDestructive ? { confirm_destructive: true } : {}),
+        });
+        spinner?.stop();
+        if (opts.json) {
+          printJson(result);
+          return;
+        }
+
+        if (result.applied === false || result.no_op === true) {
+          success('Database schema already matches — nothing changed.');
+        } else {
+          success('Database schema applied.');
+        }
+        for (const line of schemaReportLines(result)) info(dim(line));
+      } catch (err) {
+        spinner?.fail('Database schema was not applied');
+        if (err instanceof Error) {
+          error(err.message);
+          if (
+            err instanceof CliApiError
+            && /(?:DESTRUCTIVE.*CONFIRM|CONFIRM.*DESTRUCTIVE)/i.test(err.code)
+            && !opts.confirmDestructive
+          ) {
+            info('Review the proposed removals, then rerun with --confirm-destructive to approve them.');
+          }
+        } else {
+          error(String(err));
+        }
         process.exit(1);
       }
     });
