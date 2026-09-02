@@ -1,5 +1,64 @@
 # Changelog
 
+## 0.31.0
+
+### Added
+
+- `tsk_5cfcfe00` — **`somewhere preview` is a command.** There are two loops and
+  they are now named after where the app runs: `somewhere dev` runs your app on
+  your machine, `somewhere preview` runs it on the platform. Every save goes to
+  a private URL reachable only by you; production keeps serving what you last
+  promoted until you run `somewhere promote`. Reach for it when you want the
+  real hosted app in front of you, or when your agent cannot serve on
+  localhost. `dev --cloud` still starts it and prints one line naming the new
+  command.
+
+### Fixed
+
+- `tsk_33023348` — **`somewhere promote` never reports an outcome it does not
+  know.** It used to print "Promote failed / Unknown error" for a promote that
+  had already shipped, and the obvious retry then said "Production was not
+  changed" about production that the first command had changed. Promote is the
+  one irreversible step in the loop, so it now separates a refusal the platform
+  AUTHORED (reported as written) from a response the CLI could not READ. In the
+  second case it reads what production is serving before and after and answers
+  from whether that moved — and a refusal claiming production was unchanged is
+  checked against the same evidence before it is allowed to stand. When neither
+  side can be read it says the status is unknown and points at your production
+  URL rather than guessing.
+- `tsk_74375b3c` — **a promote ends the preview cleanly.** Promoting closed the
+  preview, but the loop kept watching, and your next save came back with a
+  refusal written for an API client — then failed the same way on every save
+  after that. The loop now recognises the end of a preview and stops on it, in
+  two lines: what happened, and the one command that starts the next preview.
+- `tsk_5cfcfe00` — the preview copy no longer claims your preview has
+  production's data. A preview runs against a separate copy of your schema with
+  none of your production rows, which is exactly what makes it safe to try
+  things in.
+- `tsk_d63b3b6a` — **an unresolvable import is reported, not a crash.**
+  `somewhere dev` died on any import that could not be resolved — a typo'd
+  package, one you had not installed yet — with an internal error naming the
+  CLI's own bundler and nothing about your code, and every rebuild after that
+  failed too. It only happened when the command's error output went to a file
+  rather than a terminal, which is the normal case under an agent, a CI job, or
+  a session recorder. Now an unresolved import reads like a syntax error:
+  file:line:column, the specifier, and one sentence naming the fix — add it to
+  your package.json and install it, or, for a module the platform provides,
+  that it comes from the platform and should not be installed at all. The
+  server survives, the last working page stays up, and a save that fixes it
+  serves again.
+- `tsk_14c5408c` — a burst of saves stays one preview update. Saves inside the
+  debounce window accumulate into a single update, and a save that lands while
+  one is in flight re-arms instead of starting a second, so two previews are
+  never building at once.
+
+### Changed
+
+- The vendored platform runtime and compiler are re-synced to the current
+  platform build. Content is unchanged from 0.30.2 apart from the provenance
+  stamp — the compiler files hash identically — so this release changes no
+  build behaviour.
+
 ## 0.30.2
 
 ### Fixed

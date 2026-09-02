@@ -1,4 +1,4 @@
-// VENDORED from worker/src/utils/browser-test.ts (DOM_OUTLINE_SCRIPT) @ 526d2b4d
+// VENDORED from worker/src/utils/browser-test.ts (DOM_OUTLINE_SCRIPT) @ d8fc42de
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 export const MAX_OUTLINE_NODES = 200;
