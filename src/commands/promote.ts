@@ -21,7 +21,11 @@ import {
   type ActivePointer,
 } from '../lib/promote-outcome.js';
 import { formatErrorReference } from '../lib/client.js';
-import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
+import {
+  countFromResponse,
+  formatPublishSurface,
+  type PublishSurfaceCounts,
+} from '../lib/surface-counts.js';
 import { promotedDataNotes } from '../lib/promote-handoff.js';
 
 /**
@@ -82,17 +86,35 @@ interface PromoteResult {
   version: number;
   files_promoted: number;
   /** Sent by newer platform versions; absent ones only carry has_functions. */
-  functions_promoted?: number;
+  functions_promoted?: unknown;
   has_functions: boolean;
   /** The platform's own sentence about what promotion did to the data, when it
    *  sends one. It wins over the CLI's wording so the line can be corrected
    *  without a CLI release. */
-  data_note?: string;
+  data_notice?: unknown;
+  /** Compatibility with the field understood by 0.31.3. */
+  data_note?: unknown;
   promoted_draft_id?: string;
   preview_session_id?: string;
   preview_id?: string;
   active_release_id?: string;
   release_id?: string;
+}
+
+export function promoteSurfaceFromResponse(
+  result: Pick<PromoteResult, 'files_promoted' | 'functions_promoted' | 'has_functions'>,
+): PublishSurfaceCounts {
+  return {
+    staticFiles: countFromResponse(result.files_promoted),
+    functions: countFromResponse(result.functions_promoted)
+      ?? (result.has_functions === true ? 'some' : 0),
+  };
+}
+
+export function promoteDataNotesFromResponse(
+  result: Pick<PromoteResult, 'data_notice' | 'data_note'>,
+): string[] {
+  return promotedDataNotes(result.data_notice ?? result.data_note);
 }
 
 export function registerPromote(program: Command) {
@@ -193,10 +215,7 @@ export function registerPromote(program: Command) {
         // deploy and preview printed for the same tree; fall back to the
         // response, where a missing function count becomes the word rather
         // than an invented number.
-        const surface = (await readProductionSurface(projectId)) ?? {
-          staticFiles: countFromResponse(r.files_promoted),
-          functions: countFromResponse(r.functions_promoted) ?? (r.has_functions ? 'some' as const : 0),
-        };
+        const surface = (await readProductionSurface(projectId)) ?? promoteSurfaceFromResponse(r);
         success(`Promoted v${r.version} (${formatPublishSurface(surface)})`);
         // Name the preview session this version was promoted from, when known.
         const fromDraft = draftId ?? r.promoted_draft_id;
@@ -204,7 +223,7 @@ export function registerPromote(program: Command) {
         // The app moved; the data did not. Said here, unprompted, because the
         // alternative is a developer discovering it by opening an empty
         // production page and repeating their whole acceptance pass.
-        for (const note of promotedDataNotes(r.data_note)) info(note);
+        for (const note of promoteDataNotesFromResponse(r)) info(note);
         // The promote response carries no URL — resolve the platform's canonical
         // fallback URL (best-effort; never fail a successful promote on it).
         try {

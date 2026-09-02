@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.31.4
+
+### Fixed
+
+- **Status now shows which tested preview reached production.** When production
+  came from a promotion, `somewhere status` names the exact candidate and shows
+  a short content hash, so you can match the live app to the preview you tested.
+- **Promotion now uses the platform's own data notice and exact function count.**
+  The notice about preview rows is printed exactly as the platform sends it,
+  and the release summary says how many functions reached production when that
+  count is available. Older platform responses keep working quietly.
+
 ## 0.31.3
 
 ### Added

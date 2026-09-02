@@ -18,8 +18,9 @@
  *      and never via the anonymous path.
  *   2. It asserts the deploy OUTCOME — exit status, the release the payload says
  *      went live, and what the live URL actually serves.
- *   3. It PURGES the throwaway and confirms it is gone, in a finally block, so
- *      a mid-test failure cannot leave production junk behind.
+ *   3. It requests immediate permanent erasure with `purge=1` and confirms the
+ *      serving host returns 404, in a finally block, so a mid-test failure
+ *      cannot leave production junk behind.
  *
  * With no credential it skips with a named reason instead of falling back to
  * anonymous deploy — which is what made the old failure mode possible. CI has
@@ -107,27 +108,38 @@ async function api(method, path, body) {
  * a code and changes nothing. Both steps run here, then the project is read
  * back to prove it is actually gone rather than merely requested.
  */
-async function purge(projectId) {
-  const first = await api('DELETE', `/projects/${encodeURIComponent(projectId)}`, {});
+async function purge(projectId, subdomain) {
+  const path = `/projects/${encodeURIComponent(projectId)}?purge=1`;
+  const first = await api('DELETE', path, {});
   const code = first.payload?.data?.code ?? first.payload?.code;
   assert.ok(code, `expected a delete confirmation code, got ${first.status}: ${JSON.stringify(first.payload)}`);
-  const second = await api('DELETE', `/projects/${encodeURIComponent(projectId)}`, { code });
+  const second = await api('DELETE', path, { code });
   assert.ok(
     second.status >= 200 && second.status < 300,
     `delete confirm failed ${second.status}: ${JSON.stringify(second.payload)}`,
   );
-  // Gone means gone — but the platform stopped answering 404 for a deleted
-  // project and now returns its tombstone instead: offline, unreachable, data
-  // retained for a recovery window, and a note saying so. Both answers are a
-  // real deletion; a live project answering 200 with no `deleted` flag is not,
-  // and still fails here.
+  assert.equal(
+    second.payload?.data?.purged ?? second.payload?.purged,
+    true,
+    `delete confirm did not accept purge=1: ${JSON.stringify(second.payload)}`,
+  );
   const readBack = await api('GET', `/projects/${encodeURIComponent(projectId)}`);
-  const tombstoned = readBack.status === 200
+  const queuedForPurge = readBack.status === 200
     && (readBack.payload?.deleted === true || readBack.payload?.data?.deleted === true);
   assert.ok(
-    readBack.status === 404 || tombstoned,
-    `throwaway ${projectId} still resolves after delete (HTTP ${readBack.status}): ${JSON.stringify(readBack.payload)}`,
+    readBack.status === 404 || queuedForPurge,
+    `purged throwaway ${projectId} is still live (HTTP ${readBack.status}): ${JSON.stringify(readBack.payload)}`,
   );
+
+  const liveUrl = `https://${subdomain}.somewhere.site`;
+  let hostStatus = 0;
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const response = await fetch(liveUrl, { headers: { 'Cache-Control': 'no-cache' } });
+    hostStatus = response.status;
+    if (hostStatus === 404) break;
+    await new Promise((resolvePromise) => setTimeout(resolvePromise, 1000));
+  }
+  assert.equal(hostStatus, 404, `${liveUrl} still served after purge (HTTP ${hostStatus})`);
 }
 
 test(
@@ -199,7 +211,7 @@ test(
       );
 
     } finally {
-      await purge(projectId);
+      await purge(projectId, subdomain);
     }
   },
 );

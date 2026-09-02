@@ -76,7 +76,7 @@ export function promoteCommandLines(args: {
  */
 export function promotedDataNotes(platformNote?: unknown): string[] {
   if (typeof platformNote === 'string' && platformNote.trim()) {
-    return [platformNote.trim()];
+    return [platformNote];
   }
   return [
     'Only the app was promoted. Rows you created while previewing stayed in the preview database — production is serving the data it already had.',

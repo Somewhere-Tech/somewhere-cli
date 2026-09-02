@@ -7,6 +7,7 @@ import {
   promoteCommands,
   promotedDataNotes,
 } from '../dist/lib/promote-handoff.js';
+import { promoteDataNotesFromResponse } from '../dist/commands/promote.js';
 
 const SESSION = 'draft_11111111-1111-4111-8111-111111111111';
 const PREVIEW = 'rel_candidate_1';
@@ -69,6 +70,8 @@ test('a landed promote states that the preview rows stayed behind', () => {
 });
 
 test('the platform s own wording wins when it sends one, so the line can be fixed without a release', () => {
+  const verbatim = '  Promoting publishes files, not preview rows.  ';
+  assert.deepEqual(promotedDataNotes(verbatim), [verbatim]);
   assert.deepEqual(
     promotedDataNotes('Preview rows are not promoted; production data is untouched.'),
     ['Preview rows are not promoted; production data is untouched.'],
@@ -77,4 +80,26 @@ test('the platform s own wording wins when it sends one, so the line can be fixe
   assert.ok(promotedDataNotes('   ').length >= 1);
   assert.ok(promotedDataNotes(null).length >= 1);
   assert.ok(promotedDataNotes(42).length >= 1);
+});
+
+test('promote response note fixtures prefer the platform field and ignore malformed values', () => {
+  const fallback = promotedDataNotes(undefined);
+  const fixtures = [
+    {
+      name: 'new platform field',
+      response: { data_notice: '  Platform notice, exactly as sent.  ' },
+      expected: ['  Platform notice, exactly as sent.  '],
+    },
+    {
+      name: '0.31.3 compatibility field',
+      response: { data_note: 'Legacy field remains readable.' },
+      expected: ['Legacy field remains readable.'],
+    },
+    { name: 'older response', response: {}, expected: fallback },
+    { name: 'malformed response', response: { data_notice: { text: 'do not print me' } }, expected: fallback },
+  ];
+
+  for (const fixture of fixtures) {
+    assert.deepEqual(promoteDataNotesFromResponse(fixture.response), fixture.expected, fixture.name);
+  }
 });

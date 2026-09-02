@@ -15,6 +15,29 @@ export interface PreviewCandidateStatus {
   expires_at?: string;
 }
 
+export interface DeploymentProvenance {
+  promotedFromCandidate: string | null;
+  shortContentHash: string | null;
+}
+
+/** Additive deploy-status fields are untrusted at this boundary: older
+ * platforms omit them and malformed values must never break `status`. */
+export function deploymentProvenanceFromStatus(
+  deployment: Record<string, unknown>,
+): DeploymentProvenance {
+  const candidate = typeof deployment.promoted_from_candidate_id === 'string'
+    && deployment.promoted_from_candidate_id.trim()
+    ? deployment.promoted_from_candidate_id.trim()
+    : null;
+  const hash = typeof deployment.production_content_hash === 'string'
+    ? /^sha256:([a-f0-9]{12,})$/i.exec(deployment.production_content_hash.trim())
+    : null;
+  return {
+    promotedFromCandidate: candidate,
+    shortContentHash: hash ? `sha256:${hash[1].slice(0, 12)}` : null,
+  };
+}
+
 export function previewCandidatesFromDeployment(
   deployment: Record<string, unknown>,
 ): PreviewCandidateStatus[] {
@@ -180,6 +203,13 @@ export function registerStatus(program: Command) {
           if (prodVersion !== null) info(`Production version: ${teal(String(prodVersion))}`);
           if (typeof deployment.active_release_id === 'string') {
             info(`Active release: ${dim(deployment.active_release_id)}`);
+          }
+          const provenance = deploymentProvenanceFromStatus(deployment);
+          if (provenance.promotedFromCandidate) {
+            info(`Promoted from candidate ${teal(provenance.promotedFromCandidate)}`);
+          }
+          if (provenance.shortContentHash) {
+            info(`Content hash: ${dim(provenance.shortContentHash)}`);
           }
           if (deployment.dev_ahead === true) {
             info(`Preview: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);

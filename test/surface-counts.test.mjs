@@ -7,6 +7,7 @@ import {
   formatPublishSurface,
 } from '../dist/lib/surface-counts.js';
 import { formatDeploySuccess } from '../dist/commands/deploy.js';
+import { promoteSurfaceFromResponse } from '../dist/commands/promote.js';
 
 // Parity finding #12 — one project, one number. `somewhere deploy`,
 // `somewhere preview` and `somewhere promote` used to describe the same tree
@@ -112,6 +113,34 @@ test('promote still names the functions when the platform only sends a boolean',
     }),
     '3 static files',
   );
+});
+
+test('promote response fixtures use an exact function count and safely fall back', () => {
+  const fixtures = [
+    {
+      name: 'new response',
+      response: { files_promoted: 3, functions_promoted: 2, has_functions: true },
+      expected: '3 static files + 2 functions',
+    },
+    {
+      name: 'older response',
+      response: { files_promoted: 3, has_functions: true },
+      expected: '3 static files + functions',
+    },
+    {
+      name: 'malformed count',
+      response: { files_promoted: 3, functions_promoted: { count: 2 }, has_functions: true },
+      expected: '3 static files + functions',
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    assert.equal(
+      formatPublishSurface(promoteSurfaceFromResponse(fixture.response)),
+      fixture.expected,
+      fixture.name,
+    );
+  }
 });
 
 test('deploy still reports honestly when it has no local tree to count', () => {

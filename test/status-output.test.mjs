@@ -7,6 +7,8 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
+import { deploymentProvenanceFromStatus } from '../dist/commands/status.js';
+
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
 
@@ -35,6 +37,47 @@ function sendJson(res, payload, status = 200) {
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(payload));
 }
+
+test('deploy-status provenance fixtures accept new fields and ignore old or malformed responses', () => {
+  const fixtures = [
+    {
+      name: 'new platform fields',
+      response: {
+        promoted_from_candidate_id: 'rel_candidate_tested',
+        production_content_hash: 'sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef',
+      },
+      expected: {
+        promotedFromCandidate: 'rel_candidate_tested',
+        shortContentHash: 'sha256:0123456789ab',
+      },
+    },
+    {
+      name: 'older platform omits both fields',
+      response: {},
+      expected: { promotedFromCandidate: null, shortContentHash: null },
+    },
+    {
+      name: 'malformed additive fields',
+      response: {
+        promoted_from_candidate_id: { id: 'rel_not_a_string' },
+        production_content_hash: ['sha256:not-a-string'],
+      },
+      expected: { promotedFromCandidate: null, shortContentHash: null },
+    },
+    {
+      name: 'malformed hash string',
+      response: {
+        promoted_from_candidate_id: '   ',
+        production_content_hash: 'not-a-content-hash',
+      },
+      expected: { promotedFromCandidate: null, shortContentHash: null },
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    assert.deepEqual(deploymentProvenanceFromStatus(fixture.response), fixture.expected, fixture.name);
+  }
+});
 
 test('status prints the canonical serving host returned as prod_fallback', async () => {
   const home = mkdtempSync(join(tmpdir(), 'sw-status-output-home-'));
@@ -101,6 +144,8 @@ test('status prints the canonical serving host returned as prod_fallback', async
                   data: {
                     prod_version: 7,
                     in_sync: true,
+                    promoted_from_candidate_id: 'rel-tested-candidate',
+                    production_content_hash: 'sha256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789',
                     preview_candidates: [{
                       draft_id: 'draft-current',
                       candidate_release_id: 'rel-current',
@@ -136,6 +181,8 @@ test('status prints the canonical serving host returned as prod_fallback', async
     assert.match(result.stdout, /Candidate release: rel-current/);
     assert.match(result.stdout, /Preview host: https:\/\/canonical-serving-dev\.somewhere\.site/);
     assert.match(result.stdout, /Promote: somewhere promote draft-current rel-current/);
+    assert.match(result.stdout, /Promoted from candidate rel-tested-candidate/);
+    assert.match(result.stdout, /Content hash: sha256:abcdef012345/);
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
@@ -224,6 +271,7 @@ test('status falls back to the project .site host when URL lookup fails', async 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     assert.match(result.stdout, /URL: https:\/\/fallback-slug\.somewhere\.site/);
     assert.doesNotMatch(result.stdout, /fallback-slug\.somewhere\.tech/);
+    assert.doesNotMatch(result.stdout, /Promoted from candidate|Content hash:/);
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
