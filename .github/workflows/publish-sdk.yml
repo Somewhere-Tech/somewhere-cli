@@ -1,0 +1,76 @@
+# ONE-OFF cross-repo publish of @somewhere-tech/sdk.
+#
+# Why this lives in the CLI repo and not in the SDK repo:
+#   The npm automation token for the @somewhere-tech org exists as a REPO-level
+#   secret (NPM_TOKEN) on Somewhere-Tech/somewhere-cli only. It is not an org
+#   secret and cannot be read back or copied out of GitHub. The SDK repo
+#   (Somewhere-Tech/somewhere-sdk-js) has its own publish.yml but NO secrets, so
+#   it cannot publish yet. This workflow borrows this repo's token to unblock the
+#   pre-launch 0.7.4 release.
+#
+# NO --provenance, deliberately:
+#   Provenance is an OIDC-signed attestation binding the tarball to the repo and
+#   commit of the workflow that published it. Published from here, it would
+#   attest Somewhere-Tech/somewhere-cli — the WRONG repo — permanently, on the
+#   public transparency log. An unattested publish is the honest option; a
+#   confidently wrong attestation is not. Provenance comes back when the SDK repo
+#   gets its own NPM_TOKEN and publishes from its own publish.yml.
+#
+# This workflow is intentionally NOT merged to master. It does not touch the
+# CLI's own release path or version guard.
+name: Publish SDK (cross-repo, one-off)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Tag/SHA in Somewhere-Tech/somewhere-sdk-js to publish'
+        required: true
+        default: 'v0.7.4'
+      dry_run:
+        description: 'Dry run (no publish)'
+        required: true
+        type: choice
+        default: 'true'
+        options: ['true', 'false']
+
+permissions:
+  contents: read
+
+jobs:
+  publish-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout the SDK repo (public; default token suffices)
+        uses: actions/checkout@v4
+        with:
+          repository: Somewhere-Tech/somewhere-sdk-js
+          ref: ${{ inputs.ref }}
+          fetch-depth: 0
+
+      - name: Show what we are about to publish
+        run: |
+          git log --oneline -1
+          echo "resolved sha: $(git rev-parse HEAD)"
+          node -e "const p=require('./package.json');console.log(p.name, p.version)"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+
+      - name: npm publish --dry-run
+        if: ${{ inputs.dry_run == 'true' }}
+        run: npm publish --dry-run --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: npm publish
+        if: ${{ inputs.dry_run == 'false' }}
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
