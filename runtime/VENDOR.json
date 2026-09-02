@@ -1,0 +1,7 @@
+{
+  "commit": "80366508",
+  "files": {
+    "sw-init.mjs": "e01751df76bf45d0f8d6a539de017bbadfc378dc565ef352247c324248c8fc37",
+    "platform-context.mjs": "bdad0a47aedcff5d77a963aae5a25dc0062899cf5d49e5123936d7ebd4c7c6de"
+  }
+}

@@ -1,5 +1,5 @@
 {
-  "commit": "ea29ab73",
+  "commit": "80366508",
   "esbuild": "0.24.0",
   "toolchain": {
     "base": {
@@ -13,6 +13,10 @@
     "tw4": {
       "tailwindcss": "^4.0.0",
       "@tailwindcss/postcss": "^4.0.0"
+    },
+    "react19": {
+      "react": "19.2.7",
+      "react-dom": "19.2.7"
     }
   },
   "files": {

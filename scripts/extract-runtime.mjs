@@ -129,6 +129,28 @@ if (!platformContext.includes("'X-Sw-Env-Slot': projectEnv")) {
   );
 }
 
+// Second drift guard (tsk_6963e471): the local loop binds sw.db / sw.fs to an
+// exact DRAFT, and the only mechanism for that is the runtime reading
+// X-Sw-Draft-Id / X-Sw-Draft-Candidate off the inbound request and re-stamping
+// them (with slot 'draft') on every platform call. If a worker change ever
+// drops that, local dev would silently fall back to the retired legacy dev slot
+// and 409 on every release-pinned project — so break the vendor step instead of
+// shipping a runtime that cannot carry a draft identity.
+for (const marker of [
+  "request.headers.get('X-Sw-Draft-Id')",
+  "'X-Sw-Draft-Id': draftId",
+  "'X-Sw-Draft-Candidate': draftCandidateReleaseId",
+]) {
+  if (!platformContext.includes(marker)) {
+    throw new Error(
+      `assembled PLATFORM_CONTEXT_JS is missing the draft-identity marker \`${marker}\`. ` +
+        'The local loop could not bind a draft, so its sw.db / sw.fs would refuse on ' +
+        'every release-pinned project. Re-vendor against a monorepo that includes the exact-draft ' +
+        'execution work (worker/src/runtime/context-head.ts).',
+    );
+  }
+}
+
 let commit = 'unknown';
 try {
   commit = execSync('git rev-parse --short HEAD', { cwd: monorepo, encoding: 'utf8' }).trim();
@@ -145,16 +167,34 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const outDir = join(__dirname, '..', 'runtime');
 mkdirSync(outDir, { recursive: true });
 
-writeFileSync(
-  join(outDir, 'sw-init.mjs'),
-  header('SW_INIT_JS', 'worker/src/utils/function-bundle.ts') + swInit + '\n',
-);
-writeFileSync(
-  join(outDir, 'platform-context.mjs'),
+/* The RUNTIME manifest, and why it exists.
+ *
+ * The compiler blobs have been hash-guarded since they were first vendored; the
+ * runtime blobs were not, and they drifted ~7,200 lines behind the monorepo
+ * without a single red build (tsk_0100d8e5). Same blobs, same risk, same guard:
+ * record each file's sha256 and the monorepo commit, and let
+ * test/runtime-vendor.test.mjs assert the shipped copy still hashes to it.
+ *
+ * What this guard does and does NOT catch, stated plainly so nobody trusts it
+ * for more than it is worth: it catches a HAND-EDIT to a vendored file, and it
+ * records which monorepo commit to re-vendor from. It cannot detect that the
+ * monorepo has moved on, because CI has no monorepo checkout to compare
+ * against. Re-vendoring stays a deliberate act; this only makes an undeclared
+ * edit a failing build instead of a silent divergence. */
+const runtimeManifest = { commit, files: {} };
+const writeVendored = (name, contents) => {
+  writeFileSync(join(outDir, name), contents);
+  runtimeManifest.files[name] = createHash('sha256').update(readFileSync(join(outDir, name))).digest('hex');
+};
+
+writeVendored('sw-init.mjs', header('SW_INIT_JS', 'worker/src/utils/function-bundle.ts') + swInit + '\n');
+writeVendored(
+  'platform-context.mjs',
   header('PLATFORM_CONTEXT_JS', 'worker/src/runtime/context.ts') +
     platformContext +
     '\n\nexport { buildPlatformContext };\n',
 );
+writeFileSync(join(outDir, 'VENDOR.json'), JSON.stringify(runtimeManifest, null, 2) + '\n');
 
 console.log(`Vendored runtime @ ${commit} → runtime/sw-init.mjs, runtime/platform-context.mjs`);
 
@@ -225,6 +265,25 @@ if (cliEsbuild !== containerEsbuild) {
  * aliases differently, which is exactly the local-vs-deploy divergence the
  * local loop exists to remove. Recorded here rather than hard-coded in the CLI
  * so a container bump reaches the local loop through re-vendoring. */
+/** The exact react/react-dom the image's `npm ci` installs, from its lockfile. */
+function readReact19Pins() {
+  const lockPath = join(compilerSrcDir, 'react19', 'package-lock.json');
+  const packages = JSON.parse(readFileSync(lockPath, 'utf8')).packages ?? {};
+  const pins = {};
+  for (const name of ['react', 'react-dom']) {
+    const version = packages[`node_modules/${name}`]?.version;
+    if (!version) {
+      throw new Error(
+        `the compile image's react19 lockfile no longer pins ${name} (${lockPath}). The local dev ` +
+          'loop would compile against a different React than the image bakes. Re-vendor against a ' +
+          'monorepo whose compile container still keeps an isolated React 19 set.',
+      );
+    }
+    pins[name] = version;
+  }
+  return pins;
+}
+
 const containerDeps = JSON.parse(readFileSync(join(compilerSrcDir, 'package.json'), 'utf8')).dependencies ?? {};
 const tw4Deps = JSON.parse(readFileSync(join(compilerSrcDir, 'tw4', 'package.json'), 'utf8')).dependencies ?? {};
 const toolchain = {
@@ -235,6 +294,18 @@ const toolchain = {
   },
   tw3: { tailwindcss: containerDeps.tailwindcss },
   tw4: { tailwindcss: tw4Deps.tailwindcss, '@tailwindcss/postcss': tw4Deps['@tailwindcss/postcss'] },
+  /* The image's isolated React 19 set (tsk_0312cf17). The container keeps React
+   * 19 in its own tree because it collides by name with the baked React 18, and
+   * hands it to the compiler as `react19NodeModules`; the compiler prefers it
+   * over installing whatever the app's range resolves to today. Without these
+   * pins the local loop floor-pins the declared range instead (`^19.2.0` ->
+   * 19.2.0) while the image serves 19.2.7 — the same tree compiled against two
+   * different Reacts.
+   *
+   * Read from the LOCKFILE, not react19/package.json: the image installs with
+   * `npm ci`, so the lock is what it actually gets. package.json only says
+   * ^19.0.0 and would re-introduce the very drift this pin removes. */
+  react19: readReact19Pins(),
 };
 for (const [group, pins] of Object.entries(toolchain)) {
   for (const [name, range] of Object.entries(pins)) {
