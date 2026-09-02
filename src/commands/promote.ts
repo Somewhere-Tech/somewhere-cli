@@ -11,6 +11,39 @@ import {
 } from '../lib/config.js';
 import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
+import { callPlatformTool } from '../lib/platform-tools.js';
+import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
+import {
+  describeUnreadablePromote,
+  isUnreadablePromoteResponse,
+  promoteVerdictFromPointer,
+  refusalContradictsProduction,
+  type ActivePointer,
+} from '../lib/promote-outcome.js';
+import { formatErrorReference } from '../lib/client.js';
+
+/**
+ * Read what production is serving right now.
+ *
+ * Tri-state on purpose: a read that FAILED must not look like a project with
+ * nothing live, or the caller would treat an absence of evidence as evidence
+ * (tsk_33023348).
+ */
+async function readActivePointer(projectId: string): Promise<ActivePointer> {
+  try {
+    const status = unwrapPlatformData(
+      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+    );
+    if (!isRecord(status)) return { known: false };
+    return {
+      known: true,
+      releaseId: typeof status.active_release_id === 'string' ? status.active_release_id : null,
+      version: typeof status.prod_version === 'number' ? status.prod_version : null,
+    };
+  } catch {
+    return { known: false };
+  }
+}
 
 interface PromoteResult {
   version: number;
@@ -89,6 +122,13 @@ export function registerPromote(program: Command) {
         }
       }
 
+      // Read the production pointer BEFORE sending. This is the only baseline
+      // that can later answer "did the promote land?" when the response itself
+      // is unreadable — the candidate id can never answer it, because promote
+      // rebuilds the candidate through the ordinary release path and produces a
+      // third id distinct from both (tsk_33023348).
+      const pointerBefore = await readActivePointer(projectId);
+
       const spinner = opts.json ? null : ora('Promoting...').start();
       try {
         const r = await client.call<PromoteResult>('POST', '/promote', {
@@ -124,16 +164,103 @@ export function registerPromote(program: Command) {
         }
         if (opts.message) info(dim(`Notes: ${opts.message}`));
       } catch (err) {
+        const reference = err instanceof CliApiError ? formatErrorReference(err.meta) : null;
+
+        // CASE 1 — the platform never gave us a readable verdict. The flip may
+        // have landed before the connection died, so the CLI has no business
+        // calling this a failure until it has looked at production.
+        if (isUnreadablePromoteResponse(err)) {
+          if (spinner) spinner.text = 'Promote response was unreadable — checking production...';
+          const pointerAfter = await readActivePointer(projectId);
+          const verdict = promoteVerdictFromPointer({ before: pointerBefore, after: pointerAfter });
+          const described = describeUnreadablePromote(verdict);
+          if (
+            verdict.kind === 'applied'
+            && deployStateEntry
+            && pointerAfter.known
+            && pointerAfter.version !== null
+          ) {
+            // Production moved; keep the local record honest even though the
+            // response that would normally carry the version never arrived.
+            saveProjectDeployState(
+              deployStateEntry.dir,
+              deployStateEntry.config.project_id,
+              pointerAfter.version,
+              verdict.activeReleaseId,
+            );
+          }
+          if (opts.json) {
+            if (described.succeeded) {
+              printJson({
+                status: 'success',
+                verified_by: 'production_pointer',
+                active_release_id: verdict.kind === 'applied' ? verdict.activeReleaseId : undefined,
+                message: `${described.headline} ${described.detail}`,
+                request_reference: reference ?? undefined,
+              });
+              return;
+            }
+            printJsonError(
+              verdict.kind === 'unknown' ? 'PROMOTE_STATUS_UNKNOWN' : 'PROMOTE_NOT_APPLIED',
+              `${described.headline} ${described.detail}`,
+              );
+            process.exit(1);
+          }
+          if (described.succeeded) {
+            spinner?.stop();
+            success(described.headline);
+            info(described.detail);
+            if (reference) info(dim(`Reference: ${reference}`));
+            try {
+              const servingUrl = await getProjectServingUrl(client, projectId);
+              if (servingUrl) info(`Production at ${teal(servingUrl)}`);
+            } catch {
+              // ignore — production is already confirmed by the pointer
+            }
+            return;
+          }
+          spinner?.fail(described.headline);
+          error(described.detail);
+          if (reference) info(dim(`Reference: ${reference}`));
+          process.exit(1);
+        }
+
+        // CASE 2 — the platform read the request and refused it. Report the
+        // refusal as written, with one exception: a refusal may assert that
+        // production was not changed, and it cannot know that a previous
+        // attempt did not already change it. Check the pointer before letting
+        // that claim stand.
         spinner?.fail('Promote failed');
+        const message = err instanceof Error ? err.message : String(err);
+        const assertsUnchanged = /production was not (changed|touched)/i.test(message);
+        const pointerAfter = assertsUnchanged ? await readActivePointer(projectId) : { known: false } as ActivePointer;
+        const contradicted = refusalContradictsProduction({
+          message,
+          expectedUnchanged: pointerBefore.known ? pointerBefore.releaseId : null,
+          after: pointerAfter,
+        });
         if (opts.json) {
           if (err instanceof CliApiError) {
-            printJsonError(err.code, err.message);
+            printJsonError(err.code, message);
           } else {
-            printJsonError('ERROR', err instanceof Error ? err.message : String(err));
+            printJsonError('ERROR', message);
           }
           process.exit(1);
         }
-        error(err instanceof Error ? err.message : String(err));
+        error(message);
+        if (contradicted) {
+          warn(
+            'Production HAS changed since this promote was first attempted — an earlier attempt landed. ' +
+              'Check your production URL before promoting again.',
+          );
+        } else if (assertsUnchanged && !pointerAfter.known) {
+          info(
+            dim(
+              'Production could not be read back to confirm that, so open your production URL to see which version is live.',
+            ),
+          );
+        }
+        if (reference) info(dim(`Reference: ${reference}`));
         process.exit(1);
       }
     });
