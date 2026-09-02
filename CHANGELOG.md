@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.31.1
+
+### Fixed
+
+- `tsk_5504e045` — **`somewhere preview` can no longer publish to production on
+  its own.** A preview builds on your app's live version, so a project that has
+  never been published needs one published first — and that publish is a real
+  production release, the one thing this command can do to your live site. It
+  was happening in two ways it should not have. On a project that was already
+  live, if the CLI could not read which version was live it treated the silence
+  as "this project has never been published" and went ahead and published your
+  working directory over the running app. And on a project that genuinely had
+  never been published, it published without asking at all.
+
+  Now: a version the CLI cannot read is unknown, and unknown never publishes —
+  the command stops, says what it could not read, and leaves your live site
+  exactly as it was. A publish happens only when the platform positively
+  confirms nothing is live AND you say so, either by answering the prompt or by
+  running `somewhere preview --publish-first`. A run that cannot be asked — a
+  script, an agent, a piped shell — is refused and told about the flag. Preview
+  on a project that is already live never publishes anything, as before.
+- `tsk_5504e045` — **the plan refusal stopped claiming your project is
+  unpublished.** On a Free or Builder account, `somewhere preview` on a live
+  project refused with "Nothing was created — this project has not been
+  published", which was simply untrue and sent people to re-deploy an app that
+  was already running. The refusal now says only what it did: nothing was
+  created or changed, and whatever is live stays live.
+
+### Changed
+
+- The dev compiler and function runtime are re-vendored from the platform at
+  `3237dc1e`, picking up the faster dependency install — a project with a
+  lockfile now installs the way the platform installs it, without development
+  dependencies. `somewhere dev` compiles your app with the platform's own
+  compiler, so this keeps what you see on localhost identical to what deploy
+  produces.
+
 ## 0.31.0
 
 ### Added

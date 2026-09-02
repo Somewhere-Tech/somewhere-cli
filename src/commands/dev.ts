@@ -6,6 +6,7 @@ import { join, relative } from 'node:path';
 import { reportTypecheck } from './typecheck.js';
 import { runTypecheck } from '../lib/typecheck.js';
 import chokidar from 'chokidar';
+import prompts from 'prompts';
 import open from '../lib/open.js';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
@@ -151,7 +152,11 @@ export function registerPreview(program: Command) {
         + 'Available on the Pro and Scale plans; `somewhere dev` runs the app on your machine on every plan.',
     )
     .option('--project <id>', 'Override project ID')
-    .action(async (opts: { project?: string }) => {
+    .option(
+      '--publish-first',
+      'For a project that has never been published: publish this directory to production first, so the preview has a live version to build on. Without it you are asked, and a script that cannot be asked is refused.',
+    )
+    .action(async (opts: { project?: string; publishFirst?: boolean }) => {
       await runHotDeploy(opts);
     });
 }
@@ -172,6 +177,7 @@ export function registerDev(program: Command) {
     )
     .option('--project <id>', 'Override project ID')
     .option('--cloud', 'Alias for `somewhere preview`')
+    .option('--publish-first', 'Only with `--cloud`: see `somewhere preview --help`')
     .option('--port <port>', 'Port to serve on (default 8787)')
     .option('--open', 'Open the app in your browser once it is serving')
     .option(
@@ -182,7 +188,15 @@ export function registerDev(program: Command) {
     .action(
       async (
         cmdParts: string[] | undefined,
-        opts: { project?: string; cloud?: boolean; local?: boolean; port?: string; check?: boolean; open?: boolean },
+        opts: {
+          project?: string;
+          cloud?: boolean;
+          publishFirst?: boolean;
+          local?: boolean;
+          port?: string;
+          check?: boolean;
+          open?: boolean;
+        },
       ) => {
         // A passed command keeps the legacy local-exec behavior: run YOUR
         // server with platform context injected.
@@ -503,9 +517,15 @@ export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
  *
  * Returns `true`/`false` when the platform states it, and `null` when it does
  * not — a read that fails, or a platform that stopped reporting the field.
- * `null` must NEVER refuse: an unknown answer is not a denial, and blocking
- * someone whose account works today would be a worse bug than the one this
- * check exists to fix. Only an explicit `false` stops the command.
+ * `null` must NEVER refuse: an unknown answer is not a denial, and telling
+ * someone whose account works today to upgrade would be a worse bug than the
+ * one this check exists to fix. Only an explicit `false` stops the command.
+ *
+ * That is safe HERE, and only here, because of where the answer is used: an
+ * unknown entitlement is read on the path that already requires explicit
+ * consent to publish (see resolveBaseRelease), so it can no longer wave through
+ * a production release nobody asked for. It is the RELEASE read, not this one,
+ * that must refuse when it cannot answer.
  *
  * On a never-published project the platform answers this with the plain plan
  * entitlement (there is no release to bind a preview to yet), which is exactly
@@ -537,58 +557,180 @@ export class CloudDevUnavailableError extends Error {
   }
 }
 
-/** The project's current live release, or null when it has never published. */
-export async function readActiveReleaseId(projectId: string): Promise<string | null> {
+/**
+ * What the platform says about this project's live version.
+ *
+ * `known: false` is the entire point of this type. The previous shape was
+ * `string | null`, and `null` carried two opposite meanings at once: "there is
+ * positively nothing live" and "I could not find out". The caller acts on that
+ * answer by PUBLISHING THE WORKING DIRECTORY TO PRODUCTION, so collapsing the
+ * two costs a customer a production release on a project that was already live
+ * — which is exactly what happened, because a Free account's own production
+ * deploy status answers 403 today (tsk_f4236589) and the 403 became `null`.
+ *
+ * A read that cannot answer is `unknown`, and unknown never publishes.
+ */
+export type BaseReleaseState =
+  | { known: true; activeReleaseId: string | null }
+  | { known: false; reason: string };
+
+/**
+ * Read the project's live version, distinguishing "nothing is live" from
+ * "could not tell". Every failure mode — a refusal, a server error, a dropped
+ * connection, a 200 whose shape this CLI does not recognise — is `unknown`.
+ *
+ * `call` is injected so a fixture can drive each of those answers.
+ */
+export async function readBaseReleaseState(
+  projectId: string,
+  call: typeof callPlatformTool = callPlatformTool,
+): Promise<BaseReleaseState> {
+  let status: unknown;
   try {
-    const status = unwrapPlatformData(
-      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+    status = unwrapPlatformData(
+      await call('deploy_status', { project_id: projectId }, { allTools: true }),
     );
-    if (isRecord(status) && typeof status.active_release_id === 'string') {
-      return status.active_release_id;
-    }
-  } catch {
-    // Non-fatal: the caller treats "unknown" as "no base" and the deploy validates.
+  } catch (err) {
+    return { known: false, reason: err instanceof Error ? err.message : String(err) };
   }
-  return null;
+  if (!isRecord(status)) {
+    return { known: false, reason: 'the platform did not describe this project.' };
+  }
+  if (typeof status.active_release_id === 'string') {
+    return { known: true, activeReleaseId: status.active_release_id };
+  }
+  // The ONLY answer that may lead to a publish: the platform states this
+  // project is not published. Note the deliberate asymmetry — a project that IS
+  // published but does not name a version behind it falls through to unknown
+  // below rather than being treated as never-published, because the cost of
+  // being wrong in that direction is publishing over a live app.
+  if (status.published === false) return { known: true, activeReleaseId: null };
+  return {
+    known: false,
+    reason: 'the platform did not say which version of this project is live.',
+  };
+}
+
+/** The live version could not be read, so nothing may be published over it. */
+export class BaseReleaseUnknownError extends Error {
+  readonly code = 'BASE_RELEASE_UNKNOWN';
+
+  constructor(readonly reason: string) {
+    super(
+      'Could not tell whether this project already has a live version, so nothing was published. '
+      + `The platform said: ${reason}`,
+    );
+    this.name = 'BaseReleaseUnknownError';
+  }
 }
 
 /**
- * Guarantee there is a live version for a private preview to build on,
- * publishing once if there is none.
+ * Publishing this directory to production was never agreed to.
  *
- * THE ORDER IS THE CONTRACT (tsk_cf48f4ab). A private preview builds a
- * candidate against the project's live version, so a never-published project
- * has nothing to build on and the platform refuses. Publishing once here — out
- * loud, never silently — is what makes `somewhere preview` work on a brand
- * new project. But private previews are also a plan feature, and the platform
- * enforces that on the preview request, which is the step AFTER this publish.
- * So the entitlement is read FIRST: an account without private previews is
- * refused having created nothing, instead of being handed a live production
- * version it never asked for and then told the command is unavailable.
- *
- * `publish` is injected so a fixture can prove it was never called on the
- * refusal path — the ordering is the behaviour under test, not the call shape.
+ * `declined` — asked, and the answer was no.
+ * `not-asked` — nothing here could ask (a script, an agent, a piped shell), so
+ * the answer is no by default. Consent that cannot be given is not consent.
  */
-export async function ensureBaseRelease(args: {
+export class PublishConsentRequiredError extends Error {
+  readonly code = 'PUBLISH_CONSENT_REQUIRED';
+
+  constructor(readonly why: 'declined' | 'not-asked') {
+    super('Nothing was published.');
+    this.name = 'PublishConsentRequiredError';
+  }
+}
+
+export type PublishConsent = 'granted' | 'declined' | 'not-asked';
+
+/**
+ * Find the live version a private preview will build on — and, on a project
+ * that has none, publish one ONLY after the person running the command says so.
+ *
+ * THE ORDER IS THE CONTRACT (tsk_cf48f4ab, tsk_5504e045). Every step below is
+ * placed so that the customer's live site cannot change as a side effect of
+ * asking for a preview:
+ *
+ *   1. The plan entitlement is read FIRST, before any write and before any
+ *      question. An account without private previews is refused having created
+ *      nothing, rather than handed a production release and then told the
+ *      command is unavailable.
+ *   2. The live version is read, and an unreadable answer STOPS the command.
+ *      This is the reversal: `null` used to mean both "nothing is live" and
+ *      "I could not tell", and the second one published over live projects.
+ *   3. A project that already has a live version returns it and publishes
+ *      NOTHING. This is the overwhelmingly common path.
+ *   4. Only a positively-confirmed "never published" reaches the publish, and
+ *      only after explicit consent — a confirmation, or `--publish-first`.
+ *
+ * Why an unknown ENTITLEMENT does not refuse here, when an unknown RELEASE
+ * does: the entitlement question is only ever asked on the path that already
+ * requires the customer's explicit consent to publish, and consent settles it.
+ * A working account is never blocked by a read that failed; it is only ever
+ * asked. Only a stated `false` refuses, so nobody is told to upgrade on the
+ * strength of a read that did not answer.
+ *
+ * `publish` and `confirmPublish` are injected so a fixture can prove `publish`
+ * was never called on each refusal path — the ordering is the behaviour under
+ * test, not the call shape.
+ */
+export async function resolveBaseRelease(args: {
   cloudDevAllowed: () => Promise<boolean | null>;
+  readBaseReleaseState: () => Promise<BaseReleaseState>;
+  confirmPublish: () => Promise<PublishConsent>;
   publish: () => Promise<void>;
-  readActiveReleaseId: () => Promise<string | null>;
   announce?: (message: string) => void;
-}): Promise<string | null> {
-  // Only an explicit `false` refuses; `null` means the platform did not say,
-  // and an unknown answer must never block an account that works today.
+}): Promise<{ baseReleaseId: string; published: boolean }> {
   if ((await args.cloudDevAllowed()) === false) throw new CloudDevUnavailableError();
+
+  const state = await args.readBaseReleaseState();
+  if (!state.known) throw new BaseReleaseUnknownError(state.reason);
+  if (state.activeReleaseId) return { baseReleaseId: state.activeReleaseId, published: false };
+
   args.announce?.(
     'This project has never been published, so there is no live version for a private preview to build on.',
   );
   args.announce?.(
-    'Publishing it once now to create the first version. After this, every preview stays private to you.',
+    'Publishing it once now would put the files in this directory in front of your users. '
+    + 'After that, every preview stays private to you and production only changes when you promote.',
   );
+  const consent = await args.confirmPublish();
+  if (consent !== 'granted') throw new PublishConsentRequiredError(consent);
+
   await args.publish();
-  return args.readActiveReleaseId();
+  const after = await args.readBaseReleaseState();
+  if (!after.known || !after.activeReleaseId) {
+    throw new BaseReleaseUnknownError(
+      'the first version was published, but the live version could not be read back. '
+      + 'Run `somewhere preview` again.',
+    );
+  }
+  return { baseReleaseId: after.activeReleaseId, published: true };
 }
 
-async function runHotDeploy(opts: { project?: string }) {
+/**
+ * Ask, once, before the one thing `somewhere preview` can do to a live site.
+ *
+ * A prompt is the primary mechanism rather than a bare flag because the publish
+ * happens on a FIRST run, when nobody knows a flag is needed — a flag-only
+ * design would either block every interactive first run or, worse, be added
+ * blindly and re-open the hole. A prompt nobody can answer is not consent
+ * either, so a non-interactive shell (a script, an agent, a piped terminal)
+ * gets `not-asked` and the refusal names `--publish-first`, which is the same
+ * consent given up front.
+ */
+export async function readPublishConsent(publishFirst: boolean): Promise<PublishConsent> {
+  if (publishFirst) return 'granted';
+  if (!process.stdin.isTTY) return 'not-asked';
+  const { ok } = await prompts({
+    type: 'confirm',
+    name: 'ok',
+    message: 'Publish this directory to production now, so the preview has a live version to build on?',
+    initial: false,
+  });
+  return ok === true ? 'granted' : 'declined';
+}
+
+async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) {
   const token = getToken();
   const client = new ApiClient(token);
   const cwd = process.cwd();
@@ -606,59 +748,72 @@ async function runHotDeploy(opts: { project?: string }) {
   }
   await showProjectNotices(client, projectId);
 
+  const { files, binaryFiles, functions } = collectFiles(cwd);
+  const draftId = `draft_${randomUUID()}`;
+  const firstOperationId = `previewop_${randomUUID()}`;
+
+  // The first preview snapshot must name the production release it was read
+  // from (base_release_id) — the platform binds the preview to that exact
+  // production release. Everything about how that id is obtained, including
+  // the refusal to invent one, lives in resolveBaseRelease.
+  let baseReleaseId: string;
+  try {
+    const resolved = await resolveBaseRelease({
+      cloudDevAllowed: () => readCloudDevAllowed(projectId),
+      readBaseReleaseState: () => readBaseReleaseState(projectId),
+      confirmPublish: () => readPublishConsent(opts.publishFirst === true),
+      announce: info,
+      publish: async () => {
+        await callDraftCandidate<DeployResult>(client, '/deploy', {
+          project_id: projectId,
+          scope: 'all',
+          files,
+          binary_files: binaryFiles,
+          functions,
+          replace_functions: true,
+        });
+      },
+    });
+    baseReleaseId = resolved.baseReleaseId;
+    if (resolved.published) success('Published — this project now has a live version.');
+  } catch (err) {
+    // Every branch here says the same thing in different words: your live site
+    // is exactly as you left it. Nothing below may claim anything about whether
+    // this project is published — that is precisely the read that failed.
+    if (err instanceof CloudDevUnavailableError) {
+      error(err.message);
+      info('Nothing was created or changed — whatever is live stays live.');
+      info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
+      process.exit(1);
+    }
+    if (err instanceof BaseReleaseUnknownError) {
+      error(err.message);
+      info('Nothing was created or changed — whatever is live stays live.');
+      info('Try `somewhere preview` again. To publish this directory to production deliberately, run `somewhere deploy`.');
+      process.exit(1);
+    }
+    if (err instanceof PublishConsentRequiredError) {
+      if (err.why === 'declined') {
+        warn('Nothing was published — whatever is live stays live.');
+      } else {
+        error('This project has never been published, so a preview has no live version to build on.');
+        info('Re-run as `somewhere preview --publish-first` to publish this directory to production first, or run `somewhere deploy` yourself.');
+        info('Nothing was created or changed — whatever is live stays live.');
+      }
+      process.exit(1);
+    }
+    if (!(isBuildError(err) && renderBuildError(err, cwd))) {
+      error(err instanceof Error ? err.message : String(err));
+    }
+    error('Could not publish the first version, so the private preview has nothing to build on.');
+    process.exit(1);
+  }
+
   // Initial full sync to the PREVIEW slot (preview: true). Writes only the
   // owner-gated dev slot — never prod, never a version bump or history entry.
   // /deploy/patch rejects projects with no prior deploy, so a full (preview)
   // deploy first establishes the sandbox AND returns the {slug}-dev URL.
   const spinner = ora('Syncing to preview...').start();
-  const { files, binaryFiles, functions } = collectFiles(cwd);
-  const draftId = `draft_${randomUUID()}`;
-  const firstOperationId = `previewop_${randomUUID()}`;
-  // The first preview snapshot must name the production release it was read from
-  // (base_release_id) — the platform binds the draft to that exact production
-  // release. Read it from deploy_status; a project that has never published to
-  // production has no base and starts the draft from empty.
-  let baseReleaseId: string | null = await readActiveReleaseId(projectId);
-  // An exact preview builds a private CANDIDATE against the project's live
-  // version. A project that has never been published has no live version, so
-  // there is nothing for the first candidate to build on and the platform
-  // refuses with PREVIEW_REQUIRES_BASE_RELEASE. Publish once here — announced,
-  // never silently — so `somewhere dev` works on a brand-new project. Every
-  // preview after this stays private and never changes what is live.
-  if (!baseReleaseId) {
-    spinner.stop();
-    try {
-      baseReleaseId = await ensureBaseRelease({
-        cloudDevAllowed: () => readCloudDevAllowed(projectId),
-        announce: info,
-        publish: async () => {
-          await callDraftCandidate<DeployResult>(client, '/deploy', {
-            project_id: projectId,
-            scope: 'all',
-            files,
-            binary_files: binaryFiles,
-            functions,
-            replace_functions: true,
-          });
-        },
-        readActiveReleaseId: () => readActiveReleaseId(projectId),
-      });
-      success('Published — this project now has a live version.');
-    } catch (err) {
-      if (err instanceof CloudDevUnavailableError) {
-        error(err.message);
-        info('Nothing was created — this project has not been published.');
-        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
-        process.exit(1);
-      }
-      if (!(isBuildError(err) && renderBuildError(err, cwd))) {
-        error(err instanceof Error ? err.message : String(err));
-      }
-      error('Could not publish the first version, so the private preview has nothing to build on.');
-      process.exit(1);
-    }
-    spinner.start('Syncing to preview...');
-  }
 
   let candidateReleaseId: string | null = null;
   let initialHandoff: PreviewCandidateHandoff;

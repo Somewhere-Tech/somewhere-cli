@@ -859,6 +859,65 @@ function functionLocalImportPlugin(root) {
  * Build a compiler instance bound to one host environment.
  * @param {object} host — see the file header for the complete contract.
  */
+/**
+ * Build-CONFIG files, which are never in the browser graph.
+ *
+ * The platform IS the bundler, so a project's vite/rollup/webpack/postcss/
+ * tailwind config is never executed by anything the compiler emits. Scanning
+ * them for phantom imports produced a warning whose own premise was false —
+ * "if that code path runs, your app will fail to load it", for a code path
+ * that cannot run — on our OWN init scaffold, whose vite.config.ts imports
+ * vite and @vitejs/plugin-react (tsk_424174be).
+ */
+function isBuildConfigFile(filePath) {
+  const base = filePath.split('/').pop() || '';
+  return /^(?:vite|vitest|rollup|webpack|next|nuxt|svelte|astro|remix|tailwind|postcss|babel|jest|playwright|cypress|eslint|prettier|stylelint)\.config\.[cm]?[jt]sx?$/i.test(base);
+}
+
+/* ─── devDependencies the app's own source actually imports (tsk_2a7c6b33) ────
+ * The install is `dependencies`-only BY DESIGN — the platform is the build
+ * toolchain, so vite/typescript/@vitejs/* have no business in a per-build
+ * install. That was always the stated rule, and `missing` always honoured it,
+ * but `npm install <specs>` runs in a build root holding the customer's whole
+ * package.json and npm reifies the FULL declared tree from it, devDependencies
+ * included. Measured on our own `somewhere init` scaffold: 74 packages / 72 MB
+ * with the dev closure (vite, rollup, @babel/*, esbuild + its platform binary,
+ * typescript, @types/*), 8 packages / 13 MB without it. Every scaffold deploy
+ * has been paying for a toolchain the bundle never imports, and on a slow or
+ * churning instance that is what puts an install over the 300 s build budget.
+ * `--omit=dev` on the npm side closes it (server.js).
+ *
+ * RULE 9 — THE CARVE-OUT THAT KEEPS WORKING CODE WORKING: because the dev
+ * closure landed incidentally, a project that IMPORTS a dev-declared package
+ * from its own source has always had that import resolve. Dropping the dev
+ * tree wholesale would turn those builds into "Could not resolve" failures —
+ * the exact class rule 9 forbids. So a devDependency the source imports is
+ * installed EXPLICITLY, by name, and nothing that builds today stops building.
+ * Only the unimported remainder — the toolchain — goes away.
+ *
+ * BUILD-CONFIG FILES ARE EXCLUDED, and that exclusion is the whole point: the
+ * scaffold's own vite.config.ts imports `vite` and `@vitejs/plugin-react`, and
+ * the platform never executes it (isBuildConfigFile, tsk_424174be). Counting it
+ * as an import would reinstall the toolchain and buy nothing.
+ */
+function importedDevDeps(pkg, files) {
+  const declared = (pkg && pkg.devDependencies) || {};
+  const names = Object.keys(declared);
+  if (!names.length || !files || typeof files !== 'object') return [];
+  const declaredSet = new Set(names);
+  const hit = new Set();
+  for (const [filePath, content] of Object.entries(files)) {
+    if (typeof content !== 'string') continue;
+    if (!/\.(tsx?|jsx?|mjs|cjs)$/i.test(filePath)) continue;
+    if (isBuildConfigFile(filePath)) continue;
+    for (const spec of extractBareSpecifiers(content)) {
+      const root = specRootPkg(spec);
+      if (declaredSet.has(root)) hit.add(root);
+    }
+  }
+  return [...hit];
+}
+
 function createCompileCore(host) {
   if (!host || typeof host !== 'object') throw new Error('createCompileCore(host) requires a host');
   for (const required of ['imageNodeModules', 'requireImage', 'installPackages']) {
@@ -977,12 +1036,22 @@ function createCompileCore(host) {
    *      per-build install lands in the build root, which esbuild resolves before
    *      the baked nodePaths, so the project's pin wins.
    * devDependencies (tailwind, vite, etc.) are NOT installed — the build toolchain
-   * is the container's job, not the app's.
+   * is the container's job, not the app's. The ONE exception is a devDependency
+   * the project's own source imports: see importedDevDeps (tsk_2a7c6b33) for why
+   * that carve-out exists and why it is not optional.
    */
 
 
-  async function ensureDeps(root, pkg, warnings, ctx, scopedProxyReady = true) {
-    const deps = (pkg && pkg.dependencies) || {};
+  async function ensureDeps(root, pkg, warnings, ctx, scopedProxyReady = true, sourceFiles = null) {
+    // `dependencies`, plus any devDependency the source actually imports. npm
+    // is told `--omit=dev` (server.js), so anything the app really needs must
+    // be named here explicitly — which is what keeps a build that resolves a
+    // dev-declared import today resolving it tomorrow (rule 9).
+    const declaredDev = (pkg && pkg.devDependencies) || {};
+    const deps = { ...((pkg && pkg.dependencies) || {}) };
+    for (const name of importedDevDeps(pkg, sourceFiles)) {
+      if (!(name in deps)) deps[name] = declaredDev[name];
+    }
     const buildRoot = path.join(root, 'node_modules');
     // The project's own lockfile, materialized alongside package.json. It IS
     // uploaded on every deploy and was, until now, ignored — which is what made
@@ -1078,21 +1147,6 @@ function createCompileCore(host) {
     }
   }
 
-  /**
- * Build-CONFIG files, which are never in the browser graph.
- *
- * The platform IS the bundler, so a project's vite/rollup/webpack/postcss/
- * tailwind config is never executed by anything the compiler emits. Scanning
- * them for phantom imports produced a warning whose own premise was false —
- * "if that code path runs, your app will fail to load it", for a code path
- * that cannot run — on our OWN init scaffold, whose vite.config.ts imports
- * vite and @vitejs/plugin-react (tsk_424174be).
- */
-function isBuildConfigFile(filePath) {
-  const base = filePath.split('/').pop() || '';
-  return /^(?:vite|vitest|rollup|webpack|next|nuxt|svelte|astro|remix|tailwind|postcss|babel|jest|playwright|cypress|eslint|prettier|stylelint)\.config\.[cm]?[jt]sx?$/i.test(base);
-}
-
 /** Make the implicit project root explicit for path aliases. */
   function normalizeTsconfigText(tsconfigText) {
     if (typeof tsconfigText !== 'string') return tsconfigText;
@@ -1143,11 +1197,12 @@ function isBuildConfigFile(filePath) {
         // packages, so "add it to your package.json" is wrong advice on code our
         // own docs hand the developer (tsk_53badecfb7).
         if (PLATFORM_MODULE_ROOTS.has(rootPkg)) continue;
-        // DECLARED in devDependencies. ensureDeps deliberately installs only
-        // `dependencies` (the build toolchain is the platform's job, not the
-        // app's), so a devDependency is never resolvable here — but it IS
-        // declared, and "add it to your package.json" is already done. Warning
-        // about it is a false positive with wrong remediation (tsk_424174be).
+        // DECLARED in devDependencies. It IS declared, so "add it to your
+        // package.json" is already done and warning about it is a false
+        // positive with wrong remediation (tsk_424174be) — whether or not it
+        // resolved. (Since tsk_2a7c6b33 a dev-declared package the source
+        // imports IS installed by name, so this branch is now mostly reached
+        // by build-config imports, which are skipped above anyway.)
         if (devDeclared.has(rootPkg)) continue;
         // Resolvable through NODE_POLYFILLS alias (e.g. 'buffer', 'process')
         if (polyfillKeys.has(rootPkg)) continue;
@@ -1612,7 +1667,10 @@ function isBuildConfigFile(filePath) {
       // container is egress-locked and must fail closed, the CLI reaches npm
       // directly through the developer's own config. Default is the container's
       // refusal, so opening it is always deliberate.
-      await ensureDeps(root, pkg, warnings, ctx, hasScopedProxy || host.requiresPackageProxy === false);
+      // `files` (frontend AND function sources) is what decides the one
+      // devDependency carve-out — a dev-declared package the app imports is
+      // installed by name so the install can otherwise skip the dev closure.
+      await ensureDeps(root, pkg, warnings, ctx, hasScopedProxy || host.requiresPackageProxy === false, files);
       timing.install = _ms(_tInstall);
 
       // Dependency review (PR1) — WARN-FIRST, non-blocking. A scanner bug must
@@ -1926,6 +1984,10 @@ module.exports = {
   lockfileVersions,
   resolveInstallSpec,
   cleanRange,
+  // The devDependency carve-out (tsk_2a7c6b33) — pure, exported so the fixture
+  // can pin BOTH directions: the toolchain is dropped, an imported dev-declared
+  // package is not.
+  importedDevDeps,
   NODE_POLYFILLS,
   ASSET_LOADERS,
   KNOWN_BAD_VERSIONS,
