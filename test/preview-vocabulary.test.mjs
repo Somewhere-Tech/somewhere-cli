@@ -109,3 +109,23 @@ test('no internal field name is printable from the preview loop', () => {
     }
   }
 });
+
+// tsk_14c5408c — a burst of saves must produce ONE preview update, not several
+// overlapping ones. chokidar picks up whatever a formatter or a build tool
+// drops in the tree, so a burst is normal, not pathological.
+test('a burst of saves coalesces into one preview update', () => {
+  const dev = read('src/commands/dev.ts');
+
+  // Saves inside the debounce window accumulate into one batch...
+  assert.match(dev, /const DEBOUNCE_MS = \d+;/);
+  assert.match(dev, /pendingChanged\.add\(rel\)/);
+  assert.match(dev, /pendingDeleted\.add\(rel\)/);
+
+  // ...and a save that lands WHILE an update is in flight re-arms instead of
+  // sending a second one. Dropping this guard is what puts two candidates in
+  // flight at once.
+  assert.match(dev, /if \(deploying\) \{\s*\n\s*schedule\(\); \/\/ re-arm; a deploy is in flight\s*\n\s*return;/);
+  assert.match(dev, /deploying = true;/);
+  // Whatever arrived during the update goes out next, as one batch.
+  assert.match(dev, /deploying = false;\s*\n\s*if \(pendingChanged\.size \|\| pendingDeleted\.size\) schedule\(\);/);
+});
