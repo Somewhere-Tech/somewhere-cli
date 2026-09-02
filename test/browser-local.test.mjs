@@ -35,6 +35,8 @@ const FIXTURE_HTML = `<!doctype html>
     <button type="button" data-testid="signup">Sign up</button>
   </form>
   <button id="third">Third</button>
+  <section hidden><button id="hidden-action">Hidden action</button></section>
+  <button id="disabled-action" disabled>Disabled action</button>
   <script>
     // Render one button late, so a snapshot taken before the wait resolves
     // would visibly disagree with the wait.
@@ -126,8 +128,91 @@ test('the local browser reports the interactive elements its own wait found', as
       'the testid handle map reaches the elements the developer will target',
     );
     assert.equal(report.testid_map.signup, '[data-testid="signup"]');
+    assert.equal(report.dom_outline.find((el) => el.id === 'hidden-action')?.visible, false);
+    assert.equal(report.dom_outline.find((el) => el.id === 'disabled-action')?.visible, true);
+    assert.equal(report.dom_outline.find((el) => el.id === 'disabled-action')?.disabled, true);
   } finally {
     await fixture.close();
+  }
+});
+
+test('visible-only local outlines omit hidden controls and retain disabled annotations', async (t) => {
+  if (!findBrowser()) {
+    t.skip('no browser installed on this machine');
+    return;
+  }
+  const fixture = await serveFixture();
+  try {
+    const report = await runLocalBrowser({
+      url: fixture.url,
+      visibleOnly: true,
+      viewport: { width: 1280, height: 800 },
+      timeoutMs: 60_000,
+    });
+    assert.equal(report.dom_outline.some((el) => el.id === 'hidden-action'), false);
+    assert.equal(report.dom_outline.find((el) => el.id === 'disabled-action')?.disabled, true);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test('local action sequence drives a form and treats an expected 401 as healthy', async (t) => {
+  if (!findBrowser()) {
+    t.skip('no browser installed on this machine');
+    return;
+  }
+  const server = createServer((req, res) => {
+    if (req.url === '/api/tasks') {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end('{"error":"expected refusal"}');
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(`<!doctype html><html><body>
+      <input id="title">
+      <select id="plan"><option value="free">Free</option><option value="pro">Pro</option></select>
+      <button id="save" type="button">Save</button>
+      <p id="status"></p>
+      <script>
+        document.getElementById('save').addEventListener('click', async () => {
+          await fetch('/api/tasks');
+          const statusNode = document.getElementById('status');
+          statusNode.textContent = document.getElementById('title').value + ':' +
+            document.getElementById('plan').value;
+          statusNode.className = 'ready';
+        });
+      </script>
+    </body></html>`);
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const report = await runLocalBrowser({
+      url: `http://localhost:${port}/`,
+      actions: [
+        { fill: '#title', value: 'Launch' },
+        { select: '#plan', value: 'pro' },
+        { click: '#save' },
+        { wait: '.ready' },
+        { expect: { selector: '#status', text: 'Launch:pro', visible: true, count: 1 } },
+        { eval: 'document.querySelector("#status").textContent' },
+      ],
+      expectedRequests: [{ path: '/api/tasks', status: 401 }],
+      viewport: { width: 1280, height: 800 },
+      timeoutMs: 60_000,
+    });
+    assert.equal(report.passed, true, JSON.stringify(report, null, 2));
+    assert.equal(report.failed_requests.length, 0);
+    assert.equal(report.request_expectations?.[0]?.ok, true);
+    assert.equal(report.steps.length, 6);
+    assert.ok(report.steps.every((step) => step.ok));
+    assert.equal(report.steps.at(-1).result, 'Launch:pro');
+    assert.equal(
+      report.console_errors.some((entry) => /Failed to load resource/.test(entry) && /401/.test(entry)),
+      false,
+    );
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
   }
 });
 

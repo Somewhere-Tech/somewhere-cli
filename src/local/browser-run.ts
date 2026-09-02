@@ -16,6 +16,14 @@ import {
   launchLocalBrowser,
   NO_BROWSER_MESSAGE,
 } from './chrome.js';
+import {
+  actionLabel,
+  matchesExpectedBrowserRequest,
+  resolveBrowserRequestExpectations,
+  type BrowserRequestExpectationResult,
+  type BrowserSequenceAction,
+  type ExpectedBrowserRequest,
+} from '../lib/browser-actions.js';
 
 /** Loopback and link-local hosts: the addresses only this machine can reach. */
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', '0.0.0.0', '[::]']);
@@ -46,6 +54,9 @@ export interface LocalBrowserRequest {
   wait?: string;
   /** A JS expression to evaluate in the page. */
   eval?: string;
+  actions?: BrowserSequenceAction[];
+  expectedRequests?: ExpectedBrowserRequest[];
+  visibleOnly?: boolean;
   /** Write a screenshot to this file. */
   screenshotPath?: string;
   viewport: { width: number; height: number };
@@ -54,6 +65,7 @@ export interface LocalBrowserRequest {
 }
 
 export interface LocalStepResult {
+  step?: number;
   action: string;
   ok: boolean;
   selector?: string;
@@ -69,6 +81,7 @@ export interface LocalBrowserReport {
   console_errors: string[];
   page_errors: string[];
   failed_requests: Array<{ status?: number; method?: string; url?: string }>;
+  request_expectations?: BrowserRequestExpectationResult[];
   steps: LocalStepResult[];
   screenshots: Array<{ label: string; path: string }>;
   dom_outline: Array<Record<string, unknown>>;
@@ -170,6 +183,139 @@ async function evaluate(session: DevToolsSession, expression: string): Promise<u
   return res.result?.value;
 }
 
+export async function executeLocalAction(
+  session: DevToolsSession,
+  action: BrowserSequenceAction,
+  deadline: number,
+): Promise<LocalStepResult> {
+  const label = actionLabel(action);
+  const step: LocalStepResult = { action: label, ok: true };
+  try {
+    if ('click' in action) {
+      step.selector = action.click;
+      const errorText = await evaluate(session, `(() => {
+        const el = document.querySelector(${JSON.stringify(action.click)});
+        if (!el) return 'selector did not match any element';
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        if (el.closest('[hidden]') || el.closest('[aria-hidden="true"]') || style.display === 'none' || style.visibility === 'hidden' || (rect.width === 0 && rect.height === 0)) return 'matched element is hidden';
+        el.click();
+        return '';
+      })()`);
+      if (errorText) throw new Error(`click failed at "${action.click}": ${String(errorText)}.`);
+      return step;
+    }
+    if ('fill' in action) {
+      step.selector = action.fill;
+      const errorText = await evaluate(session, `(() => {
+        const el = document.querySelector(${JSON.stringify(action.fill)});
+        if (!el) return 'selector did not match any element';
+        if (!('value' in el)) return 'matched element cannot be filled';
+        el.focus();
+        el.value = ${JSON.stringify(action.value)};
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return '';
+      })()`);
+      if (errorText) throw new Error(`fill failed at "${action.fill}": ${String(errorText)}.`);
+      return step;
+    }
+    if ('select' in action) {
+      step.selector = action.select;
+      const errorText = await evaluate(session, `(() => {
+        const el = document.querySelector(${JSON.stringify(action.select)});
+        if (!el) return 'selector did not match any element';
+        if (el.tagName !== 'SELECT') return 'matched element is not a select';
+        el.value = ${JSON.stringify(action.value)};
+        if (el.value !== ${JSON.stringify(action.value)}) return 'option value does not exist';
+        el.dispatchEvent(new Event('input', { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        return '';
+      })()`);
+      if (errorText) throw new Error(`select failed at "${action.select}": ${String(errorText)}.`);
+      return step;
+    }
+    if ('wait' in action) {
+      if (typeof action.wait === 'number') {
+        const remaining = Math.max(0, deadline - Date.now());
+        await sleep(Math.min(action.wait, remaining));
+        if (action.wait > remaining) throw new Error(`wait exceeded the browser run budget after ${remaining}ms.`);
+        return step;
+      }
+      step.selector = action.wait;
+      while (Date.now() < deadline) {
+        const visible = await evaluate(session, `(() => {
+          const el = document.querySelector(${JSON.stringify(action.wait)});
+          if (!el) return false;
+          const style = getComputedStyle(el);
+          const rect = el.getBoundingClientRect();
+          return !el.closest('[hidden]') && !el.closest('[aria-hidden="true"]')
+            && style.display !== 'none' && style.visibility !== 'hidden'
+            && !(rect.width === 0 && rect.height === 0);
+        })()`);
+        if (visible === true) return step;
+        await sleep(POLL_MS);
+      }
+      throw new Error(`wait timed out for "${action.wait}".`);
+    }
+    if ('expect' in action) {
+      step.selector = action.expect.selector;
+      const state = await evaluate(session, `(() => {
+        const nodes = Array.from(document.querySelectorAll(${JSON.stringify(action.expect.selector)}));
+        const el = nodes[0];
+        if (!el) return { count: nodes.length, text: '', visible: false };
+        const style = getComputedStyle(el);
+        const rect = el.getBoundingClientRect();
+        return {
+          count: nodes.length,
+          text: String(el.innerText || el.value || el.textContent || ''),
+          visible: !el.closest('[hidden]') && !el.closest('[aria-hidden="true"]')
+            && style.display !== 'none' && style.visibility !== 'hidden'
+            && !(rect.width === 0 && rect.height === 0),
+        };
+      })()`) as { count: number; text: string; visible: boolean };
+      if (action.expect.count !== undefined && state.count !== action.expect.count) {
+        throw new Error(`expect failed at "${action.expect.selector}": expected count ${action.expect.count}, got ${state.count}.`);
+      }
+      if (action.expect.text !== undefined) {
+        if (state.count === 0) throw new Error(`expect failed at "${action.expect.selector}": selector did not match any element.`);
+        if (!state.text.includes(action.expect.text)) {
+          throw new Error(`expect failed at "${action.expect.selector}": text did not contain "${action.expect.text}". Got: "${state.text.trim().slice(0, 120)}".`);
+        }
+      }
+      if (action.expect.visible !== undefined) {
+        if (state.count === 0) throw new Error(`expect failed at "${action.expect.selector}": selector did not match any element.`);
+        if (state.visible !== action.expect.visible) {
+          throw new Error(`expect failed at "${action.expect.selector}": expected visible=${action.expect.visible}, got ${state.visible}.`);
+        }
+      }
+      return step;
+    }
+    step.script = action.eval;
+    step.result = await evaluate(session, action.eval);
+    return step;
+  } catch (err) {
+    step.ok = false;
+    step.error = err instanceof Error ? err.message : String(err);
+    return step;
+  }
+}
+
+export async function executeLocalActions(
+  session: DevToolsSession,
+  actions: readonly BrowserSequenceAction[],
+  deadline: number,
+): Promise<LocalStepResult[]> {
+  const results: LocalStepResult[] = [];
+  for (const action of actions) {
+    const result = await executeLocalAction(session, action, deadline);
+    result.step = results.length;
+    results.push(result);
+    if (!result.ok) break;
+  }
+  return results;
+}
+
 /**
  * Drive the local browser and return the report.
  *
@@ -197,6 +343,8 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
   const consoleErrors: string[] = [];
   const pageErrors: string[] = [];
   const failedRequests: Array<{ status?: number; method?: string; url?: string }> = [];
+  const responses: Array<{ status: number; url: string }> = [];
+  const expectedRequests = req.expectedRequests ?? [];
   const steps: LocalStepResult[] = [];
   const screenshots: Array<{ label: string; path: string }> = [];
   const requestMethods = new Map<string, string>();
@@ -206,9 +354,10 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     session.on('Runtime.consoleAPICalled', (params) => {
       if (params['type'] !== 'error') return;
       const args = (params['args'] as Array<{ value?: unknown; description?: string }>) ?? [];
-      consoleErrors.push(
-        args.map((a) => (a.value !== undefined ? String(a.value) : a.description ?? '')).join(' ').trim(),
-      );
+      const text = args.map((a) => (a.value !== undefined ? String(a.value) : a.description ?? '')).join(' ').trim();
+      if (!expectedRequests.some((expected) => text.includes(expected.path) && text.includes(String(expected.status)))) {
+        consoleErrors.push(text);
+      }
     });
     session.on('Runtime.exceptionThrown', (params) => {
       const details = params['exceptionDetails'] as
@@ -225,16 +374,19 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     });
     session.on('Network.responseReceived', (params) => {
       const response = params['response'] as { status?: number; url?: string } | undefined;
-      if (!response || typeof response.status !== 'number' || response.status < 400) return;
+      if (!response || typeof response.status !== 'number' || typeof response.url !== 'string') return;
+      responses.push({ status: response.status, url: response.url });
+      if (response.status < 400) return;
       const requestId = String(params['requestId'] ?? '');
       // The browser's own favicon fetch is not a request the page made.
       if (response.status === 404
           && isBrowserOwnFaviconRequest(response.url, requestInitiators.get(requestId))) return;
-      failedRequests.push({
+      const failed = {
         status: response.status,
         method: requestMethods.get(requestId) ?? 'GET',
         url: response.url,
-      });
+      };
+      if (!matchesExpectedBrowserRequest(failed, expectedRequests)) failedRequests.push(failed);
     });
     session.on('Network.loadingFailed', (params) => {
       // A cancelled request is the page's own choice, not a failure.
@@ -248,6 +400,15 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     await session.send('Page.enable');
     await session.send('Runtime.enable');
     await session.send('Network.enable');
+    await session.send('Log.enable');
+    session.on('Log.entryAdded', (params) => {
+      const entry = params['entry'] as { level?: string; text?: string; url?: string } | undefined;
+      if (entry?.level !== 'error' || !entry.text) return;
+      const expected = expectedRequests.some(
+        (item) => (entry.url ?? '').includes(item.path) && entry.text?.includes(String(item.status)),
+      );
+      if (!expected && !consoleErrors.includes(entry.text)) consoleErrors.push(entry.text);
+    });
     await session.send('Emulation.setDeviceMetricsOverride', {
       width: req.viewport.width,
       height: req.viewport.height,
@@ -288,6 +449,8 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     await sleep(SETTLE_MS);
 
     if (req.path && loadFired) steps.push({ action: 'goto', ok: true, path: req.path });
+
+    steps.push(...await executeLocalActions(session, req.actions ?? [], deadline));
 
     if (req.wait) {
       const selector = req.wait;
@@ -332,7 +495,9 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
         outline?: Array<Record<string, unknown>>;
         testid_map?: Record<string, string>;
       };
-      domOutline = Array.isArray(probe?.outline) ? probe.outline : [];
+      domOutline = Array.isArray(probe?.outline)
+        ? (req.visibleOnly ? probe.outline.filter((node) => node['visible'] === true) : probe.outline)
+        : [];
       testidMap = probe?.testid_map ?? {};
     } catch (err) {
       consoleErrors.push(`[inspect] DOM probe failed: ${err instanceof Error ? err.message : String(err)}`);
@@ -360,8 +525,12 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
       /* keep the URL we navigated to */
     }
 
+    const requestExpectations = resolveBrowserRequestExpectations(expectedRequests, responses);
     const passed =
-      steps.every((s) => s.ok) && pageErrors.length === 0 && failedRequests.length === 0;
+      steps.every((s) => s.ok)
+      && pageErrors.length === 0
+      && failedRequests.length === 0
+      && requestExpectations.every((expectation) => expectation.ok);
 
     return {
       passed,
@@ -369,6 +538,7 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
       console_errors: consoleErrors,
       page_errors: pageErrors,
       failed_requests: failedRequests,
+      ...(requestExpectations.length ? { request_expectations: requestExpectations } : {}),
       steps,
       screenshots,
       dom_outline: domOutline,
