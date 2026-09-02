@@ -69,3 +69,43 @@ test('customer-facing CLI copy uses exactly two words: dev and preview', () => {
   assert.match(refusal, /`somewhere preview` is available on the Pro and Scale plans/);
   assert.doesNotMatch(refusal, /--cloud/);
 });
+
+// tsk_74375b3c — a promote ends the preview, and the loop says so in the two
+// words the product uses. None of OUR nouns reach the terminal.
+test('after a promote the preview loop ends cleanly, in product language', () => {
+  const dev = read('src/commands/dev.ts');
+
+  // The loop recognises the end of a preview instead of relaying a refusal.
+  assert.match(dev, /class PreviewFinishedError/);
+  assert.match(dev, /err\.code !== 'DRAFT_SESSION_TERMINAL'/);
+  assert.match(dev, /terminal_status/);
+
+  // It stops, rather than failing identically on every later save.
+  assert.match(dev, /await watcher\.close\(\)/);
+
+  // The two lines a person reads.
+  assert.match(dev, /Promoted — this preview is now your live app, and the preview has finished\./);
+  assert.match(dev, /Run \$\{teal\('somewhere preview'\)\} to keep previewing\./);
+});
+
+test('no internal field name is printable from the preview loop', () => {
+  const dev = read('src/commands/dev.ts');
+  // Prose the CLI prints, as opposed to request keys and identifiers: a quoted
+  // sentence starting with a capital letter and containing words.
+  const prose = [...dev.matchAll(/'((?:[^'\\\n]|\\.)*)'/g)]
+    .map((m) => m[1])
+    .filter((text) => /^[A-Z]/.test(text) && /[a-z] [a-z]/.test(text));
+  assert.ok(prose.length > 10, 'expected to find the printed copy');
+  for (const line of prose) {
+    for (const noun of [
+      'draft_id',
+      'candidate_release_id',
+      'expected_candidate_release_id',
+      'expected_preview_id',
+      'draft_operation_id',
+      'snapshot',
+    ]) {
+      assert.ok(!line.includes(noun), `customer copy names our field "${noun}": ${line}`);
+    }
+  }
+});

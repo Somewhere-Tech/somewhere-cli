@@ -29,6 +29,28 @@ const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|
 const DEBOUNCE_MS = 500;
 const RETRYABLE_DRAFT_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
 
+/**
+ * The preview this loop was watching has finished — it was promoted, or closed.
+ *
+ * A promote ends the preview session, but the watcher used to keep running and
+ * keep failing, once per save, with the platform's API-client wording
+ * (tsk_74375b3c). The loop knows perfectly well what happened; it should stop
+ * and say so, not relay a refusal written for a machine.
+ */
+class PreviewFinishedError extends Error {
+  constructor(readonly reason: 'promoted' | 'closed') {
+    super(reason);
+    this.name = 'PreviewFinishedError';
+  }
+}
+
+/** Did the platform just tell us this preview is over? */
+function previewFinishedReason(err: unknown): 'promoted' | 'closed' | null {
+  if (!(err instanceof CliApiError) || err.code !== 'DRAFT_SESSION_TERMINAL') return null;
+  const status = (err.data as { terminal_status?: unknown } | undefined)?.terminal_status;
+  return status === 'promoted' ? 'promoted' : 'closed';
+}
+
 interface DeployResult {
   files?: string[] | number;
   files_deployed?: number;
@@ -738,6 +760,20 @@ async function runHotDeploy(opts: { project?: string }) {
         candidateReleaseId!,
       );
       if (nextCandidate) candidateReleaseId = nextCandidate;
+    } catch (err) {
+      if (!(err instanceof PreviewFinishedError)) throw err;
+      // One line, in the two words the product uses, naming the next command.
+      // Nothing about how a preview is built reaches this terminal.
+      console.log('');
+      if (err.reason === 'promoted') {
+        success('Promoted — this preview is now your live app, and the preview has finished.');
+      } else {
+        info('This preview has finished.');
+      }
+      info(`Run ${teal('somewhere preview')} to keep previewing.`);
+      if (timer) clearTimeout(timer);
+      await watcher.close().catch(() => {});
+      process.exit(0);
     } finally {
       deploying = false;
       if (pendingChanged.size || pendingDeleted.size) schedule();
@@ -874,6 +910,11 @@ async function deployBatch(
       renderBuildError(err, cwd);
       info(dim('Your last working preview is still up. Fix and save again.'));
       return null;
+    }
+    const finished = previewFinishedReason(err);
+    if (finished) {
+      // Not a failed save — the preview itself is over. The loop stops on it.
+      throw new PreviewFinishedError(finished);
     }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
     error(err instanceof Error ? err.message : String(err));
