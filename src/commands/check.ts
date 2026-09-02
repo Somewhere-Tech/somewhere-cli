@@ -5,6 +5,7 @@ import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError, type BuildErrorDetail } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes, type CollectedFiles } from '../lib/files.js';
+import { printExcludedFiles } from './deploy.js';
 import { bold, dim, error, green, info, red, success, warn, yellow } from '../lib/output.js';
 
 /** A single diagnostic from the server-side dry compile. Same file:line shape
@@ -155,6 +156,12 @@ export function registerCheck(program: Command) {
 
       const client = new ApiClient(getToken());
       const collected = collectFiles(targetDir);
+      // Same publish surface the deploy uses — `deploy-check` saying "0 errors"
+      // while a private note was about to ship is what made this a real
+      // incident, so the check names the held-back files too (tsk_c166924f).
+      if (collected.excluded.length && !opts.json) {
+        printExcludedFiles(collected.excluded, targetDir);
+      }
       const totalFiles =
         Object.keys(collected.files).length +
         Object.keys(collected.functions).length +

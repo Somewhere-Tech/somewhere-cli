@@ -12,6 +12,8 @@ import {
   readProjectDeployState,
   saveConfig,
   saveProjectConfig,
+  markPublishNoticeSeen,
+  publishNoticeSeen,
   saveProjectDeployState,
   type ProjectConfigEntry,
 } from '../lib/config.js';
@@ -343,6 +345,13 @@ export function registerDeploy(program: Command) {
       '--force',
       'Overwrite remote changes even when this machine last deployed an older version',
     )
+    .option(
+      '--include <paths>',
+      'Publish a root file the deploy would otherwise hold back, e.g. --include NOTES.md ' +
+        '(comma-separate several, or repeat the flag). A "!NOTES.md" line in .somewhereignore does the same thing permanently.',
+      (value: string, previous: string[] = []) =>
+        previous.concat(value.split(',').map((v) => v.trim()).filter(Boolean)),
+    )
     .option('--yes', 'Skip confirmation prompts (for --force)')
     .option('--json', 'Print the raw deploy response as JSON')
     .action(async (dir: string | undefined, opts) => {
@@ -497,7 +506,19 @@ export function registerDeploy(program: Command) {
 
       const spinner = opts.json ? null : ora('Collecting files...').start();
 
-      const { files, binaryFiles, functions, skipped } = collectFiles(targetDir);
+      const { files, binaryFiles, functions, skipped, excluded } = collectFiles(targetDir, {
+        include: (opts.include as string[] | undefined) ?? [],
+      });
+
+      // Publish surface (tsk_c166924f): a deploy publishes the app, not the
+      // folder it was built in. Name every held-back file — a silent exclusion
+      // is how a private note gets published, and how a needed file goes
+      // missing without anyone noticing.
+      if (excluded.length && !opts.json) {
+        spinner?.stop();
+        printExcludedFiles(excluded, targetDir);
+        spinner?.start();
+      }
 
       // A deploy replaces the whole project, so a file we skip is DELETED from
       // production if it was there before. Never silent — surface every skip.
@@ -1002,6 +1023,29 @@ function formatDeployElapsed(ms: number): string {
 const INTERNAL_PREFIXES = ['_compiled/', '_internal/', '_source/'];
 const isInternalPath = (p: string) =>
   INTERNAL_PREFIXES.some((prefix) => p.startsWith(prefix));
+
+
+// ── Publish-surface notice (tsk_c166924f) ────────────────────────────────
+// Rule 8: the customer sees WHAT was held back and HOW to publish it. Nothing
+// about how the rule is implemented, no ticket ids. The "how" line prints once
+// per linked project — stored in the project's own .somewhere.json, never as a
+// new stray file in the customer's repo. An unlinked (anonymous) deploy has
+// nowhere to remember it, so it prints every time, which is the safe direction.
+export function printExcludedFiles(
+  excluded: Array<{ path: string; reason: string }>,
+  targetDir: string,
+): void {
+  info(`Not published (${excluded.length}): ${excluded.map((e) => e.path).join(', ')}`);
+  if (publishNoticeSeen(targetDir)) return;
+  info(
+    dim(
+      'A deploy publishes your app — index.html, src/, public/, api/, db/, package.json and ' +
+        'the files they use. Notes, logs and scratch files in your project root stay on your machine. ' +
+        'To publish one on purpose: somewhere deploy --include <file>, or add a "!<file>" line to .somewhereignore.',
+    ),
+  );
+  markPublishNoticeSeen(targetDir);
+}
 
 function printDryRun(plan: DryRunResult, scope?: 'functions' | 'static') {
   const scopeNote =
