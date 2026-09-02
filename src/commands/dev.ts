@@ -122,10 +122,11 @@ export function registerDev(program: Command) {
     .description(
       'Your app on localhost, compiled by the platform\'s own compiler — so what you see is what deploy ' +
         'produces, not a lookalike built by a second toolchain. Save a file and the page updates in ' +
-        'milliseconds; api/ functions run in local Node with sw.db/sw.fs/sw.ai/sw.auth calling your ' +
+        'milliseconds; api/ functions run in local Node with sw.* calling your ' +
         'real project. There is no dev version of your app: from the first file you are building the ' +
-        'production app against real data, and this is a faster window onto it. ' +
-        'Same app, same data, same build. ' +
+        'production app, and this is a faster window onto it. Same app, same build. ' +
+        'Reaching the project DATABASE from the local loop is a plan feature and the command says so ' +
+        'once at startup when your plan does not include it; deploying is unaffected on every plan. ' +
         '--cloud deploys every save to a shareable private preview URL instead of serving locally. ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
     )
@@ -165,7 +166,11 @@ export function registerDev(program: Command) {
  * api/ functions in local Node against the real project.
  *
  * There is no dev version of your app. From the first file you are building
- * the production app against real data; this is a faster window onto it.
+ * the production app; this is a faster window onto it.
+ *
+ * Reaching the project DATABASE from here is a plan entitlement the platform
+ * reports on the project (`local_dev_db_allowed`). When it is refused, the loop
+ * still runs — it just says so once, up front, instead of at the first request.
  */
 async function runLocalDev(opts: { project?: string; port?: string; check?: boolean; open?: boolean }) {
   try {
@@ -277,6 +282,15 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
     spinner.fail('Could not start');
     error(err instanceof Error ? err.message : String(err));
     process.exit(1);
+  }
+
+  // Said ONCE, after the loop is known to be startable and before the first
+  // request — never on every save, and never a reason not to serve. Placed
+  // after the start-failure handler above precisely so it cannot become one.
+  const dbNotice = localDevDbNotice(state.localDevDbAllowed, state.localDevDbPlans);
+  if (dbNotice) {
+    warn(dbNotice[0]);
+    for (const line of dbNotice.slice(1)) info(dim(line));
   }
 
   const latencies: number[] = [];
@@ -392,6 +406,48 @@ async function runLocalRuntime(opts: { project?: string; port?: string; check?: 
     error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
+}
+
+/**
+ * The one line `somewhere dev` prints at startup when this plan cannot reach
+ * the project database from the local loop — and `null`, meaning print nothing,
+ * in every other case.
+ *
+ * Why it exists: a blind test on a fresh Free account (2026-09-02) wrote a whole
+ * database-backed app locally before discovering, at the first request, that
+ * every `sw.db` call was refused — and the refusal it eventually saw told it to
+ * redeploy, which never helped. Saying it once, up front, is the difference
+ * between choosing a workflow and debugging a phantom.
+ *
+ * THREE RULES, all deliberate:
+ *   - Only an explicit `false` prints. `null` — an older platform, or a read
+ *     that did not answer — must never print a refusal, because being wrong in
+ *     that direction tells a working account its loop is broken.
+ *   - It NEVER stops the loop. The frontend still compiles and serves, hot
+ *     reload still works, `sw.fs` / `sw.ai` / `sw.auth` still call the real
+ *     project, and every function that does not touch the database still runs.
+ *     A dead loop would be a worse outcome than the silence it replaces.
+ *   - The plan names come from the platform (`local_dev_db_required_plans`),
+ *     never from a list typed here — so the day the entitlement changes, this
+ *     line changes with it and no CLI release is required.
+ */
+export function localDevDbNotice(
+  allowed: boolean | null,
+  plans: readonly string[] = [],
+): string[] | null {
+  if (allowed !== false) return null;
+  const named = plans.length > 0
+    ? ` It is included on the ${plans
+        .map((p) => (p.length === 0 ? p : p[0].toUpperCase() + p.slice(1)))
+        .reduce((acc, name, i, all) => (i === 0
+          ? name
+          : `${acc}${i === all.length - 1 ? ' and ' : ', '}${name}`), '')} plan${plans.length === 1 ? '' : 's'}.`
+    : '';
+  return [
+    `This plan does not include reaching the project database from \`somewhere dev\`.${named}`,
+    'Serving, hot reload and every function that does not touch the database work normally here.',
+    'Deploying is unaffected on every plan: `somewhere deploy` publishes to production and the deployed app reads and writes the database normally.',
+  ];
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =

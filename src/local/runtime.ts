@@ -72,6 +72,13 @@ export interface LocalProjectState {
   /** Keys resolved locally (from .env/.env.local/shell). */
   localEnvKeys: string[];
   routes: LocalRoute[];
+  /** May this account's LOCAL loop read and write the project database?
+   *  `null` means the platform did not say — an older platform, or a read that
+   *  did not return the field. Never treated as a refusal. */
+  localDevDbAllowed: boolean | null;
+  /** Plan names that include it, as the platform states them. Empty when the
+   *  platform did not say. The CLI never hard-codes a plan list of its own. */
+  localDevDbPlans: string[];
 }
 
 interface EnvKeyRow {
@@ -119,7 +126,12 @@ export async function prepareLocalProject(
   cwd: string,
 ): Promise<LocalProjectState> {
   const [project, envResult, scopesResult] = await Promise.all([
-    client.call<{ id: string; subdomain: string }>(
+    client.call<{
+      id: string;
+      subdomain: string;
+      local_dev_db_allowed?: boolean;
+      local_dev_db_required_plans?: string[];
+    }>(
       'GET',
       `/projects/${encodeURIComponent(projectId)}`,
     ),
@@ -174,6 +186,12 @@ export async function prepareLocalProject(
     missingEnvKeys,
     localEnvKeys: Object.keys(values),
     routes,
+    localDevDbAllowed: typeof project.local_dev_db_allowed === 'boolean'
+      ? project.local_dev_db_allowed
+      : null,
+    localDevDbPlans: Array.isArray(project.local_dev_db_required_plans)
+      ? project.local_dev_db_required_plans.filter((p): p is string => typeof p === 'string')
+      : [],
   };
 }
 
