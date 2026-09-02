@@ -30,15 +30,19 @@ export interface BrowserResult {
   failed_requests?: unknown[];
   steps?: BrowserStepResult[];
   /** A screenshot is a bare path string (legacy) OR an object. In VERIFY mode
-   *  it carries `fs_path` (durable project file); in EYES mode it carries either
-   *  `inline_base64` (the image bytes — not renderable in a terminal) or, with
-   *  --store, a short-TTL `scratch_url` (+ `scratch_expires_at`). */
+   *  it carries `fs_path` (where the file lives) plus `url` (a short-lived link
+   *  that opens it); in EYES mode it carries either `inline_base64` (the image
+   *  bytes — not renderable in a terminal) or, with --store, a short-TTL
+   *  `scratch_url` (+ `scratch_expires_at`). */
   screenshots?: Array<
     | string
     | {
         label?: string;
         path?: string;
+        /** A link that OPENS the stored image. `fs_path` is where the file
+         *  lives; this is what you fetch to see it. Short-lived. */
         url?: string;
+        url_expires_at?: string;
         fs_path?: string;
         inline_base64?: string;
         scratch_url?: string;
@@ -241,9 +245,21 @@ export function formatBrowserReport(
       // EYES mode + --store: a short-TTL signed link to the full-res image.
       const exp = shot.scratch_expires_at ? dim(` (expires ${shot.scratch_expires_at})`) : '';
       lines.push(`screenshot: ${label}${shot.scratch_url}${exp}`);
-    } else if (shot.fs_path ?? shot.path ?? shot.url) {
-      // VERIFY mode: a durable project file path (or a legacy path/url).
-      lines.push(`screenshot: ${label}${shot.fs_path ?? shot.path ?? shot.url}`);
+    } else if (shot.url ?? shot.fs_path ?? shot.path) {
+      // VERIFY mode: the image is a file in the project. Lead with the link
+      // that OPENS it — a bare storage path reads like a URL and is not one,
+      // so the value the command handed back for "here is your screenshot"
+      // could not be used to see it (tsk_70fd0f63a9). The stored path follows,
+      // because that is the durable handle for reading or replacing it later.
+      const openable = shot.url ?? shot.path;
+      const stored = shot.fs_path;
+      if (openable && stored) {
+        const exp = shot.url_expires_at ? dim(` (link expires ${shot.url_expires_at})`) : '';
+        lines.push(`screenshot: ${label}${openable}${exp}`);
+        lines.push(`screenshot_file: ${label}${stored}`);
+      } else {
+        lines.push(`screenshot: ${label}${openable ?? stored}`);
+      }
     } else if (shot.inline_base64) {
       // EYES mode default: the image came back inline. A terminal can't render
       // it — say it was captured and point at the ways to actually view it.
@@ -373,7 +389,7 @@ export function registerBrowser(program: Command) {
     .option('--viewport <size>', 'desktop (default) or mobile.')
     .option(
       '--store',
-      'EYES mode only: store the screenshot in an ephemeral, self-expiring scratch store and print a short-lived signed URL (plus its expiry) instead of an inline capture. Ignored with a project.',
+      'EYES mode only (no project): store the screenshot in an ephemeral, self-expiring scratch store and print a short-lived link instead of an inline capture. With a project the screenshot is saved into the project files and the report already prints a link that opens it, so this flag is not needed there.',
     )
     .option(
       '--include <sections>',

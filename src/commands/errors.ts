@@ -9,18 +9,30 @@ interface ErrorRow {
   status_code?: number | null;
   error_code?: string | null;
   error_message?: string | null;
+  /** Did the code CHOOSE this outcome? A handler that answers 401 to a
+   *  signed-out request is working; an uncaught throw is not. Older platform
+   *  versions do not send this — an absent value is treated as an exception,
+   *  which is what the view assumed about everything before. */
+  kind?: 'exception' | 'refusal' | null;
   created_at: string;
 }
+
+/** A refusal the app chose, as opposed to something that broke. */
+const isRefusal = (r: ErrorRow): boolean => r.kind === 'refusal';
 
 export function registerErrors(program: Command) {
   program
     .command('errors [project]')
     .description(
-      'Show the most recent exceptions for a project — the curated 24h error ' +
-        'view (endpoint, status, error, time). The fastest way to see what is ' +
-        'breaking in production without digging through raw logs.',
+      'Show what recently went wrong in a project — the curated 24h view ' +
+        '(endpoint, status, error, time). The fastest way to see what is ' +
+        'breaking in production without digging through raw logs. Rows are ' +
+        'split into EXCEPTIONS (nobody chose it — an uncaught throw or a 5xx) ' +
+        'and REFUSALS (your handler answered 4xx on purpose, e.g. a 401 from ' +
+        'your own auth gate). Use --exceptions to see only what broke.',
     )
     .option('--limit <n>', 'Max rows to show (default 20, max 100)', '20')
+    .option('--exceptions', 'Show only exceptions — hide the 4xx your own handlers returned on purpose.')
     .option('--json', 'Print the raw rows as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const client = new ApiClient(getToken());
@@ -55,12 +67,21 @@ export function registerErrors(program: Command) {
         process.exit(1);
       }
 
+      const refusals = rows.filter(isRefusal).length;
+      if (opts.exceptions) rows = rows.filter((r) => !isRefusal(r));
+
       if (opts.json) {
         console.log(JSON.stringify(rows, null, 2));
         return;
       }
 
       if (!rows.length) {
+        // A window with nothing but refusals is a healthy window — say what is
+        // actually there rather than reporting a bare zero.
+        if (refusals && opts.exceptions) {
+          console.log(dim(`  Nothing broke in the recent window. 🎉 (${refusals} request${refusals === 1 ? '' : 's'} your app refused on purpose — drop --exceptions to see them.)`));
+          return;
+        }
         console.log(dim('  No errors in the recent window. 🎉'));
         return;
       }
@@ -72,11 +93,19 @@ export function registerErrors(program: Command) {
         const what = r.error_code && r.error_code !== 'FUNCTION_ERROR'
           ? `${r.error_code}: ${truncate(r.error_message)}`
           : truncate(r.error_message);
-        return [statusStr, where, what, timeAgo(r.created_at)];
+        // A 401 your own handler returned is your auth gate working. Calling it
+        // an exception is what made this view fill with normal traffic on any
+        // app with a login.
+        const kind = isRefusal(r) ? dim('refused') : 'exception';
+        return [kind, statusStr, where, what, timeAgo(r.created_at)];
       });
 
-      table(['Status', 'Endpoint', 'Error', 'When'], tableRows);
-      console.log(dim(`\n  ${rows.length} error${rows.length === 1 ? '' : 's'} — ${teal('somewhere logs --level error')} for full detail.`));
+      table(['Kind', 'Status', 'Endpoint', 'Error', 'When'], tableRows);
+      const exceptions = rows.length - rows.filter(isRefusal).length;
+      const counts = opts.exceptions
+        ? `${rows.length} exception${rows.length === 1 ? '' : 's'}`
+        : `${exceptions} exception${exceptions === 1 ? '' : 's'}, ${refusals} refused on purpose`;
+      console.log(dim(`\n  ${counts} — ${teal('somewhere logs --level error')} for full detail.`));
     });
 }
 
