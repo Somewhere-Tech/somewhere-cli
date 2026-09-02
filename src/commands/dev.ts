@@ -120,12 +120,13 @@ export function registerPreview(program: Command) {
   program
     .command('preview')
     .description(
-      'Run your app on the platform instead of your machine. Every save goes to a private URL: '
-        + 'the same build and the same data as production, reachable only by you until you share the link. '
-        + 'Nothing your users see changes — production keeps serving what you last promoted, until you run '
-        + '`somewhere promote`. Reach for this when you want the real hosted app in front of you, or when '
-        + 'your agent reaches the platform over MCP and cannot serve on localhost. '
-        + 'Available on the Pro and Scale plans; `somewhere dev` runs the same app on your machine on every plan.',
+      'Run your app on the platform instead of your machine. Every save goes to a private URL, '
+        + 'reachable only by you until you share the link. The build is the one production would get; '
+        + 'the database is a separate copy of your schema, so nothing you try here can touch production '
+        + 'rows. Nothing your users see changes — production keeps serving what you last promoted, until '
+        + 'you run `somewhere promote`. Reach for this when you want the real hosted app in front of you, '
+        + 'or when your agent reaches the platform over MCP and cannot serve on localhost. '
+        + 'Available on the Pro and Scale plans; `somewhere dev` runs the app on your machine on every plan.',
     )
     .option('--project <id>', 'Override project ID')
     .action(async (opts: { project?: string }) => {

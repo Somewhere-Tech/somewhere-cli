@@ -240,12 +240,14 @@ There are two loops, and they are named after where the app runs.
 `somewhere dev` runs it on your machine. `somewhere preview` runs it on the
 platform.
 
-`somewhere preview` sends every save to a private URL — the same build and the
-same data as production, reachable only by you until you share the link. After
-each update it prints that URL and the `somewhere promote` command that makes
-those exact bytes live. Reach for it when you want a URL to send someone, or
-when the agent doing the work reaches the platform over MCP and has no local
-machine to serve from.
+`somewhere preview` sends every save to a private URL, reachable only by you
+until you share the link. The build is the one production would get. The
+database is a separate copy of your schema with none of your production rows,
+so nothing you try in a preview can touch real data. After each update the
+command prints that URL and the `somewhere promote` command that makes those
+exact bytes live. Reach for it when you want a URL to send someone, or when the
+agent doing the work reaches the platform over MCP and has no local machine to
+serve from.
 
 Nothing your users see changes while you preview. Production keeps serving what
 you last promoted.
