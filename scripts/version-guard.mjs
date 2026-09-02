@@ -8,6 +8,14 @@ export const RELEASE_INPUTS = [
   'bin',
   'package.json',
   'npm-shrinkwrap.json',
+  // The vendored platform code (tsk_09340fe1). runtime/ is in package.json
+  // "files", so the compiler `somewhere dev` builds with and the function
+  // runtime a customer's api/ handlers execute against BOTH ship to npm from
+  // here. A re-vendor is one of the most behaviour-changing commits this repo
+  // can take; without it listed, changing only runtime/ read as "in sync" and
+  // the corrected runtime sat on master, published to nobody.
+  'runtime',
+  'scripts/extract-runtime.mjs',
 ];
 
 function gitResult(args, cwd = process.cwd()) {

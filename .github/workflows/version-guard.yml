@@ -30,6 +30,11 @@ on:
       - 'bin/**'
       - 'package.json'
       - 'npm-shrinkwrap.json'
+      # Vendored platform code ships to npm too, so a re-vendor is a release
+      # (tsk_09340fe1). Without these a runtime-only push did not even trigger
+      # this workflow.
+      - 'runtime/**'
+      - 'scripts/extract-runtime.mjs'
       - 'scripts/version-guard.mjs'
       - '.github/workflows/version-guard.yml'
 
