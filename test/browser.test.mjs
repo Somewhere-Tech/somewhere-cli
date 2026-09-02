@@ -93,9 +93,67 @@ test('buildBrowserBody: action flags compile to an ordered steps array', () => {
   assert.equal(body.viewport, 'mobile');
 });
 
-test('buildBrowserBody: --snapshot is display-only (not a step)', () => {
+test('buildBrowserBody: --snapshot is not a step', () => {
   const body = buildBrowserBody('https://example.com', { snapshot: true });
   assert.equal('steps' in body, false);
+});
+
+// `--snapshot` PRINTS the interactive-element map, so it has to ASK for it. The
+// map is an opt-in section; without this the flag rendered whatever the
+// response happened to carry, which was nothing — `--wait button --snapshot`
+// matched a button and then printed "dom: 0 interactive elements" on a page
+// with three of them (tsk_bdd72f02c2).
+test('buildBrowserBody: --snapshot requests the DOM section', () => {
+  assert.deepEqual(buildBrowserBody('https://example.com', { snapshot: true }).include, ['dom']);
+});
+
+test('buildBrowserBody: --snapshot requests the DOM section alongside steps', () => {
+  const body = buildBrowserBody('https://example.com', { snapshot: true, wait: 'button' });
+  assert.deepEqual(body.steps, [{ action: 'wait_for', selector: 'button' }]);
+  assert.deepEqual(body.include, ['dom']);
+});
+
+test('buildBrowserBody: --snapshot merges with --include without duplicating', () => {
+  const body = buildBrowserBody('https://example.com', { snapshot: true, include: 'network, dom' });
+  assert.deepEqual(body.include, ['network', 'dom']);
+});
+
+test('buildBrowserBody: without --snapshot the DOM section stays opt-in', () => {
+  assert.equal('include' in buildBrowserBody('https://example.com', { wait: 'button' }), false);
+});
+
+// A stored screenshot came back as a storage path alone. Read as a URL — the
+// only thing a path in a report looks like — it is not one, so the single value
+// the command handed back for "here is your screenshot" could not be used to
+// see the screenshot (tsk_70fd0f63a9). Lead with the link; keep the stored path
+// on its own line, because that is the durable handle for reading or replacing
+// the file later.
+test('formatBrowserReport: a stored screenshot prints a link that opens it', () => {
+  const lines = formatBrowserReport({
+    screenshots: [
+      {
+        label: 'page',
+        fs_path: '/_browser_tests/run-1/00-step-1.jpg',
+        url: 'https://api.somewhere.tech/v1/fs-signed/tok',
+        url_expires_at: '2026-09-02T09:00:00.000Z',
+      },
+    ],
+  });
+  const shot = lines.find((l) => l.startsWith('screenshot:'));
+  assert.match(shot, /https:\/\/api\.somewhere\.tech\/v1\/fs-signed\/tok/);
+  assert.match(shot, /link expires 2026-09-02T09:00:00\.000Z/);
+  assert.ok(
+    lines.some((l) => l === 'screenshot_file: page — /_browser_tests/run-1/00-step-1.jpg'),
+    `the stored path is still reported: ${JSON.stringify(lines)}`,
+  );
+});
+
+test('formatBrowserReport: with no link the stored path is still reported', () => {
+  const lines = formatBrowserReport({
+    screenshots: [{ label: 'page', fs_path: '/_browser_tests/run-1/00-step-1.jpg' }],
+  });
+  assert.ok(lines.includes('screenshot: page — /_browser_tests/run-1/00-step-1.jpg'));
+  assert.equal(lines.some((l) => l.startsWith('screenshot_file:')), false);
 });
 
 test('buildBrowserBody: --store forwards store:true (EYES mode)', () => {

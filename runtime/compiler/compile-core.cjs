@@ -465,6 +465,8 @@ const TOOLCHAIN_DEPS = new Set(['react-scripts', 'react-app-rewired', 'craco', '
  * GRANDFATHER: the full resolvability chain (build root → IMAGE_NODE_MODULES →
  * REACT19_NODE_MODULES → NODE_POLYFILLS → node: prefix → relative/URL paths)
  * mirrors exactly what esbuild can resolve, so a working import NEVER warns.
+ * Platform-provided specifiers (PLATFORM_MODULE_ROOTS) are exempt on top of
+ * that: they are not npm packages, so no resolution chain would ever find them.
  */
 
 /**
@@ -496,6 +498,18 @@ function specRootPkg(spec) {
     ? spec.split('/').slice(0, 2).join('/')
     : spec.split('/')[0];
 }
+
+/**
+ * Root packages the PLATFORM provides — derived from typed-functions'
+ * PLATFORM_MODULES, which is also what builds the virtual-module resolver, so
+ * this can never drift into a stale hand list.
+ *
+ * These are not npm packages. Reporting one as "not in your package.json" told
+ * a developer that the `somewhere/db` import our own managed-schema docs handed
+ * them would fail to load in production, and the remediation it offered —
+ * `npm install somewhere` — installs an unrelated package (tsk_53badecfb7).
+ */
+const PLATFORM_MODULE_ROOTS = new Set(typedFunctions.PLATFORM_MODULES.map(specRootPkg));
 
 /* ─── Dependency review (PR1, tsk_35befef9 / npm supply-chain) ────────────────
  * After deps are installed (with --ignore-scripts), walk the customer's RESOLVED
@@ -979,6 +993,10 @@ function isBuildConfigFile(filePath) {
         // (aliases like `@/App` have no npm-style root package).
         if (isAliased(spec)) continue;
         const rootPkg = specRootPkg(spec);
+        // PROVIDED BY THE PLATFORM (`somewhere/db`, `somewhere:api`, …). Not npm
+        // packages, so "add it to your package.json" is wrong advice on code our
+        // own docs hand the developer (tsk_53badecfb7).
+        if (PLATFORM_MODULE_ROOTS.has(rootPkg)) continue;
         // DECLARED in devDependencies. ensureDeps deliberately installs only
         // `dependencies` (the build toolchain is the platform's job, not the
         // app's), so a devDependency is never resolvable here — but it IS

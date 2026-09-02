@@ -6,7 +6,32 @@ const path = require('path');
 
 const SENTINEL = 'somewhere:v1';
 const MODULE_NAME = 'somewhere:api';
+// Managed-schema helper surface, imported by db/schema.ts. That file is DATA
+// the deploy reads statically — never executed, never bundled — so no resolver
+// ever claims this specifier and, to anything that only asks "can esbuild
+// resolve it", it can only ever look like a missing npm package.
+const SCHEMA_MODULE_NAME = 'somewhere/db';
 const MANIFEST_PATH = '_internal/typed-functions.json';
+
+/**
+ * PLATFORM_MODULES — the ONE enumeration of module specifiers the PLATFORM
+ * provides. These are not npm packages and must never be added to a customer's
+ * package.json: `npm install somewhere` installs an unrelated package off the
+ * public registry, or fails.
+ *
+ * Everything that needs to know "is this specifier ours?" reads THIS list, so
+ * there is no second hand-maintained copy to drift:
+ *   - virtualApiPlugin below builds its esbuild onResolve filter from
+ *     MODULE_NAME, so the resolver and this list cannot disagree;
+ *   - the compiler's phantom-import scanner (compile-core.cjs) treats the root
+ *     package of every entry here as provided, which is what stops the CLI
+ *     telling a developer that our own documented `somewhere/db` import is a
+ *     missing dependency (tsk_53badecfb7).
+ *
+ * Matching downstream is on the ROOT package, so `somewhere/<anything>` — every
+ * present and future subpath surface — is covered by the `somewhere/db` entry.
+ */
+const PLATFORM_MODULES = Object.freeze([MODULE_NAME, SCHEMA_MODULE_NAME]);
 const AMBIENT_FILE = '__somewhere_typed_functions.d.ts';
 const CLIENT_FILE = '__somewhere_api.d.ts';
 
@@ -524,7 +549,10 @@ function virtualApiPlugin(esbuild) {
   return {
     name: 'somewhere-typed-api',
     setup(build) {
-      build.onResolve({ filter: /^somewhere:api$/ }, () => ({ path: MODULE_NAME, namespace: 'somewhere-typed-api' }));
+      // Filter derived from MODULE_NAME so the resolver and PLATFORM_MODULES
+      // cannot drift apart.
+      const filter = new RegExp(`^${MODULE_NAME.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}$`);
+      build.onResolve({ filter }, () => ({ path: MODULE_NAME, namespace: 'somewhere-typed-api' }));
       build.onLoad({ filter: /.*/, namespace: 'somewhere-typed-api' }, () => ({ contents: RUNTIME_SOURCE, loader: 'js' }));
     },
   };
@@ -535,7 +563,9 @@ module.exports = {
   CLIENT_FILE,
   MANIFEST_PATH,
   MODULE_NAME,
+  PLATFORM_MODULES,
   RUNTIME_SOURCE,
+  SCHEMA_MODULE_NAME,
   SENTINEL,
   analyzeTypedFunctions,
   buildDeclaration,

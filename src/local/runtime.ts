@@ -22,6 +22,7 @@ import { dirname, join, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { ApiClient } from '../lib/client.js';
 import { IGNORE } from '../lib/files.js';
+import { fallbackProjectServingUrl } from '../lib/project-urls.js';
 import { compileRoutes, matchRoute, type LocalRoute } from './router.js';
 import { entryUrl } from './loader.js';
 import { loadLocalEnv } from './envfile.js';
@@ -79,9 +80,41 @@ interface EnvKeyRow {
   scope?: string;
 }
 
+/**
+ * One row of GET /db/scopes. `intent` is what the platform PROVED about the
+ * table — user-owned, shared, server-only, or membership-joined — and it is
+ * what the structured query API (`sw.db.from` and friends) asks for before it
+ * will compose any SQL. Reading only `owner_column` and dropping the intent is
+ * why a `shared()` table came back locally as "this table has no declared
+ * intent" while working perfectly on the same deployed project
+ * (tsk_a21bc829).
+ */
+/**
+ * Env values the platform provides for a project, resolved for a local run.
+ *
+ * Anything named here is NOT the developer's to supply, so it must never be
+ * reported as a value they forgot. Keep this to keys the platform genuinely
+ * writes on their behalf — a key the developer owns belongs in their .env, and
+ * silently inventing a value for one would be worse than the warning.
+ */
+export function platformProvidedEnv(
+  ctx: { localOrigin?: string; subdomain?: string | null },
+): Record<string, string> {
+  const appUrl = ctx.localOrigin ?? fallbackProjectServingUrl({ subdomain: ctx.subdomain ?? null });
+  return appUrl ? { APP_URL: appUrl } : {};
+}
+
 interface ScopeRow {
   table: string;
-  owner_column: string;
+  owner_column: string | null;
+  intent?: 'scoped' | 'shared' | 'server_only' | 'member';
+}
+
+interface ScopesResponse {
+  scopes?: ScopeRow[];
+  /** 'visitor' when owner() resolves to a stable anonymous visitor for
+   *  signed-out requests, which changes who owns a row. */
+  owner_identity_mode?: string;
 }
 
 /** Walk the project dir and return every function-routable source file. */
@@ -117,6 +150,7 @@ export async function prepareLocalProject(
   token: string,
   projectId: string,
   cwd: string,
+  opts: { localOrigin?: string } = {},
 ): Promise<LocalProjectState> {
   const [project, envResult, scopesResult] = await Promise.all([
     client.call<{ id: string; subdomain: string }>(
@@ -127,8 +161,8 @@ export async function prepareLocalProject(
       project_id: projectId,
     }),
     client
-      .call<{ scopes?: ScopeRow[] }>('GET', '/db/scopes', undefined, { project_id: projectId })
-      .catch(() => ({ scopes: [] as ScopeRow[] })),
+      .call<ScopesResponse>('GET', '/db/scopes', undefined, { project_id: projectId })
+      .catch(() => ({ scopes: [] as ScopeRow[] }) as ScopesResponse),
   ]);
 
   const remoteKeys = (envResult.keys ?? envResult.vars ?? []).map((k) => k.key);
@@ -143,11 +177,36 @@ export async function prepareLocalProject(
   for (const [key, value] of Object.entries(localFileEnv)) {
     if (!(key in values)) values[key] = value;
   }
+  // Keys the PLATFORM sets, not the developer. APP_URL is written by deploy
+  // and holds wherever the app is being served; the developer never authored
+  // it, so reporting it back as one of THEIR missing values sent a first-time
+  // user off to write a .env entry for a variable that is not theirs, and
+  // devalued every real warning beside it (tsk_6a2a09bc5d).
+  //
+  // Locally the answer is knowable: the app is being served right here. Fill it
+  // with the local origin when there is one, and otherwise with the project's
+  // public URL — which is what the platform fills it with, and what run_code
+  // already does for the same key.
+  for (const [key, value] of Object.entries(
+    platformProvidedEnv({ localOrigin: opts.localOrigin, subdomain: project.subdomain }),
+  )) {
+    if (remoteKeys.includes(key) && !(key in values)) values[key] = value;
+  }
+
   const missingEnvKeys = remoteKeys.filter((k) => !(k in values));
 
+  // The scope bake, mirroring what deploy bakes into a function bundle. Two
+  // maps, and the runtime treats a disagreement between them as a bad bundle:
+  // PROJECT_SCOPES carries an owner column ONLY for a user-owned table, and
+  // every entry in it must have a matching `scoped` intent.
   const scopes: Record<string, string> = {};
+  const intents: Record<string, string> = {};
   for (const s of scopesResult.scopes ?? []) {
-    scopes[s.table.toLowerCase()] = s.owner_column;
+    const table = s.table.toLowerCase();
+    const intent = s.intent ?? (s.owner_column ? 'scoped' : undefined);
+    if (!intent) continue;
+    intents[table] = intent;
+    if (intent === 'scoped' && s.owner_column) scopes[table] = s.owner_column;
   }
 
   // Mirror of the deploy pipeline's bindings (buildFunctionBundle), minus
@@ -162,6 +221,17 @@ export async function prepareLocalProject(
     PROJECT_SCOPES: JSON.stringify(scopes),
     PROJECT_ENV: 'dev',
   };
+  // Baked only when there is something to say, exactly like the deploy bundle:
+  // an absent binding is the runtime's own "nothing declared" default, and
+  // baking an empty map instead would be a different statement.
+  if (Object.keys(intents).length > 0) {
+    bindings.PROJECT_TABLE_INTENTS = JSON.stringify(intents);
+  }
+  // Who owns a row on a signed-out request. Baked only for 'visitor', matching
+  // deploy — an absent binding reads as 'authenticated'.
+  if (scopesResult.owner_identity_mode === 'visitor') {
+    bindings.PROJECT_OWNER_IDENTITY_MODE = 'visitor';
+  }
 
   const files = collectFunctionFiles(cwd);
   const routes = compileRoutes(files);

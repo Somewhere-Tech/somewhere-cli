@@ -1,6 +1,8 @@
+import { resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
+import { isLoopbackUrl, runLocalBrowser, type LocalBrowserReport } from '../local/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
 
 /** The browser run drives a real headless session server-side (navigate +
@@ -28,15 +30,19 @@ export interface BrowserResult {
   failed_requests?: unknown[];
   steps?: BrowserStepResult[];
   /** A screenshot is a bare path string (legacy) OR an object. In VERIFY mode
-   *  it carries `fs_path` (durable project file); in EYES mode it carries either
-   *  `inline_base64` (the image bytes — not renderable in a terminal) or, with
-   *  --store, a short-TTL `scratch_url` (+ `scratch_expires_at`). */
+   *  it carries `fs_path` (where the file lives) plus `url` (a short-lived link
+   *  that opens it); in EYES mode it carries either `inline_base64` (the image
+   *  bytes — not renderable in a terminal) or, with --store, a short-TTL
+   *  `scratch_url` (+ `scratch_expires_at`). */
   screenshots?: Array<
     | string
     | {
         label?: string;
         path?: string;
+        /** A link that OPENS the stored image. `fs_path` is where the file
+         *  lives; this is what you fetch to see it. Short-lived. */
         url?: string;
+        url_expires_at?: string;
         fs_path?: string;
         inline_base64?: string;
         scratch_url?: string;
@@ -87,10 +93,10 @@ const looksLikeUrl = (s?: string): boolean => !!s && /^https?:\/\//i.test(s);
  * Target precedence: an explicit --url (or a positional that looks like a URL)
  * becomes `url`; otherwise --project (or a non-URL positional, then the linked
  * project) becomes `project_id`. The action flags compile to an ordered `steps`
- * array (goto → wait_for → eval → screenshot). `--snapshot` is display-only
- * (the DOM map is always returned) so it is NOT a step here. `--store` (EYES
- * mode: get a scratch signed URL instead of an inline shot) and `--include`
- * (opt-in `network`/`dom` sections) forward the matching request params.
+ * array (goto → wait_for → eval → screenshot). `--snapshot` is not a step — it
+ * prints the DOM map — but the map is an opt-in section, so it adds `dom` to
+ * `include`. `--store` (EYES mode: get a scratch signed URL instead of an
+ * inline shot) and `--include` forward the matching request params.
  */
 export function buildBrowserBody(
   target: string | undefined,
@@ -116,12 +122,18 @@ export function buildBrowserBody(
 
   if (opts.viewport) body.viewport = opts.viewport;
   if (opts.store) body.store = true;
-  // Opt-in heavy sections for a no-steps inspect call. Split the CSV, trim, and
-  // drop empties; the worker filters to the known section names.
-  if (opts.include) {
-    const sections = opts.include.split(',').map((s) => s.trim()).filter(Boolean);
-    if (sections.length) body.include = sections;
-  }
+  // Opt-in heavy sections. Split the CSV, trim, and drop empties; the worker
+  // filters to the known section names.
+  const sections = new Set(
+    (opts.include ?? '').split(',').map((s) => s.trim()).filter(Boolean),
+  );
+  // `--snapshot` PRINTS the interactive-element map, so it has to ASK for it.
+  // The DOM map is an opt-in section; without this the flag rendered whatever
+  // the response happened to carry, which was nothing — `--wait button
+  // --snapshot` matched a button and then printed "dom: 0 interactive
+  // elements" on a page with three of them (tsk_bdd72f02c2).
+  if (opts.snapshot) sections.add('dom');
+  if (sections.size) body.include = [...sections];
   // Structured extraction: read the page as clean markdown (feature A).
   if (opts.extract) body.extract = 'markdown';
   // Persistent session: reuse ONE live browser across calls (feature B).
@@ -233,9 +245,21 @@ export function formatBrowserReport(
       // EYES mode + --store: a short-TTL signed link to the full-res image.
       const exp = shot.scratch_expires_at ? dim(` (expires ${shot.scratch_expires_at})`) : '';
       lines.push(`screenshot: ${label}${shot.scratch_url}${exp}`);
-    } else if (shot.fs_path ?? shot.path ?? shot.url) {
-      // VERIFY mode: a durable project file path (or a legacy path/url).
-      lines.push(`screenshot: ${label}${shot.fs_path ?? shot.path ?? shot.url}`);
+    } else if (shot.url ?? shot.fs_path ?? shot.path) {
+      // VERIFY mode: the image is a file in the project. Lead with the link
+      // that OPENS it — a bare storage path reads like a URL and is not one,
+      // so the value the command handed back for "here is your screenshot"
+      // could not be used to see it (tsk_70fd0f63a9). The stored path follows,
+      // because that is the durable handle for reading or replacing it later.
+      const openable = shot.url ?? shot.path;
+      const stored = shot.fs_path;
+      if (openable && stored) {
+        const exp = shot.url_expires_at ? dim(` (link expires ${shot.url_expires_at})`) : '';
+        lines.push(`screenshot: ${label}${openable}${exp}`);
+        lines.push(`screenshot_file: ${label}${stored}`);
+      } else {
+        lines.push(`screenshot: ${label}${openable ?? stored}`);
+      }
     } else if (shot.inline_base64) {
       // EYES mode default: the image came back inline. A terminal can't render
       // it — say it was captured and point at the ways to actually view it.
@@ -264,6 +288,77 @@ export function formatBrowserReport(
   return lines;
 }
 
+/** Layout geometry, matching the hosted browser's two presets. */
+const VIEWPORTS = {
+  desktop: { width: 1280, height: 800 },
+  mobile: { width: 390, height: 844 },
+} as const;
+
+/**
+ * Flags the local half cannot honour, and why. Named individually — a flag
+ * that is silently ignored is worse than one that is refused, because the
+ * report still looks complete.
+ */
+const LOCAL_UNSUPPORTED: Array<{ flag: keyof BrowserOptions; why: string }> = [
+  { flag: 'store', why: 'the scratch store is a platform feature; the local run writes the image to a file with --screenshot' },
+  { flag: 'session', why: 'persistent sessions are kept alive on the platform; a local run is always a fresh browser' },
+  { flag: 'extract', why: 'markdown extraction runs on the platform' },
+];
+
+/**
+ * Run the health check against a page this machine is serving, and print it
+ * with the same formatter the hosted run uses.
+ */
+async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promise<void> {
+  for (const { flag, why } of LOCAL_UNSUPPORTED) {
+    if (opts[flag]) {
+      error(`--${flag} is not available against a local address — ${why}.`);
+      process.exit(1);
+    }
+  }
+  const unsupportedSections = (opts.include ?? '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && s !== 'dom');
+  if (unsupportedSections.length) {
+    error(
+      `--include ${unsupportedSections.join(',')} is not available against a local address — ` +
+        'only the DOM map is collected locally.',
+    );
+    process.exit(1);
+  }
+
+  const viewport = opts.viewport === 'mobile' ? VIEWPORTS.mobile : VIEWPORTS.desktop;
+  let report: LocalBrowserReport;
+  try {
+    report = await runLocalBrowser({
+      url,
+      path: opts.path,
+      wait: opts.wait,
+      eval: opts.eval,
+      // No project is involved, so there is nowhere on the platform to store
+      // the image; write it beside the developer instead.
+      screenshotPath: opts.screenshot ? resolve('somewhere-browser.jpg') : undefined,
+      viewport,
+      timeoutMs: BROWSER_TIMEOUT_MS,
+    });
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const shaped: BrowserResult = report;
+  if (opts.json) {
+    console.log(JSON.stringify(shaped, null, 2));
+    process.exit(browserExitCode(shaped));
+  }
+  console.log(dim(`local browser — this machine, not the platform's`));
+  for (const line of formatBrowserReport(shaped, { snapshot: opts.snapshot })) {
+    console.log(line);
+  }
+  process.exit(browserExitCode(shaped));
+}
+
 export function registerBrowser(program: Command) {
   program
     .command('browser [target]')
@@ -272,6 +367,8 @@ export function registerBrowser(program: Command) {
         'errors, failed requests, JS page errors, and the interactive-element (DOM) map — as ' +
         'grep-able text, not a dumped image. Two modes: EYES (no --project, any public URL — look ' +
         'at / screenshot ANY page) and VERIFY (--project — drive + assert YOUR deployed app). ' +
+        'A localhost / 127.0.0.1 target — the app `somewhere dev` is serving — is driven by the ' +
+        'browser installed on THIS machine, so you can check a page before you deploy it. ' +
         '`target` is a URL (https://…) or a project ref; defaults to the linked project. ' +
         'Add steps with --path / --wait / --eval / --screenshot. ' +
         'Exits non-zero when the page is unhealthy (a step failed, a request failed, or JS threw).',
@@ -292,7 +389,7 @@ export function registerBrowser(program: Command) {
     .option('--viewport <size>', 'desktop (default) or mobile.')
     .option(
       '--store',
-      'EYES mode only: store the screenshot in an ephemeral, self-expiring scratch store and print a short-lived signed URL (plus its expiry) instead of an inline capture. Ignored with a project.',
+      'EYES mode only (no project): store the screenshot in an ephemeral, self-expiring scratch store and print a short-lived link instead of an inline capture. With a project the screenshot is saved into the project files and the report already prints a link that opens it, so this flag is not needed there.',
     )
     .option(
       '--include <sections>',
@@ -323,7 +420,6 @@ export function registerBrowser(program: Command) {
         }
       }
 
-      const client = new ApiClient(getToken());
       const linked = loadProjectConfig()?.project_id;
       const body = buildBrowserBody(target, opts, linked);
 
@@ -333,6 +429,17 @@ export function registerBrowser(program: Command) {
         );
         process.exit(1);
       }
+
+      // A loopback address is served by THIS machine, so the hosted browser —
+      // which runs on the platform, not here — can never reach it. That is why
+      // it refuses one. Answer with the browser on this machine instead, so the
+      // app `somewhere dev` is serving can be checked before it is deployed.
+      if (typeof body.url === 'string' && isLoopbackUrl(body.url)) {
+        await runLocalBrowserCommand(body.url, opts);
+        return;
+      }
+
+      const client = new ApiClient(getToken());
       // The endpoint can only store a screenshot on a project you own.
       if (opts.screenshot && !body.project_id) {
         error('--screenshot needs a project to store the image — pass --project (or a project URL you own).');
