@@ -31,6 +31,7 @@ import { bumpGeneration } from './loader.js';
 import { dispatchRequest, refreshRoutes, type LocalProjectState } from './runtime.js';
 import { CompileFailure, LocalCompiler, resolveDevEntry, type CompileOutput } from './compiler.js';
 import { serveLoopback } from './loopback.js';
+import { formatDatabaseTiming } from './request-timing.js';
 
 const STATIC_MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -411,12 +412,14 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
       let route: string | null = null;
       let response: Response | null = null;
       let handlerError: unknown;
+      let databaseTiming = null;
       if (state) {
         const dispatched = await dispatchRequest(request, state);
         if (dispatched.route) {
           response = dispatched.response;
           route = dispatched.route;
           handlerError = dispatched.error;
+          databaseTiming = dispatched.databaseTiming ?? null;
         }
       }
       if (!response) {
@@ -435,8 +438,9 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
 
       const ms = Date.now() - t0;
       const color = statusColor(response.status);
+      const databaseTimingText = formatDatabaseTiming(databaseTiming);
       console.log(
-        `${dim(stamp())} ${request.method} ${new URL(request.url).pathname} ${color(String(response.status))} ${dim(`${ms}ms`)}${route ? dim(` → ${route}`) : ''}`,
+        `${dim(stamp())} ${request.method} ${new URL(request.url).pathname} ${color(String(response.status))} ${dim(`${ms}ms`)}${databaseTimingText ? dim(` · ${databaseTimingText}`) : ''}${route ? dim(` → ${route}`) : ''}`,
       );
       // A function that threw prints its REAL stack here — this is your own
       // terminal, and a stack you cannot see is a bug you cannot fix.

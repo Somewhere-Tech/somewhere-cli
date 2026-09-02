@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.31.5
+
+### Fixed
+
+- **`somewhere dev` now moves past a busy default port automatically.** If
+  8787 is already in use, the local loop selects the next free port and prints
+  the choice before startup. Passing `--port` remains strict: a busy requested
+  port is an error, and the CLI names the process using it when the operating
+  system can identify one.
+- **Local database requests now explain where their time went.** Each
+  database-backed request in the local loop prints the complete database
+  round-trip beside the request total and includes the database execution time
+  reported by the platform when it is available. Working responses without
+  that field keep working and say that the timing was not reported.
+
 ## 0.31.4
 
 ### Fixed

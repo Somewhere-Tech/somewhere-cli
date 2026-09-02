@@ -27,11 +27,16 @@ import { compileRoutes, matchRoute, type LocalRoute } from './router.js';
 import { entryUrl } from './loader.js';
 import { loadLocalEnv } from './envfile.js';
 import { installTelemetryFilter } from './telemetry-filter.js';
+import { LocalRequestTiming, type DatabaseTimingBreakdown } from './request-timing.js';
 
 // ─── Vendored deployed runtime ──────────────────────────────────────────────
 
 interface PlatformContextModule {
-  buildPlatformContext: (env: Record<string, unknown>, request: Request) => PlatformContext;
+  buildPlatformContext: (
+    env: Record<string, unknown>,
+    request: Request,
+    runtimeFetch?: typeof fetch,
+  ) => PlatformContext;
 }
 
 /** The per-request sw/ctx object. Typed loosely — the vendored runtime owns the shape. */
@@ -346,6 +351,7 @@ export interface DispatchResult {
   route: string | null;
   /** Present when the handler (or context build) threw — for terminal display. */
   error?: unknown;
+  databaseTiming?: DatabaseTimingBreakdown | null;
 }
 
 /**
@@ -404,9 +410,10 @@ export async function dispatchRequest(
   }
 
   const { buildPlatformContext } = await loadVendoredRuntime();
+  const requestTiming = new LocalRequestTiming();
   let ctx: PlatformContext;
   try {
-    ctx = buildPlatformContext(state.bindings, request);
+    ctx = buildPlatformContext(state.bindings, request, requestTiming.fetch as typeof fetch);
     ctx.params = match.params;
     // Swap the plain env object for the fail-loud proxy (see module docs).
     ctx.env = makeEnvProxy(
@@ -435,7 +442,11 @@ export async function dispatchRequest(
         headers: { 'Content-Type': 'application/json' },
       });
     }
-    return { response: attachPendingRefresh(response, ctx), route: match.route.displayPath };
+    return {
+      response: attachPendingRefresh(response, ctx),
+      route: match.route.displayPath,
+      databaseTiming: await requestTiming.finish(),
+    };
   } catch (err) {
     // Deployed runtime hides the message and points at dashboard Logs; local
     // dev puts the real error in the response — it's the developer's terminal.
@@ -447,6 +458,7 @@ export async function dispatchRequest(
       ),
       route: match.route.displayPath,
       error: err,
+      databaseTiming: await requestTiming.finish(),
     };
   }
 }

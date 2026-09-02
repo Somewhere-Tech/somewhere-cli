@@ -18,6 +18,7 @@ import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
 import { startDevServer } from '../local/dev-server.js';
+import { chooseDevPort } from '../local/loopback.js';
 import { ACCEPTED_ENTRY_FORMS, LocalCompiler, resolveDevEntry } from '../local/compiler.js';
 import { readCompileCore } from '../local/compiler-core.js';
 import { loadLocalEnv } from '../local/envfile.js';
@@ -249,9 +250,20 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
   }
 
   const cwd = process.cwd();
-  const port = opts.port ? Number(opts.port) : 8787;
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+  const requestedPort = opts.port ? Number(opts.port) : undefined;
+  if (requestedPort !== undefined && (!Number.isInteger(requestedPort) || requestedPort <= 0 || requestedPort > 65535)) {
     error(`Invalid --port: ${opts.port}`);
+    process.exit(1);
+  }
+  let port: number;
+  try {
+    const choice = await chooseDevPort(requestedPort);
+    port = choice.port;
+    if (choice.movedFrom !== null) {
+      info(`Port ${choice.movedFrom} is busy; using ${choice.port}.`);
+    }
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 

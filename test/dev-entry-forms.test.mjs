@@ -26,6 +26,14 @@ test('a .js entry named by index.html resolves, served as written', () => {
   assert.deepEqual(entry, { kind: 'raw', entry: 'src/main.js' });
 });
 
+test('the reported root-level /app.js layout resolves, served as written', () => {
+  const entry = resolveDevEntry({
+    'index.html': html('/app.js'),
+    'app.js': 'document.body.textContent = "hi";',
+  });
+  assert.deepEqual(entry, { kind: 'raw', entry: 'app.js' });
+});
+
 test('.mjs and .cjs entries resolve the same way', () => {
   for (const ext of ['mjs', 'cjs']) {
     const entry = resolveDevEntry({
@@ -85,6 +93,11 @@ test('index.html naming a file that is not in the directory reports it by name',
   const entry = resolveDevEntry({ 'index.html': html('/src/main.tsx') });
   assert.equal(entry.kind, 'none');
   assert.deepEqual(entry.declared, ['src/main.tsx']);
+});
+
+test('a missing root-level entry reports the path index.html actually names', () => {
+  const entry = resolveDevEntry({ 'index.html': html('/app.js') });
+  assert.deepEqual(entry, { kind: 'none', declared: ['app.js'] });
 });
 
 test('a declared entry missing on disk is refused whatever its extension', () => {
