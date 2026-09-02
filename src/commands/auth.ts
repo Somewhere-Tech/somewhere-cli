@@ -36,7 +36,50 @@ async function readAuthToken(): Promise<string> {
   return typeof response.token === 'string' ? response.token.trim() : '';
 }
 
-async function loginAction(opts: { legacy?: boolean }): Promise<void> {
+/** The account-creation page. `login` sends an existing user through the OAuth
+ *  device flow, which offers no way to create an account — a stranger with no
+ *  Google or GitHub account had no front door from the CLI at all
+ *  (tsk_0e9e13b8). This URL is the one that does. */
+export const SIGNUP_URL = 'https://somewhere.tech/auth?intent=signup';
+
+/** The one line `login` prints so a new user is never stranded, and the line
+ *  `signup` is built around. Kept as data so it can be pinned by a test
+ *  without driving a browser. */
+export const SIGNUP_HINT = `New here? Create an account: ${SIGNUP_URL}`;
+
+/** Everything `somewhere login` prints before it contacts the platform. */
+export function loginIntroLines(): string[] {
+  return [
+    '',
+    '  Login to somewhere.tech',
+    `  ${SIGNUP_HINT}`,
+    '',
+  ];
+}
+
+async function signupAction(): Promise<void> {
+  console.log('');
+  console.log('  Create your somewhere.tech account');
+  console.log('');
+  // Printed as plain text before anything is opened: a headless agent can only
+  // relay a URL it can read.
+  console.log(`  ${teal(SIGNUP_URL)}`);
+  console.log('');
+  console.log("  Opening your browser…  (if it doesn't open, use the URL above)");
+  console.log('');
+  if (!process.env.SOMEWHERE_NO_BROWSER) {
+    await open(SIGNUP_URL).catch(() => {
+      // Browser didn't open — the URL is already printed above
+    });
+  }
+  info(dim('Once your account exists, run: somewhere login'));
+}
+
+async function loginAction(opts: { legacy?: boolean; signup?: boolean }): Promise<void> {
+  if (opts.signup) {
+    await signupAction();
+    return;
+  }
   if (opts.legacy) {
     await runLegacyLogin();
     return;
@@ -47,9 +90,15 @@ async function loginAction(opts: { legacy?: boolean }): Promise<void> {
 export function registerAuth(program: Command) {
   program
     .command('login')
-    .description('Authenticate with somewhere.tech')
+    .description('Authenticate with somewhere.tech (no account yet? run `somewhere signup`)')
     .option('--legacy', 'Use the localhost-callback flow instead of device code')
+    .option('--signup', 'Create a new account instead — opens the sign-up page')
     .action(loginAction);
+
+  program
+    .command('signup')
+    .description('Create a somewhere.tech account — opens the sign-up page and prints its URL')
+    .action(signupAction);
 
   program
     .command('logout')
@@ -148,6 +197,7 @@ export function registerAuth(program: Command) {
     .command('login')
     .description('Authenticate with somewhere.tech (alias of `somewhere login`)')
     .option('--legacy', 'Use the localhost-callback flow instead of device code')
+    .option('--signup', 'Create a new account instead — opens the sign-up page')
     .action(loginAction);
 
   auth
@@ -226,9 +276,7 @@ function installCancelHandler(getSpinner: () => Ora | null): void {
 }
 
 async function runDeviceLogin(): Promise<void> {
-  console.log('');
-  console.log('  Login to somewhere.tech');
-  console.log('');
+  for (const line of loginIntroLines()) console.log(line);
 
   let spinner: Ora | null = null;
   installCancelHandler(() => spinner);
@@ -276,6 +324,7 @@ async function runDeviceLogin(): Promise<void> {
 }
 
 async function runLegacyLogin(): Promise<void> {
+  for (const line of loginIntroLines()) console.log(line);
   const spinner = ora('Waiting for browser login…  (press Ctrl+C to cancel)').start();
   installCancelHandler(() => spinner);
   try {
