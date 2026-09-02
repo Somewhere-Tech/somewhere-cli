@@ -11,7 +11,7 @@ import {
   DeviceCodeUnsupported,
   type DeviceSessionScope,
 } from '../lib/device-login.js';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import {
   clearConfig,
   getToken,
@@ -189,19 +189,22 @@ export function registerAuth(program: Command) {
         if (r.session) {
           info(dim(`session ${r.session.label} · access: ${describeScope(r.session.scope)}`));
         }
-      } catch {
+      } catch (err) {
         // Agents gate on `whoami` to validate the token — a stored-but-dead token
         // must NOT report success. Show the cached identity, then exit non-zero.
+        // A revoked session (dashboard "Revoke", `somewhere logout` elsewhere)
+        // says so in the platform's own words rather than guessing "expired".
+        const revoked = err instanceof CliApiError && err.statusCode === 401 && /revoked/i.test(err.message);
+        const message = revoked
+          ? err.message
+          : 'Could not fetch account details — token may be expired. Run: somewhere login';
         if (opts.json) {
-          printJson({
-            error: 'WHOAMI_FAILED',
-            message: 'Could not fetch account details — token may be expired. Run: somewhere login',
-          });
+          printJson({ error: revoked ? 'SESSION_REVOKED' : 'WHOAMI_FAILED', message });
           process.exitCode = 1;
           return;
         }
         console.log(teal(config.user.email));
-        info(dim('Could not fetch account details — token may be expired. Run: somewhere login'));
+        info(dim(message));
         process.exitCode = 1;
       }
     });
