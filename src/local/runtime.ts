@@ -197,7 +197,7 @@ function makeEnvProxy(
         throw new Error(
           `sw.env.${prop} is set on the platform, but env values can't be fetched over the API. ` +
             `Add ${prop}=... to a .env file in your project root (never deployed) or export it ` +
-            `in your shell, then restart \`somewhere dev --local\`.`,
+            `in your shell, then restart \`somewhere dev\`.`,
         );
       }
       return undefined;

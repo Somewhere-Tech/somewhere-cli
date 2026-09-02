@@ -16,6 +16,10 @@ import { bold, dim, error, green, info, red, success, teal, warn, yellow } from 
 import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
+import { startDevServer } from '../local/dev-server.js';
+import { LocalCompiler, detectBundleEntry } from '../local/compiler.js';
+import { readCompileCore } from '../local/compiler-core.js';
+import { loadLocalEnv } from '../local/envfile.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
@@ -112,36 +116,184 @@ export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
     .description(
-      'Private preview watcher: save a file → your owner-only preview updates in seconds (nothing to prod, no version bump). ' +
-        '--local runs your functions in local Node with sw.* talking to the real project (no deploy in the loop); ' +
-        'it typechecks before starting and on every reload so a dropped import surfaces in the terminal, not as a 500 ' +
-        '(add --check to EXIT on type errors). ' +
-        'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars instead.',
+      'Your app on localhost, compiled by the platform\'s own compiler — so what you see is what deploy ' +
+        'produces, not a lookalike built by a second toolchain. Save a file and the page updates in ' +
+        'milliseconds; api/ functions run in local Node with sw.db/sw.fs/sw.ai/sw.auth calling your ' +
+        'real project. There is no dev version of your app: from the first file you are building the ' +
+        'production app against real data, and this is a faster window onto it. ' +
+        'Same app, same data, same build. ' +
+        '--cloud deploys every save to a shareable private preview URL instead of serving locally. ' +
+        'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
     )
     .option('--project <id>', 'Override project ID')
-    .option('--local', 'Run functions locally; sw.db/sw.fs/sw.ai/sw.auth proxy to the live platform')
-    .option('--port <port>', 'Port for --local (default 8787)')
+    .option(
+      '--cloud',
+      'Deploy every save to a shareable private preview URL instead of serving locally — the loop for an agent that reaches the platform only over MCP',
+    )
+    .option('--port <port>', 'Port to serve on (default 8787)')
+    .option('--open', 'Open the app in your browser once it is serving')
     .option(
       '--check',
-      'With --local: typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning',
+      'Typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning',
     )
+    .option('--local', 'Accepted for compatibility — serving locally is what bare `somewhere dev` already does')
     .action(
       async (
         cmdParts: string[] | undefined,
-        opts: { project?: string; local?: boolean; port?: string; check?: boolean },
+        opts: { project?: string; cloud?: boolean; local?: boolean; port?: string; check?: boolean; open?: boolean },
       ) => {
-        if (opts.local) {
-          return runLocalRuntime(opts);
-        }
-        // A passed command keeps the legacy local-exec behavior (Option B —
-        // run your own server with platform context injected). No command =
-        // the hot-deploy watcher (Option A — the platform's no-localhost answer).
+        // A passed command keeps the legacy local-exec behavior: run YOUR
+        // server with platform context injected.
         if (cmdParts && cmdParts.length > 0) {
           return runLegacyExec(cmdParts);
         }
-        return runHotDeploy(opts);
+        if (opts.cloud) {
+          return runHotDeploy(opts);
+        }
+        return runLocalDev(opts);
       },
     );
+}
+
+/**
+ * The local loop. Compiles the project with the PLATFORM'S compiler (vendored,
+ * drift-guarded — see src/local/compiler.ts), serves it on localhost, and runs
+ * api/ functions in local Node against the real project.
+ *
+ * There is no dev version of your app. From the first file you are building
+ * the production app against real data; this is a faster window onto it.
+ */
+async function runLocalDev(opts: { project?: string; port?: string; check?: boolean; open?: boolean }) {
+  try {
+    assertNodeSupport();
+  } catch (err) {
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const cwd = process.cwd();
+  const port = opts.port ? Number(opts.port) : 8787;
+  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
+    error(`Invalid --port: ${opts.port}`);
+    process.exit(1);
+  }
+
+  const sources = collectFiles(cwd);
+  if (!detectBundleEntry(sources.files)) {
+    error(
+      'No app entry found. index.html needs a <script type="module" src="/src/main.tsx"> pointing at your ' +
+        'app entry — that tag is what the platform compiles, here and on deploy.',
+    );
+    process.exit(1);
+  }
+
+  let projectId = opts.project;
+  let config = loadProjectConfig();
+  if (!projectId) {
+    if (!config) {
+      error('No project linked. Run `somewhere init` or pass --project <id>.');
+      process.exit(1);
+    }
+    projectId = config.project_id;
+  }
+
+  // Node's type STRIPPING runs the functions, so a dropped import sails through
+  // and only crashes at request time. Surface it in the terminal first.
+  //
+  // Not when node_modules is absent, though. tsc then cannot resolve ANY
+  // package types and reports every JSX element as TS7026 — 47 red lines on
+  // the untouched init scaffold, none of them real, burying the two lines that
+  // matter and teaching a first-time developer that this command's type errors
+  // are noise (tsk_8796c588). The local loop's whole promise is that no
+  // install is needed to run; the typecheck simply needs one to be meaningful.
+  const hasModules = existsSync(join(cwd, 'node_modules'));
+  if (existsSync(join(cwd, 'tsconfig.json')) && hasModules) {
+    const spinner = ora('Typechecking (tsc --noEmit)...').start();
+    const result = await runTypecheck(cwd);
+    spinner.stop();
+    reportTypecheck(result);
+    if (!result.ok && opts.check) {
+      error('Type errors found and --check is set — not starting.');
+      process.exit(1);
+    }
+  } else if (opts.check) {
+    error(
+      hasModules
+        ? '--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).'
+        : '--check needs your dependencies installed — without node_modules tsc cannot resolve any package types. Run `npm install` here first.',
+    );
+    process.exit(1);
+  } else if (!hasModules) {
+    info(dim('Typecheck skipped — no node_modules here, so tsc could not resolve your package types. `npm install` enables it.'));
+  }
+
+  const token = getToken();
+  const client = new ApiClient(token);
+  await showProjectNotices(client, projectId);
+
+  let pkg: { dependencies?: Record<string, string> } = {};
+  try {
+    pkg = JSON.parse(sources.files['package.json'] ?? '{}') as { dependencies?: Record<string, string> };
+  } catch {
+    warn('package.json is not valid JSON — compiling with no declared dependencies.');
+  }
+
+  // VITE_*/REACT_APP_* values are compiled INTO the browser bundle, both here
+  // and on deploy. Read them from the same .env the local function runtime
+  // reads, so the bundle sees what a deploy of the same tree would see.
+  const localEnv = loadLocalEnv(cwd);
+
+  const spinner = ora('Preparing the compiler...').start();
+  let prepared = false;
+  const compiler = new LocalCompiler({
+    cwd,
+    viteEnv: localEnv,
+    onPrepare: (what) => {
+      prepared = true;
+      spinner.text = `Resolving ${what}...`;
+    },
+  });
+  let state = null;
+  try {
+    const { detectTailwind } = readCompileCore();
+    await compiler.prepare(pkg, detectTailwind(sources.files));
+    // Functions resolve packages from the SAME search path the compiler used,
+    // so `import { createClient } from '@somewhere-tech/sdk'` works in api/
+    // without a project npm install — the frontend already needed none, and a
+    // loop where only half the app can find its dependencies is worse than one
+    // where neither can (tsk_3269026d).
+    // Functions are optional: a static React app with no api/ still runs.
+    installLoader(cwd, compiler.moduleSearchPath);
+    await loadVendoredRuntime();
+    state = await prepareLocalProject(client, token, projectId, cwd);
+    spinner.stop();
+    if (prepared) success('Compiler ready — cached, so this only happens once.');
+    if (!state.routes.length) state = { ...state, routes: [] };
+  } catch (err) {
+    spinner.fail('Could not start');
+    error(err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const latencies: number[] = [];
+  await startDevServer({
+    port,
+    cwd,
+    compiler,
+    state,
+    onRebuild: (ms) => {
+      latencies.push(ms);
+      if (latencies.length >= 5 && latencies.length % 5 === 0) {
+        const sorted = [...latencies].sort((a, b) => a - b);
+        console.log(
+          dim(`   save → served: median ${sorted[Math.floor(sorted.length / 2)]}ms over ${latencies.length} edits`),
+        );
+      }
+    },
+    onListening: (url) => {
+      if (opts.open) open(url).catch(() => {});
+    },
+  });
 }
 
 async function runLocalRuntime(opts: { project?: string; port?: string; check?: boolean }) {
