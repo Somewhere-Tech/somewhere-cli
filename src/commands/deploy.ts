@@ -51,9 +51,25 @@ export function prebuiltOptIn(opts: {
 const SERVER_FRAMEWORK_DEPS = ['express', 'fastify', 'koa', '@nestjs/core', '@hapi/hapi', 'restify'];
 const SERVER_CODE_PATTERN = /\bapp\.listen\s*\(|\bhttp\.createServer\s*\(|\bfastify\s*\(\s*\)|new\s+Koa\s*\(/;
 const NEXT_APP_SIGNAL_PREFIX = 'Next.js app';
-const NEXT_CONFIG_PATTERN = /^next\.config\.(js|ts|mjs)$/;
-const NEXT_ROUTER_FILE_PATTERN =
-  /^(?:src\/)?(?:app\/(?:.*\/)?(?:page|layout|route|loading|error|not-found)\.(?:js|jsx|ts|tsx|mdx)|pages\/.+\.(?:js|jsx|ts|tsx|mdx))$/;
+// One definition of "this is a Next.js app", matching the platform's own
+// detector (worker/src/utils/nextjs-detect.ts) exactly: a next.config.* file,
+// or `next` in any dependency section. Nothing else.
+//
+// There used to be a third arm matching Next router PATHS (app/page.tsx,
+// pages/**). It was deleted (tsk_8a9d2d1a): `src/pages/HomePage.tsx` is
+// ordinary Vite + React-Router convention, and our OWN `somewhere init`
+// scaffold writes exactly that file — so `somewhere deploy` accused every
+// brand-new project of being a Next.js app on its first ever deploy. A real
+// Next.js app cannot build without `next` in its dependencies, so the arm
+// contributed no true positives, only false ones on the most common React
+// layout there is. Do not re-add it; add a corroborated signal instead.
+const NEXT_CONFIG_PATTERN = /(^|\/)next\.config\.[^/]+$/i;
+const NEXT_DEPENDENCY_SECTIONS = [
+  'dependencies',
+  'devDependencies',
+  'peerDependencies',
+  'optionalDependencies',
+] as const;
 const NEXT_APP_WARNING =
   "somewhere.tech serves static files + serverless functions, not SSR — Next.js apps don't run here. " +
   'Port API routes to functions/ handlers, or start from a Vite React app; the platform compiles raw JSX/TSX on deploy.';
@@ -69,12 +85,12 @@ function detectNextAppShape(files: Record<string, string>): string | null {
   const pkgRaw = files['package.json'];
   if (pkgRaw) {
     try {
-      const pkg = JSON.parse(pkgRaw) as {
-        dependencies?: Record<string, string>;
-        devDependencies?: Record<string, string>;
-      };
-      if (pkg.dependencies?.next || pkg.devDependencies?.next) {
-        return `${NEXT_APP_SIGNAL_PREFIX} (package.json depends on "next")`;
+      const pkg = JSON.parse(pkgRaw) as Record<string, Record<string, string> | undefined>;
+      for (const section of NEXT_DEPENDENCY_SECTIONS) {
+        const deps = pkg[section];
+        if (deps && typeof deps === 'object' && Object.prototype.hasOwnProperty.call(deps, 'next')) {
+          return `${NEXT_APP_SIGNAL_PREFIX} (package.json lists "next" in ${section})`;
+        }
       }
     } catch {
       /* unparseable package.json is someone else's problem */
@@ -83,7 +99,6 @@ function detectNextAppShape(files: Record<string, string>): string | null {
 
   for (const path of Object.keys(files)) {
     if (NEXT_CONFIG_PATTERN.test(path)) return `${NEXT_APP_SIGNAL_PREFIX} (${path})`;
-    if (NEXT_ROUTER_FILE_PATTERN.test(path)) return `${NEXT_APP_SIGNAL_PREFIX} (${path} router file)`;
   }
 
   return null;
@@ -93,10 +108,18 @@ export function detectNodeServerShape(
   files: Record<string, string>,
   functions: Record<string, string>,
 ): string | null {
+  // The Next check deliberately runs BEFORE the functions trust gate below.
+  // Adding platform functions to a Next.js app does not make it deployable —
+  // the pages still will not render — so a corroborated `next` signal is worth
+  // saying even to a project that ships functions, and
+  // `test/deploy-server-shape.test.mjs` pins that on purpose. The scaffold's
+  // false positive (tsk_8a9d2d1a) came from the router-path arm, not from this
+  // ordering, and deleting that arm fixes it with the true positive intact.
   const nextSignal = detectNextAppShape(files);
   if (nextSignal) return nextSignal;
 
   if (Object.keys(functions).length > 0) return null; // has real functions — trust it
+
   const pkgRaw = files['package.json'];
   if (pkgRaw) {
     try {
