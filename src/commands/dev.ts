@@ -29,6 +29,28 @@ const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|
 const DEBOUNCE_MS = 500;
 const RETRYABLE_DRAFT_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
 
+/**
+ * The preview this loop was watching has finished — it was promoted, or closed.
+ *
+ * A promote ends the preview session, but the watcher used to keep running and
+ * keep failing, once per save, with the platform's API-client wording
+ * (tsk_74375b3c). The loop knows perfectly well what happened; it should stop
+ * and say so, not relay a refusal written for a machine.
+ */
+class PreviewFinishedError extends Error {
+  constructor(readonly reason: 'promoted' | 'closed') {
+    super(reason);
+    this.name = 'PreviewFinishedError';
+  }
+}
+
+/** Did the platform just tell us this preview is over? */
+function previewFinishedReason(err: unknown): 'promoted' | 'closed' | null {
+  if (!(err instanceof CliApiError) || err.code !== 'DRAFT_SESSION_TERMINAL') return null;
+  const status = (err.data as { terminal_status?: unknown } | undefined)?.terminal_status;
+  return status === 'promoted' ? 'promoted' : 'closed';
+}
+
 interface DeployResult {
   files?: string[] | number;
   files_deployed?: number;
@@ -116,6 +138,24 @@ export async function callDraftCandidate<T>(
   }
 }
 
+export function registerPreview(program: Command) {
+  program
+    .command('preview')
+    .description(
+      'Run your app on the platform instead of your machine. Every save goes to a private URL, '
+        + 'reachable only by you until you share the link. The build is the one production would get; '
+        + 'the database is a separate copy of your schema, so nothing you try here can touch production '
+        + 'rows. Nothing your users see changes — production keeps serving what you last promoted, until '
+        + 'you run `somewhere promote`. Reach for this when you want the real hosted app in front of you, '
+        + 'or when your agent reaches the platform over MCP and cannot serve on localhost. '
+        + 'Available on the Pro and Scale plans; `somewhere dev` runs the app on your machine on every plan.',
+    )
+    .option('--project <id>', 'Override project ID')
+    .action(async (opts: { project?: string }) => {
+      await runHotDeploy(opts);
+    });
+}
+
 export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
@@ -127,14 +167,11 @@ export function registerDev(program: Command) {
         'production app, and this is a faster window onto it. Same app, same build. ' +
         'Reaching the project DATABASE from the local loop is a plan feature and the command says so ' +
         'once at startup when your plan does not include it; deploying is unaffected on every plan. ' +
-        '--cloud deploys every save to a shareable private preview URL instead of serving locally. ' +
+        'To see the same app running on the platform instead of your machine, use `somewhere preview`. ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
     )
     .option('--project <id>', 'Override project ID')
-    .option(
-      '--cloud',
-      'Deploy every save to a shareable private preview URL instead of serving locally — the loop for an agent that reaches the platform only over MCP',
-    )
+    .option('--cloud', 'Alias for `somewhere preview`')
     .option('--port <port>', 'Port to serve on (default 8787)')
     .option('--open', 'Open the app in your browser once it is serving')
     .option(
@@ -153,6 +190,9 @@ export function registerDev(program: Command) {
           return runLegacyExec(cmdParts);
         }
         if (opts.cloud) {
+          // Pre-launch alias. One line, then the identical loop — no ceremony,
+          // no grandfathering. `preview` is the name.
+          info('This is `somewhere preview`. Use that name — `--cloud` still works for now.');
           return runHotDeploy(opts);
         }
         return runLocalDev(opts);
@@ -455,8 +495,8 @@ export function localDevDbNotice(
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
-  'Private previews (`somewhere dev --cloud`) are available on the Pro and Scale plans. '
-  + 'This account is on a plan that does not include them.';
+  '`somewhere preview` is available on the Pro and Scale plans. '
+  + 'This account is on a plan that does not include it.';
 
 /**
  * Does this account have private previews?
@@ -519,7 +559,7 @@ export async function readActiveReleaseId(projectId: string): Promise<string | n
  * THE ORDER IS THE CONTRACT (tsk_cf48f4ab). A private preview builds a
  * candidate against the project's live version, so a never-published project
  * has nothing to build on and the platform refuses. Publishing once here — out
- * loud, never silently — is what makes `somewhere dev --cloud` work on a brand
+ * loud, never silently — is what makes `somewhere preview` work on a brand
  * new project. But private previews are also a plan feature, and the platform
  * enforces that on the preview request, which is the step AFTER this publish.
  * So the entitlement is read FIRST: an account without private previews is
@@ -608,7 +648,7 @@ async function runHotDeploy(opts: { project?: string }) {
       if (err instanceof CloudDevUnavailableError) {
         error(err.message);
         info('Nothing was created — this project has not been published.');
-        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app locally.');
+        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
         process.exit(1);
       }
       if (!(isBuildError(err) && renderBuildError(err, cwd))) {
@@ -720,6 +760,20 @@ async function runHotDeploy(opts: { project?: string }) {
         candidateReleaseId!,
       );
       if (nextCandidate) candidateReleaseId = nextCandidate;
+    } catch (err) {
+      if (!(err instanceof PreviewFinishedError)) throw err;
+      // One line, in the two words the product uses, naming the next command.
+      // Nothing about how a preview is built reaches this terminal.
+      console.log('');
+      if (err.reason === 'promoted') {
+        success('Promoted — this preview is now your live app, and the preview has finished.');
+      } else {
+        info('This preview has finished.');
+      }
+      info(`Run ${teal('somewhere preview')} to keep previewing.`);
+      if (timer) clearTimeout(timer);
+      await watcher.close().catch(() => {});
+      process.exit(0);
     } finally {
       deploying = false;
       if (pendingChanged.size || pendingDeleted.size) schedule();
@@ -856,6 +910,11 @@ async function deployBatch(
       renderBuildError(err, cwd);
       info(dim('Your last working preview is still up. Fix and save again.'));
       return null;
+    }
+    const finished = previewFinishedReason(err);
+    if (finished) {
+      // Not a failed save — the preview itself is over. The loop stops on it.
+      throw new PreviewFinishedError(finished);
     }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
     error(err instanceof Error ? err.message : String(err));

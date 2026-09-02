@@ -46,7 +46,7 @@ After `somewhere init`, Claude Code and Codex auto-connect via the `.mcp.json` i
 | `somewhere project view [name]` | Show project details |
 | `somewhere project delete <name>` | Delete with email confirmation |
 | `somewhere dev` | Serve your app on localhost, compiled by the platform's own compiler; save a file and the page updates in milliseconds |
-| `somewhere dev --cloud` | Deploy every save to a shareable private preview URL instead of serving locally |
+| `somewhere preview` | Run your app on the platform instead of your machine — every save goes to a private URL, and production is untouched until you promote |
 | `somewhere dev <cmd...>` | Run your own command locally with the project's env vars injected |
 | `somewhere deploy` | Deploy current directory to linked project |
 | `somewhere deploy --dry-run` | Preview the deploy diff without shipping |
@@ -234,24 +234,40 @@ Environment variables come from a `.env` in the project directory. Run
 on the platform), then fill in the ones you want locally. `somewhere dev`
 names any key the project expects that has no local value.
 
-### `--cloud`
+## `somewhere preview`
 
-`somewhere dev --cloud` deploys every save to a shareable private preview URL
-instead of serving locally, and prints the preview capability URL and the
-`somewhere promote` command after each update. Use it when you want a URL to
-send someone, or when the agent doing the work reaches the platform only over
-MCP and has no local machine to serve from. It needs the development
-environment, which is on the Pro and Scale plans and is enabled per account;
-without it the command returns `CLOUD_DEV_NOT_ENABLED`. Serving locally has no
-such requirement, on any plan.
+There are two loops, and they are named after where the app runs.
+`somewhere dev` runs it on your machine. `somewhere preview` runs it on the
+platform.
 
-A private preview is a candidate built against your live version, so a project
-that has never been published has nothing for the first one to build on. On
-such a project `--cloud` publishes once — it says so before it does — and every
+`somewhere preview` sends every save to a private URL, reachable only by you
+until you share the link. The build is the one production would get. The
+database is a separate copy of your schema with none of your production rows,
+so nothing you try in a preview can touch real data. After each update the
+command prints that URL and the `somewhere promote` command that makes those
+exact bytes live. Reach for it when you want a URL to send someone, or when the
+agent doing the work reaches the platform over MCP and has no local machine to
+serve from.
+
+Nothing your users see changes while you preview. Production keeps serving what
+you last promoted.
+
+The URL is single-use and short-lived by design: opening it exchanges it for a
+private session in that browser, and saving a file replaces it with a new one.
+Use the newest URL the command printed. Anyone without a live URL — signed out,
+or signed in as someone else — gets a 404.
+
+A preview is built against your live version, so a project that has never been
+published has nothing for the first one to build on. On such a project
+`somewhere preview` publishes once — it says so before it does — and every
 preview after that stays private to you and never changes what is live.
 
-`somewhere dev --local` is accepted for compatibility and does what bare
-`somewhere dev` does.
+`somewhere preview` is on the Pro and Scale plans. `somewhere dev` runs the same
+app on your machine on every plan, and deploying is unaffected on every plan.
+
+`somewhere dev --cloud` still starts the same loop and points you at the new
+name. `somewhere dev --local` is accepted and does what bare `somewhere dev`
+does.
 
 ### Running your own command
 
