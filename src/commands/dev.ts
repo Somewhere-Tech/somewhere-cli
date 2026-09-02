@@ -138,7 +138,7 @@ export function registerDev(program: Command) {
     .option('--open', 'Open the app in your browser once it is serving')
     .option(
       '--check',
-      'Typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning',
+      'Typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning. Needs `npm install` in this directory — tsc reads package types out of node_modules, which the CLI\'s own dependency cache does not stand in for.',
     )
     .option('--local', 'Accepted for compatibility — serving locally is what bare `somewhere dev` already does')
     .action(
@@ -269,7 +269,9 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
     // Functions are optional: a static React app with no api/ still runs.
     installLoader(cwd, compiler.moduleSearchPath);
     await loadVendoredRuntime();
-    state = await prepareLocalProject(client, token, projectId, cwd);
+    state = await prepareLocalProject(client, token, projectId, cwd, {
+      localOrigin: `http://localhost:${port}`,
+    });
     spinner.stop();
     if (prepared) success('Compiler ready — cached, so this only happens once.');
     if (!state.routes.length) state = { ...state, routes: [] };
@@ -364,7 +366,9 @@ async function runLocalRuntime(opts: { project?: string; port?: string; check?: 
   try {
     installLoader(cwd);
     await loadVendoredRuntime();
-    const state = await prepareLocalProject(client, token, projectId, cwd);
+    const state = await prepareLocalProject(client, token, projectId, cwd, {
+      localOrigin: `http://localhost:${port}`,
+    });
     spinner.stop();
     if (state.routes.length === 0) {
       error(
