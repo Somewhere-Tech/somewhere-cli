@@ -425,6 +425,139 @@ function cleanRange(range) {
   return String(range || '').replace(/^[\^~>=<v\s]+/, '').split(/\s/)[0] || 'latest';
 }
 
+/* ─── Lockfile-derived install pins (tsk_f79d71ce) ────────────────────────────
+ * THE INSTALL SPEC IS OWNED HERE, by the core, so `somewhere dev` and
+ * `somewhere deploy` derive it from the same code and cannot disagree.
+ *
+ * The bug this closes: deploy floor-pinned the declared range (`^7.9.5` → 7.9.5)
+ * while the developer's own machine had 7.18.3 installed from their lockfile, so
+ * the local and deployed entry chunks were built against different library code
+ * — measured on the 0.30.0 journey scaffold, where react-router was the only
+ * package left in the diff. "Same app, same data, same build" was not true.
+ *
+ * THE RULE, both directions:
+ *   - LOCKFILE PRESENT (npm-shrinkwrap.json, else package-lock.json — npm's own
+ *     precedence): a dependency installs at the version the lockfile pins, which
+ *     is exactly what the developer has locally. The pin is only honoured when it
+ *     PROVABLY SATISFIES the range declared in package.json, so a lockfile can
+ *     only ever move the build WITHIN what package.json already allows; an
+ *     out-of-sync lockfile falls back to the floor-pin rather than installing
+ *     something package.json contradicts.
+ *   - NO LOCKFILE: unchanged, and this is the documented rule — third-party deps
+ *     FLOOR-PIN the declared range (`^7.9.5` → 7.9.5), first-party
+ *     `@somewhere-tech/*` pass the range through verbatim so npm resolves the
+ *     latest satisfying version. A project with no lockfile resolves today
+ *     exactly as it did before this change (rule 9).
+ *
+ * WHY `@somewhere-tech/*` IGNORES THE LOCKFILE TOO: pfb_f607d6b27453. Our own
+ * scaffold + `npm install` writes a lockfile within seconds of `somewhere init`,
+ * so honouring it for first-party packages would re-freeze every scaffold on the
+ * SDK version it was born with and published SDK fixes would never reach new
+ * deploys — the exact harm the range passthrough exists to prevent. Right after
+ * an install the locked version IS the latest in range, so the two agree; they
+ * only part as the lockfile ages, and that is the case where the platform's own
+ * package must move.
+ *
+ * BOUNDARY, stated so nobody reads more into this than it does: this pins the
+ * dependencies the core decides to install — the ones declared in the project's
+ * package.json. Their TRANSITIVE dependencies are still resolved by npm from the
+ * parents' ranges. Pinning the whole locked closure was considered and rejected
+ * for now: an explicit exact spec for every transitive can trip ERESOLVE peer
+ * conflicts and platform-specific optional binaries, which would turn a build
+ * that works today into a refused one (rule 9 — tighten incrementally). If a
+ * transitive drift is ever measured, that is the next step, not a redesign.
+ *
+ * Prefer-baked resolution is deliberately NOT changed: which packages come from
+ * the baked image, and the React-19 symlink hot path, still key off the DECLARED
+ * RANGE. Making the baked decision exact-match would cold-install React on every
+ * lockfile project (tsk_2553662f's 600s timeout) and would re-open the very
+ * divergence tsk_0312cf17 closed by pinning the local loop to the image's own
+ * React set. Aligning the local loop with the rest of the baked set is the CLI's
+ * half of this, not the compiler's.
+ */
+
+/** npm's own lockfile precedence: a shrinkwrap wins over a package-lock. */
+const LOCKFILE_NAMES = ['npm-shrinkwrap.json', 'package-lock.json'];
+
+/**
+ * Versions an npm lockfile pins for the project's TOP-LEVEL packages.
+ *
+ * Only `node_modules/<name>` entries count: a nested `node_modules/a/node_modules/b`
+ * path is a transitive's private copy, not the version the project itself
+ * resolves. Link entries (workspaces, `file:` deps) carry no registry version and
+ * are skipped. Handles lockfileVersion 2/3 (`packages`) and 1 (`dependencies`).
+ * Malformed input yields an empty map — never a throw; a lockfile we cannot read
+ * degrades to today's floor-pin.
+ */
+function lockfileVersions(text) {
+  const out = new Map();
+  if (typeof text !== 'string' || !text.trim()) return out;
+  let lock;
+  try { lock = JSON.parse(text); } catch { return out; }
+  if (!lock || typeof lock !== 'object') return out;
+  const packages = lock.packages && typeof lock.packages === 'object' ? lock.packages : null;
+  if (packages) {
+    for (const [entryPath, entry] of Object.entries(packages)) {
+      if (!entryPath.startsWith('node_modules/')) continue;
+      const name = entryPath.slice('node_modules/'.length);
+      if (name.includes('/node_modules/')) continue;
+      if (!entry || typeof entry !== 'object' || entry.link) continue;
+      if (typeof entry.version !== 'string' || !entry.version) continue;
+      out.set(name, entry.version);
+    }
+  }
+  const v1 = lock.dependencies && typeof lock.dependencies === 'object' ? lock.dependencies : null;
+  if (v1) {
+    for (const [name, entry] of Object.entries(v1)) {
+      if (out.has(name)) continue;
+      if (!entry || typeof entry !== 'object') continue;
+      if (typeof entry.version !== 'string' || !entry.version) continue;
+      if (/^(?:file|link|git\+|https?):/.test(entry.version)) continue;
+      out.set(name, entry.version);
+    }
+  }
+  return out;
+}
+
+/**
+ * The one derivation of what to hand `npm install` for a single dependency.
+ * PURE — `satisfies(version, range)` is passed in (semver is host-loaded) and
+ * must return TRUE only when it can prove the version is inside the range;
+ * anything it cannot prove falls back to the floor-pin, i.e. today's behavior.
+ *
+ * Exported so the fixture can pin the rule in BOTH directions without a build.
+ */
+function resolveInstallSpec({ name, range, lockedVersion, satisfies }) {
+  // First-party platform packages: declared range verbatim, lockfile ignored.
+  // See the block comment above (pfb_f607d6b27453).
+  if (name.startsWith('@somewhere-tech/')) {
+    return `${name}@${String(range || 'latest').trim() || 'latest'}`;
+  }
+  if (lockedVersion && typeof satisfies === 'function') {
+    let inRange = false;
+    try { inRange = satisfies(lockedVersion, range) === true; } catch { inRange = false; }
+    if (inRange) return `${name}@${lockedVersion}`;
+  }
+  return `${name}@${cleanRange(range)}`;
+}
+
+/**
+ * The project's locked versions, read from the materialized build root. Both
+ * hosts land here: the container materializes every uploaded file (the lockfile
+ * included) into the build root, and the CLI's build root is the project itself.
+ * A missing or unreadable lockfile is not an error — it is the documented
+ * no-lockfile path.
+ */
+function readLockedVersions(root) {
+  for (const name of LOCKFILE_NAMES) {
+    let text;
+    try { text = fs.readFileSync(path.join(root, name), 'utf8'); } catch { continue; }
+    const versions = lockfileVersions(text);
+    if (versions.size) return versions;
+  }
+  return new Map();
+}
+
 /**
  * Is `name` resolvable the way ESBUILD will resolve it — i.e. as a direct child
  * package of one of the exact search dirs (the per-build install + the baked
@@ -851,6 +984,20 @@ function createCompileCore(host) {
   async function ensureDeps(root, pkg, warnings, ctx, scopedProxyReady = true) {
     const deps = (pkg && pkg.dependencies) || {};
     const buildRoot = path.join(root, 'node_modules');
+    // The project's own lockfile, materialized alongside package.json. It IS
+    // uploaded on every deploy and was, until now, ignored — which is what made
+    // the deployed build resolve a different version of an app dependency than
+    // the developer's machine (tsk_f79d71ce). Missing/unreadable → empty map →
+    // the floor-pin path, unchanged.
+    const locked = readLockedVersions(root);
+    const semverForLock = getSemver();
+    const satisfiesLocked = semverForLock
+      ? (version, range) => {
+          const wanted = (typeof range === 'string' && range.trim()) ? range.trim() : '*';
+          if (semverForLock.validRange(wanted) === null) return false;
+          return semverForLock.satisfies(version, wanted, { includePrerelease: true });
+        }
+      : null;
     const missing = [];
     // react/react-dom whose pin the baked 18 misses but the baked 19 satisfies:
     // collect them to symlink from the isolated react19 set instead of installing.
@@ -864,16 +1011,13 @@ function createCompileCore(host) {
       if (isResolvable(name, IMAGE_NODE_MODULES) && bakedSatisfies(name, range)) continue;
       const r19 = react19BakedDir(name, range);
       if (r19) { react19Links.push({ name, dir: r19 }); continue; }
-      // First-party platform packages (@somewhere-tech/*) install the DECLARED
-      // RANGE verbatim so npm resolves the latest satisfying version from the
-      // live registry (pfb_f607d6b27453): cleanRange's floor-pinning froze
-      // every ^-range scaffold on the SDK version it was scaffolded with, so
-      // published SDK fixes never reached new deploys. Third-party deps keep
-      // the floor-pin — that determinism choice is unchanged here.
-      const spec = name.startsWith('@somewhere-tech/')
-        ? `${name}@${String(range || 'latest').trim() || 'latest'}`
-        : `${name}@${cleanRange(range)}`;
-      missing.push(spec);
+      // WHAT version to install is resolveInstallSpec's single decision — the
+      // project's lockfile when it pins one inside the declared range, the
+      // floor-pin otherwise, the declared range verbatim for first-party
+      // @somewhere-tech/* packages. See the block comment on resolveInstallSpec.
+      missing.push(resolveInstallSpec({
+        name, range, lockedVersion: locked.get(name), satisfies: satisfiesLocked,
+      }));
     }
     // Symlink the baked React-19 packages into the build root so esbuild resolves
     // them from root/node_modules (which it consults before the baked nodePaths) —
@@ -888,7 +1032,9 @@ function createCompileCore(host) {
           if (!fs.existsSync(link)) fs.symlinkSync(dir, link, 'dir');
         } catch (e) {
           warnings.push(`react19 link skipped for ${name}; installing per-build: ${e && e.message ? e.message : String(e)}`);
-          missing.push(`${name}@${cleanRange(deps[name])}`);
+          missing.push(resolveInstallSpec({
+            name, range: deps[name], lockedVersion: locked.get(name), satisfies: satisfiesLocked,
+          }));
         }
       }
     }
@@ -1774,6 +1920,12 @@ function isBuildConfigFile(filePath) {
 module.exports = {
   createCompileCore,
   COMPILER_CONTRACT,
+  // Install-spec derivation (tsk_f79d71ce) — pure, exported for the fixture
+  // that pins the rule in both directions (lockfile present / absent).
+  LOCKFILE_NAMES,
+  lockfileVersions,
+  resolveInstallSpec,
+  cleanRange,
   NODE_POLYFILLS,
   ASSET_LOADERS,
   KNOWN_BAD_VERSIONS,

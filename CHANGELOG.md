@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.30.2
+
+### Fixed
+
+- `tsk_a8cb3d23`, `tsk_f79d71ce` — `somewhere dev` and `somewhere deploy` now
+  derive dependency versions from the SAME code, so a build on your machine and
+  a build on deploy resolve the same libraries. The platform's compiler reads
+  your lockfile as of today: a version your lockfile pins is the version that
+  gets installed, provided it satisfies the range your `package.json` declares.
+  This CLI carries that compiler, so `somewhere dev` follows the identical rule
+  — it is one implementation, vendored, not two that agree by coincidence. A
+  project with NO lockfile is unchanged: the declared range still floor-pins.
+
+### Known difference
+
+- The JavaScript bundle `somewhere dev` builds and the one `somewhere deploy`
+  builds are not byte-identical, and the reason is now only bookkeeping: build
+  comments and source-map entries record where each module was read from, which
+  is your machine locally and the build image on deploy. It has no effect on
+  what your app does.
+- The dependencies your project DECLARES resolve the same on both sides. Their
+  own transitive dependencies are still resolved by npm from the parents'
+  ranges, so those can differ. Pin one exactly in `package.json` if it matters
+  to you.
+
 ## 0.30.1
 
 ### Added
@@ -63,6 +88,9 @@
   while `somewhere deploy` resolves the range your `package.json` declares and
   does not yet read your lockfile. If that matters to a library you depend on,
   pin it exactly in `package.json` and both sides agree.
+
+  **Superseded by 0.30.2**, which closes the version difference. The paragraph
+  above describes 0.30.1 only, and is kept because that version is published.
 
 ## 0.30.0
 

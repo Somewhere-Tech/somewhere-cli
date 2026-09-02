@@ -1,4 +1,4 @@
-// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 1bf981dd
+// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 526d2b4d
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 // ── Primordial freeze (tsk_327fe8a4, opinionated-not-greenfield) ───────────
@@ -2702,6 +2702,19 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
           'sw.db.' + verb + ' on "' + table + '": the value for "' + col.n + '" must be ' + __sw_structExpectedType(col.t) +
           ' (got ' + got + '). The column types are declared in db/schema.ts.');
       }
+      // The exact form for a whole number wider than a JavaScript number:
+      // plain digits, optionally signed, exactly as a read returns them.
+      const __SW_STRUCT_WHOLE_NUMBER_RE = /^-?\d+$/;
+      // Compare that text against the 64-bit range without a numeric
+      // conversion, which is the very thing that would lose it.
+      function __sw_wholeNumberTextInRange(s) {
+        const negative = s.charCodeAt(0) === 45;
+        let digits = negative ? s.slice(1) : s;
+        while (digits.length > 1 && digits.charCodeAt(0) === 48) digits = digits.slice(1);
+        const limit = negative ? '9223372036854775808' : '9223372036854775807';
+        if (digits.length !== limit.length) return digits.length < limit.length;
+        return digits <= limit;
+      }
       // Type-check (and for json: serialize) ONE written value against its
       // declared column. Returns the value to bind.
       function __sw_structCheckWriteValue(verb, table, col, v) {
@@ -2729,6 +2742,25 @@ function buildPlatformContext(env, request, runtimeFetch = fetch, outboundFetch 
         }
         if (typeof v === 'object') __sw_structThrowTypeMismatch(verb, table, col, __sw_structGotKind(v));
         if (col.t === 'integer') {
+          // A whole number wider than 9007199254740991 cannot travel as a
+          // JavaScript number at all — the language rounds it before this
+          // function is reached — so the exact form for those is the same
+          // decimal STRING a read returns (tsk_d741c40b). Accepting it here is
+          // what makes read -> write back lossless on a managed table; the
+          // database converts it on the way in because the column is an
+          // integer. Text that is not a whole number keeps the type error it
+          // has always had.
+          if (typeof v === 'string') {
+            if (!__sw_reMatch(__SW_STRUCT_WHOLE_NUMBER_RE, v)) {
+              __sw_structThrowTypeMismatch(verb, table, col, 'text that is not a whole number');
+            }
+            if (!__sw_wholeNumberTextInRange(v)) {
+              __sw_structThrowSchema('DATABASE_VALUE_TOO_LARGE',
+                'sw.db.' + verb + ' on "' + table + '": the value for "' + col.n + '" is outside the range of whole numbers this database stores ' +
+                '(-9223372036854775808 to 9223372036854775807). Keep the value inside that range, or store it as text.');
+            }
+            return v;
+          }
           if (typeof v !== 'number' || v !== v || !Number.isInteger(v)) __sw_structThrowTypeMismatch(verb, table, col, typeof v === 'number' ? 'a number with a fractional part' : __sw_structGotKind(v));
           return v;
         }
