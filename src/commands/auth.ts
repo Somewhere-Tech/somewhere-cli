@@ -7,9 +7,11 @@ import { browserLogin } from '../lib/auth.js';
 import {
   deviceLogin,
   DeviceLoginTimeout,
+  DeviceLoginDenied,
   DeviceCodeUnsupported,
+  type DeviceSessionScope,
 } from '../lib/device-login.js';
-import { ApiClient } from '../lib/client.js';
+import { ApiClient, CliApiError } from '../lib/client.js';
 import {
   clearConfig,
   getToken,
@@ -46,6 +48,13 @@ export const SIGNUP_URL = 'https://somewhere.tech/auth?intent=signup';
  *  `signup` is built around. Kept as data so it can be pinned by a test
  *  without driving a browser. */
 export const SIGNUP_HINT = `New here? Create an account: ${SIGNUP_URL}`;
+
+/** One line for what a session may touch, as the approval page decided it. */
+export function describeScope(scope: DeviceSessionScope | null | undefined): string {
+  if (!scope) return 'all projects';
+  const n = scope.projects.length;
+  return `${n} project${n === 1 ? '' : 's'} only (${scope.projects.map((id) => id.slice(0, 8)).join(', ')}) — other projects are refused`;
+}
 
 /** Everything `somewhere login` prints before it contacts the platform. */
 export function loginIntroLines(): string[] {
@@ -121,21 +130,25 @@ export function registerAuth(program: Command) {
       };
       process.once('SIGINT', clearOnInterrupt);
       process.once('SIGTERM', clearOnTermination);
+      let revokedOnServer = false;
       try {
         if (config) {
           const client = new ApiClient(config.token);
           await client.call('POST', '/auth/cli-logout', {
             refresh_token: config.refresh_token,
           }, undefined, { timeoutMs: 5_000 });
+          revokedOnServer = true;
         }
       } catch {
-        warn('Server revocation could not be confirmed; local credentials will still be removed.');
+        warn('Server revocation could not be confirmed; local credentials will still be removed. Revoke this device under Settings → Devices & sessions if it should not stay signed in.');
       } finally {
         process.off('SIGINT', clearOnInterrupt);
         process.off('SIGTERM', clearOnTermination);
         clearConfig();
       }
-      success('Logged out. Token removed from ~/.somewhere/config.json');
+      success(revokedOnServer
+        ? 'Logged out. This device\'s session was revoked on the server and the token removed from ~/.somewhere/config.json'
+        : 'Logged out locally. Token removed from ~/.somewhere/config.json');
     });
 
   program
@@ -159,6 +172,7 @@ export function registerAuth(program: Command) {
             effective_tier: string;
           };
           stats: { api_keys: number; projects: number };
+          session?: { id: string; label: string; expires_at: string | null; scope: DeviceSessionScope | null } | null;
         }>('GET', '/auth/whoami');
 
         if (opts.json) {
@@ -172,19 +186,25 @@ export function registerAuth(program: Command) {
         if (r.user.username) info(dim(`@${r.user.username}`));
         info(dim(`${r.stats.projects} project${r.stats.projects === 1 ? '' : 's'}, ${r.stats.api_keys} active key${r.stats.api_keys === 1 ? '' : 's'}`));
         info(dim(`key ${config.token.slice(0, 12)}…`));
-      } catch {
+        if (r.session) {
+          info(dim(`session ${r.session.label} · access: ${describeScope(r.session.scope)}`));
+        }
+      } catch (err) {
         // Agents gate on `whoami` to validate the token — a stored-but-dead token
         // must NOT report success. Show the cached identity, then exit non-zero.
+        // A revoked session (dashboard "Revoke", `somewhere logout` elsewhere)
+        // says so in the platform's own words rather than guessing "expired".
+        const revoked = err instanceof CliApiError && err.statusCode === 401 && /revoked/i.test(err.message);
+        const message = revoked
+          ? err.message
+          : 'Could not fetch account details — token may be expired. Run: somewhere login';
         if (opts.json) {
-          printJson({
-            error: 'WHOAMI_FAILED',
-            message: 'Could not fetch account details — token may be expired. Run: somewhere login',
-          });
+          printJson({ error: revoked ? 'SESSION_REVOKED' : 'WHOAMI_FAILED', message });
           process.exitCode = 1;
           return;
         }
         console.log(teal(config.user.email));
-        info(dim('Could not fetch account details — token may be expired. Run: somewhere login'));
+        info(dim(message));
         process.exitCode = 1;
       }
     });
@@ -282,7 +302,7 @@ async function runDeviceLogin(): Promise<void> {
   installCancelHandler(() => spinner);
 
   try {
-    const config = await deviceLogin({
+    const { config, scope } = await deviceLogin({
       onPrompt: ({ code, approvalUrl }) => {
         console.log(`  Code: ${teal(code)}`);
         console.log('');
@@ -305,11 +325,12 @@ async function runDeviceLogin(): Promise<void> {
     saveGlobalMcpConfig();
     success(`Logged in as ${teal(config.user.email || '(unknown)')}`);
     success(`Device: ${getDeviceKeyName()}`);
+    success(`Access: ${describeScope(scope)}`);
     success('Claude Code MCP configured');
     process.exit(0);
   } catch (err) {
     (spinner as Ora | null)?.stop();
-    if (err instanceof DeviceLoginTimeout) {
+    if (err instanceof DeviceLoginTimeout || err instanceof DeviceLoginDenied) {
       error(err.message);
       process.exit(1);
     }

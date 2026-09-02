@@ -12,10 +12,15 @@
  *   - browser and terminal can be on different machines
  */
 import { randomInt } from 'node:crypto';
+import { arch, hostname, platform, release } from 'node:os';
 import type { CliConfig } from '../types.js';
 import { getDeviceKeyName } from './device.js';
+import { CLI_VERSION } from './version.js';
+import { API_BASE_URL } from './client.js';
 
-const API_BASE = 'https://api.somewhere.tech';
+// Same host the rest of the CLI talks to (SOMEWHERE_API_URL overrides it for
+// staging / a local platform); this flow addresses /v1/auth/* itself.
+const API_BASE = API_BASE_URL.replace(/\/v1$/, '');
 const POLL_INTERVAL_MS = 1000;
 const TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -51,13 +56,27 @@ interface StatusApproved {
     email: string;
     refresh_token?: string;
     expires_at?: string;
+    /** Present once the platform reports the approved scope (tsk_d560943d). */
+    scope?: DeviceSessionScope | null;
+    session_id?: string;
   };
 }
 interface StatusExpired {
   ok: true;
   data: { status: 'expired' };
 }
-type StatusResponse = StatusPending | StatusApproved | StatusExpired;
+/** The account owner clicked Deny in the browser. Distinct from a timeout so
+ *  the terminal says what actually happened. */
+interface StatusDenied {
+  ok: true;
+  data: { status: 'denied' };
+}
+type StatusResponse = StatusPending | StatusApproved | StatusExpired | StatusDenied;
+
+/** What this session may touch, as approved in the browser. null = all projects. */
+export interface DeviceSessionScope {
+  projects: string[];
+}
 
 export interface DeviceLoginCallbacks {
   onPrompt: (info: { code: string; approvalUrl: string }) => void;
@@ -78,14 +97,52 @@ export class DeviceCodeUnsupported extends Error {
   }
 }
 
-export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<CliConfig> {
+export class DeviceLoginDenied extends Error {
+  constructor() {
+    super('Sign-in was denied in the browser. Nothing was granted. Run `somewhere login` again if that was a mistake.');
+    this.name = 'DeviceLoginDenied';
+  }
+}
+
+/**
+ * What the approval page shows the account owner about THIS machine, so they
+ * can tell their own VM from someone else's before allowing access. Only
+ * facts the CLI can read locally; the platform adds the request's IP and
+ * approximate location itself and never trusts these for anything but
+ * display.
+ */
+export interface DeviceClientMeta {
+  hostname: string;
+  cli_version: string;
+  runtime_version: string;
+  platform: string;
+  arch: string;
+}
+
+export function describeThisDevice(): DeviceClientMeta {
+  const host = (hostname() || 'unknown').replace(/\.local$/i, '').slice(0, 64);
+  return {
+    hostname: host,
+    cli_version: CLI_VERSION,
+    runtime_version: `node ${process.versions.node}`,
+    platform: `${platform()} ${release()}`.trim().slice(0, 64),
+    arch: arch(),
+  };
+}
+
+export interface DeviceLoginResult {
+  config: CliConfig;
+  scope: DeviceSessionScope | null;
+}
+
+export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<DeviceLoginResult> {
   const code = generateCode();
   const deviceName = getDeviceKeyName();
 
   const startRes = await fetch(`${API_BASE}/v1/auth/device-code`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code, device_name: deviceName }),
+    body: JSON.stringify({ code, device_name: deviceName, client: describeThisDevice() }),
   });
 
   if (startRes.status === 404) {
@@ -114,6 +171,9 @@ export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<CliC
     if (status.data.status === 'expired') {
       throw new DeviceLoginTimeout();
     }
+    if (status.data.status === 'denied') {
+      throw new DeviceLoginDenied();
+    }
     if (status.data.status === 'approved') {
       const config: CliConfig = {
         token: status.data.token,
@@ -121,7 +181,7 @@ export async function deviceLogin(callbacks: DeviceLoginCallbacks): Promise<CliC
       };
       if (status.data.refresh_token) config.refresh_token = status.data.refresh_token;
       if (status.data.expires_at) config.access_expires_at = status.data.expires_at;
-      return config;
+      return { config, scope: status.data.scope ?? null };
     }
   }
   throw new DeviceLoginTimeout();
