@@ -36,6 +36,8 @@ interface DeployResult {
   has_functions?: boolean;
   build_log?: string[];
   warnings?: string[];
+  preview_session_id?: string;
+  preview_id?: string;
   draft_id?: string;
   candidate_release_id?: string;
 }
@@ -47,6 +49,8 @@ interface PatchResult {
   function_errors?: Array<{ route?: string; error?: string } | string>;
   bundle_error?: string;
   status?: 'success' | 'partial' | 'compile_degraded' | 'functions_degraded';
+  preview_session_id?: string;
+  preview_id?: string;
   draft_id?: string;
   candidate_release_id?: string;
 }
@@ -82,14 +86,14 @@ export async function mintPreviewHandoff(
 
 function printPreviewHandoff(handoff: PreviewCandidateHandoff): void {
   console.log(`${teal('🌐')} ${bold('Preview capability:')} ${teal(handoff.capabilityUrl)}`);
-  console.log(dim(`   draft_id: ${handoff.draftId}`));
-  console.log(dim(`   candidate_release_id: ${handoff.candidateReleaseId}`));
+  console.log(dim(`   preview_session_id: ${handoff.draftId}`));
+  console.log(dim(`   preview_id: ${handoff.candidateReleaseId}`));
   console.log(dim(`   promote command: \`${handoff.promoteCommand}\``));
 }
 
 function printPreviewIdentity(draftId: string, candidateReleaseId: string): void {
-  console.log(dim(`   draft_id: ${draftId}`));
-  console.log(dim(`   candidate_release_id: ${candidateReleaseId}`));
+  console.log(dim(`   preview_session_id: ${draftId}`));
+  console.log(dim(`   preview_id: ${candidateReleaseId}`));
   console.log(dim(`   promote command: \`somewhere promote ${draftId} ${candidateReleaseId}\``));
 }
 
@@ -509,8 +513,8 @@ async function runHotDeploy(opts: { project?: string }) {
   const spinner = ora('Syncing to preview...').start();
   const { files, binaryFiles, functions } = collectFiles(cwd);
   const draftId = `draft_${randomUUID()}`;
-  const firstOperationId = `draftop_${randomUUID()}`;
-  // The first draft snapshot must name the live release it was read from
+  const firstOperationId = `previewop_${randomUUID()}`;
+  // The first preview snapshot must name the production release it was read from
   // (base_release_id) — the platform binds the draft to that exact production
   // release. Read it from deploy_status; a project that has never published to
   // production has no base and starts the draft from empty.
@@ -571,18 +575,24 @@ async function runHotDeploy(opts: { project?: string }) {
       functions,
       replace_functions: true,
       preview: true,
-      draft_id: draftId,
-      draft_operation_id: firstOperationId,
-      expected_candidate_release_id: null,
+      preview_session_id: draftId,
+      preview_operation_id: firstOperationId,
+      expected_preview_id: null,
       base_release_id: baseReleaseId,
     };
     const res = await callDraftCandidate<DeployResult>(client, '/deploy', body);
-    if (res.draft_id !== draftId
-        || typeof res.candidate_release_id !== 'string'
+    const returnedPreviewSessionId = res.preview_session_id ?? res.draft_id;
+    const returnedPreviewId = res.preview_id ?? res.candidate_release_id;
+    if (returnedPreviewSessionId !== draftId
+        || typeof returnedPreviewId !== 'string'
         || typeof res.preview_url !== 'string') {
-      throw new Error('The platform did not return the exact draft candidate created by this session.');
+      throw new Error('The platform did not return the exact preview created by this session.');
     }
-    candidateReleaseId = res.candidate_release_id;
+    // The validated value, not the legacy field it may have fallen back FROM:
+    // reading res.candidate_release_id here would discard the alias resolution
+    // two lines above and break the moment the platform returns only the
+    // canonical preview_id.
+    candidateReleaseId = returnedPreviewId;
     // Keep the printed capability usable: auto-open consumes a one-time token,
     // so mint a separate token for the browser before minting the handoff shown
     // in the terminal.
@@ -714,13 +724,13 @@ async function deployBatch(
   }
   for (const rel of deleted) deleteKeys.push(classifyKey(rel).key);
 
-  const operationId = `draftop_${randomUUID()}`;
+  const operationId = `previewop_${randomUUID()}`;
   const body: Record<string, unknown> = {
     project_id: projectId,
     preview: true,
-    draft_id: draftId,
-    draft_operation_id: operationId,
-    expected_candidate_release_id: expectedCandidateReleaseId,
+    preview_session_id: draftId,
+    preview_operation_id: operationId,
+    expected_preview_id: expectedCandidateReleaseId,
   };
   if (Object.keys(updateFiles).length) body.update_files = updateFiles;
   if (Object.keys(updateFunctions).length) body.update_functions = updateFunctions;
@@ -739,10 +749,12 @@ async function deployBatch(
 
   try {
     const r = await callDraftCandidate<PatchResult>(client, '/deploy/patch', body);
-    if (r.draft_id !== draftId || typeof r.candidate_release_id !== 'string') {
-      throw new Error('The platform did not return the exact updated draft candidate.');
+    const returnedPreviewSessionId = r.preview_session_id ?? r.draft_id;
+    const returnedPreviewId = r.preview_id ?? r.candidate_release_id;
+    if (returnedPreviewSessionId !== draftId || typeof returnedPreviewId !== 'string') {
+      throw new Error('The platform did not return the exact updated preview.');
     }
-    const nextCandidate = r.candidate_release_id;
+    const nextCandidate = returnedPreviewId;
     const secs = ((Date.now() - t0) / 1000).toFixed(1);
     // Carriage-return overwrites the "updating..." line with the verdict.
     process.stdout.write('\r\x1b[K');

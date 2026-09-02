@@ -104,9 +104,9 @@ export function statusDot(status: string): string {
     case 'deployed':
     case 'active':
     case 'ready':
-      return `${green('●')} Live`;
+      return `${green('●')} Production`;
     case 'draft':
-      return `${dim('○')} Draft`;
+      return `${dim('○')} Preview`;
     case 'archived':
       return `${dim('◌')} Archived`;
     case 'frozen':

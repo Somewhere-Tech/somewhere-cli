@@ -17,17 +17,19 @@ interface PromoteResult {
   files_promoted: number;
   has_functions: boolean;
   promoted_draft_id?: string;
+  preview_session_id?: string;
+  preview_id?: string;
   active_release_id?: string;
   release_id?: string;
 }
 
 export function registerPromote(program: Command) {
   program
-    .command('promote <draft_id> <candidate_release_id>')
+    .command('promote <preview_session_id> <preview_id>')
     .description(
-      'Ship one exact preview candidate to production. Pass the draft_id and ' +
-        'candidate_release_id returned by the preview; promotion is refused if ' +
-        'the live base or candidate changed.',
+      'Promote one exact preview to production. Pass the preview_session_id and ' +
+        'preview_id returned by the preview; promotion is refused if ' +
+        'production or the preview changed.',
     )
     .option('-p, --project <id>', 'Project ID (defaults to the linked project)')
     .option('-m, --message <msg>', 'Release notes for this version')
@@ -61,7 +63,7 @@ export function registerPromote(program: Command) {
         // with actionable -y/--yes guidance rather than a mute wedge.
         if (!process.stdin.isTTY) {
           const message =
-            'Refusing to promote without confirmation in a non-interactive shell. Pass -y/--yes to promote intentionally (e.g. `somewhere promote <draft_id> <candidate_release_id> --yes`).';
+            'Refusing to promote without confirmation in a non-interactive shell. Pass -y/--yes to promote intentionally (e.g. `somewhere promote <preview_session_id> <preview_id> --yes`).';
           if (opts.json) {
             printJsonError('CONFIRMATION_REQUIRED', message);
           } else {
@@ -72,7 +74,7 @@ export function registerPromote(program: Command) {
         const { ok } = await prompts({
           type: 'confirm',
           name: 'ok',
-          message: `Promote candidate ${teal(candidateReleaseId)} from ${teal(draftId)} of ${teal(projectId)} → prod?`,
+          message: `Promote preview ${teal(candidateReleaseId)} from session ${teal(draftId)} of ${teal(projectId)} → production?`,
           initial: true,
           stdout: opts.json ? process.stderr : undefined,
         });
@@ -92,8 +94,8 @@ export function registerPromote(program: Command) {
         const r = await client.call<PromoteResult>('POST', '/promote', {
           project_id: projectId,
           message: opts.message,
-          draft_id: draftId,
-          candidate_release_id: candidateReleaseId,
+          preview_session_id: draftId,
+          preview_id: candidateReleaseId,
         });
         spinner?.stop();
         if (deployStateEntry) {
@@ -109,15 +111,14 @@ export function registerPromote(program: Command) {
           return;
         }
         success(`Promoted v${r.version} (${r.files_promoted} file${r.files_promoted === 1 ? '' : 's'}${r.has_functions ? ' + functions' : ''})`);
-        // Name the preview/draft this version was promoted from, when known —
-        // closes the loop on "what exactly went live" at the highest-trust moment.
+        // Name the preview session this version was promoted from, when known.
         const fromDraft = draftId ?? r.promoted_draft_id;
-        if (fromDraft) info(dim(`Promoted from preview ${teal(fromDraft)}`));
+        if (fromDraft) info(dim(`Promoted from preview session ${teal(fromDraft)}`));
         // The promote response carries no URL — resolve the platform's canonical
         // fallback URL (best-effort; never fail a successful promote on it).
         try {
           const servingUrl = await getProjectServingUrl(client, projectId);
-          if (servingUrl) info(`Live at ${teal(servingUrl)}`);
+          if (servingUrl) info(`Production at ${teal(servingUrl)}`);
         } catch {
           // ignore — the promote already succeeded
         }
