@@ -29,7 +29,7 @@ import { IGNORE, collectFiles } from '../lib/files.js';
 import { bold, dim, green, red, teal, warn, yellow } from '../lib/output.js';
 import { bumpGeneration } from './loader.js';
 import { dispatchRequest, refreshRoutes, type LocalProjectState } from './runtime.js';
-import { CompileFailure, LocalCompiler, type CompileOutput } from './compiler.js';
+import { CompileFailure, LocalCompiler, resolveDevEntry, type CompileOutput } from './compiler.js';
 import { serveLoopback } from './loopback.js';
 
 const STATIC_MIME: Record<string, string> = {
@@ -253,6 +253,20 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
    */
   async function rebuild(changedAt: number, label: string): Promise<void> {
     const sources = collectFiles(cwd);
+    // Nothing for the compiler to touch: index.html either points at a plain
+    // .js/.mjs/.cjs module or carries no module script at all. The deploy
+    // pipeline serves those files exactly as written (bundleProject returns
+    // null and no rewrite happens), so the loop does the same — refusing to
+    // start was the whole of pfb_e32a4e630c45.
+    const entry = resolveDevEntry(sources.files);
+    if (entry.kind !== 'compiled') {
+      build.output = null;
+      build.failure = null;
+      console.log(`${dim(stamp())} ${teal(label)} ${green('✓')} ${dim('served as written — no compile needed')}`);
+      opts.onRebuild?.(Date.now() - changedAt);
+      broadcast({ type: 'reload' });
+      return;
+    }
     try {
       const output = await compiler.compile({ files: sources.files, binaryFiles: sources.binaryFiles });
       build.output = output;
@@ -449,6 +463,13 @@ export async function startDevServer(opts: DevServerOptions): Promise<void> {
   console.log(`${teal('🌐')} ${bold('Local:')} ${teal(url)}`);
   if (build.output) {
     console.log(dim(`   ${build.output.entry} → /_compiled/${build.output.entryChunk}`));
+  } else {
+    // Say which file is the app even when nothing was compiled, so a plain
+    // JavaScript project gets the same "here is your entry" line a TSX one does.
+    const rawEntry = resolveDevEntry(collectFiles(cwd).files);
+    if (rawEntry.kind === 'raw' && rawEntry.entry) {
+      console.log(dim(`   ${rawEntry.entry} → served as written (the platform serves plain JavaScript modules untouched)`));
+    }
   }
   if (state) {
     for (const r of state.routes) console.log(`   ${dim('•')} ${r.displayPath} ${dim(`(${r.file})`)}`);

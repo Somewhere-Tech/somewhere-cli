@@ -38,8 +38,8 @@ export function loadConfig(): CliConfig | null {
   }
 }
 
-export function saveConfig(config: CliConfig): void {
-  ensureDir();
+/** Write `body` to `path` as an owner-only file, atomically. */
+function writeSecret(path: string, body: string): void {
   const tempPath = join(CONFIG_DIR, `.config-${randomUUID()}.tmp`);
   let fd: number | null = null;
   try {
@@ -50,12 +50,12 @@ export function saveConfig(config: CliConfig): void {
       constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY,
       0o600,
     );
-    writeFileSync(fd, JSON.stringify(config, null, 2) + '\n');
+    writeFileSync(fd, body);
     fchmodSync(fd, 0o600);
     closeSync(fd);
     fd = null;
-    renameSync(tempPath, CONFIG_PATH);
-    chmodSync(CONFIG_PATH, 0o600);
+    renameSync(tempPath, path);
+    chmodSync(path, 0o600);
     chmodSync(CONFIG_DIR, 0o700);
   } finally {
     if (fd !== null) closeSync(fd);
@@ -63,8 +63,60 @@ export function saveConfig(config: CliConfig): void {
   }
 }
 
+export function saveConfig(config: CliConfig): void {
+  ensureDir();
+  writeSecret(CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
+}
+
 export function clearConfig(): void {
   if (existsSync(CONFIG_PATH)) unlinkSync(CONFIG_PATH);
+}
+
+/**
+ * A temporary-workspace credential held BESIDE a real login.
+ *
+ * `--temporary` means temporary whatever the login state (pfb_9bbc936e5001),
+ * so a signed-in developer can ship a throwaway app without being switched to
+ * their account. Their real credential has to survive that, which is the whole
+ * reason this is a separate file: config.json keeps the account login
+ * untouched, and `somewhere login` / `logout` / `whoami` never read this one.
+ *
+ * It carries the temp project too, so a second `--temporary` deploy from the
+ * same directory redeploys the SAME throwaway instead of minting another. The
+ * project link is deliberately NOT written into the directory's
+ * `.somewhere.json`: that file is the developer's own link, and a throwaway
+ * their account does not own does not belong in it.
+ *
+ * When there is no real login the temporary credential stays in config.json,
+ * exactly as before — that is the logged-out first-touch path.
+ */
+export interface StoredTempSession {
+  token: string;
+  temp_expires_at?: string;
+  claim_url?: string;
+  /** The auto-created throwaway project this session already deployed to. */
+  project?: ProjectConfig;
+}
+
+const TEMP_SESSION_PATH = join(CONFIG_DIR, 'temp-session.json');
+
+export function loadTempSession(): StoredTempSession | null {
+  if (!existsSync(TEMP_SESSION_PATH)) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(TEMP_SESSION_PATH, 'utf-8')) as StoredTempSession;
+    return parsed?.token ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+export function saveTempSession(session: StoredTempSession): void {
+  ensureDir();
+  writeSecret(TEMP_SESSION_PATH, JSON.stringify(session, null, 2) + '\n');
+}
+
+export function clearTempSession(): void {
+  if (existsSync(TEMP_SESSION_PATH)) unlinkSync(TEMP_SESSION_PATH);
 }
 
 /** Swap in a freshly-refreshed access key + rotated refresh token, preserving

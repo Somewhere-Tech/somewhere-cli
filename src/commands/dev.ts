@@ -18,7 +18,7 @@ import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
 import { startDevServer } from '../local/dev-server.js';
-import { LocalCompiler, detectBundleEntry } from '../local/compiler.js';
+import { ACCEPTED_ENTRY_FORMS, LocalCompiler, resolveDevEntry } from '../local/compiler.js';
 import { readCompileCore } from '../local/compiler-core.js';
 import { loadLocalEnv } from '../local/envfile.js';
 import { showProjectNotices } from '../lib/project-notices.js';
@@ -242,10 +242,26 @@ async function runLocalDev(opts: { project?: string; port?: string; check?: bool
   }
 
   const sources = collectFiles(cwd);
-  if (!detectBundleEntry(sources.files)) {
+  // The loop refuses only what it genuinely cannot serve. It used to refuse
+  // anything without a COMPILABLE entry, which locked out plain-JavaScript
+  // projects that deploy and serve perfectly (pfb_e32a4e630c45); the rule now
+  // matches deploy's — compile a compilable entry, serve everything else as
+  // written, and stop only when index.html asks for a file that is not here or
+  // when there is nothing to serve at all.
+  const devEntry = resolveDevEntry(sources.files);
+  const hasFunctions = Object.keys(sources.functions ?? {}).length > 0;
+  if (devEntry.kind === 'none') {
     error(
-      'No app entry found. index.html needs a <script type="module" src="/src/main.tsx"> pointing at your ' +
-        'app entry — that tag is what the platform compiles, here and on deploy.',
+      `No app entry found. index.html points at ${devEntry.declared.join(', ')}, which is not in this directory. ` +
+        `An entry is a <script type="module" src="…"> naming a file that exists — ${ACCEPTED_ENTRY_FORMS}. ` +
+        'That tag is what the platform reads, here and on deploy.',
+    );
+    process.exit(1);
+  }
+  if (devEntry.kind === 'raw' && !devEntry.entry && sources.files['index.html'] === undefined && !hasFunctions) {
+    error(
+      'Nothing to serve here. `somewhere dev` runs this directory as your app: add an index.html with a ' +
+        `<script type="module" src="…"> entry (${ACCEPTED_ENTRY_FORMS}), or an api/ function.`,
     );
     process.exit(1);
   }

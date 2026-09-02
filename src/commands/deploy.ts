@@ -15,7 +15,10 @@ import {
   markPublishNoticeSeen,
   publishNoticeSeen,
   saveProjectDeployState,
+  loadTempSession,
+  saveTempSession,
   type ProjectConfigEntry,
+  type StoredTempSession,
 } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
@@ -294,15 +297,24 @@ function findProjectConfigEntry(targetDir: string): ProjectConfigEntry | null {
   return loadProjectConfigEntry();
 }
 
+/** A temporary credential is reusable until its window closes; no recorded
+ *  expiry means the server never gave one, which is not a reason to re-mint. */
+export function isTempSessionLive(
+  session: { token?: string; temp_expires_at?: string } | null,
+  nowMs = Date.now(),
+): boolean {
+  if (!session?.token) return false;
+  if (!session.temp_expires_at) return true;
+  const expiresMs = new Date(session.temp_expires_at).getTime();
+  return Number.isFinite(expiresMs) && expiresMs > nowMs;
+}
+
 function hasReusableTempCredential(
   config: CliConfig | null,
   nowMs = Date.now(),
 ): config is CliConfig & { temporary: true } {
-  if (!config?.token || !config.temporary) return false;
-  if (!config.temp_expires_at) return true;
-
-  const expiresMs = new Date(config.temp_expires_at).getTime();
-  return Number.isFinite(expiresMs) && expiresMs > nowMs;
+  if (!config?.temporary) return false;
+  return isTempSessionLive(config, nowMs);
 }
 
 interface TempSession {
@@ -379,22 +391,48 @@ export function registerDeploy(program: Command) {
       // claim-relay success block.
       let tempSession: TempSession | undefined;
 
+      // True when the temporary workspace is being minted NEXT TO a real
+      // account login. The credential then lives in its own file so the
+      // developer's account session survives the throwaway deploy, and the
+      // throwaway project is remembered there rather than in the directory's
+      // `.somewhere.json`.
+      const besideRealLogin = Boolean(
+        opts.temporary && storedConfig?.token && !storedConfig.temporary,
+      );
+      let sideCar: StoredTempSession | null = besideRealLogin ? loadTempSession() : null;
+
       let token: string;
       if (useTemporary) {
-        if (storedConfig?.token && !storedConfig.temporary) {
-          // Already have a real account — --temporary would be a downgrade,
-          // so ignore it rather than silently minting a throwaway workspace
-          // next to the dev's own projects.
+        if (!opts.temporary && storedConfig?.token && !storedConfig.temporary) {
+          // A stored real login and NO explicit flag: this branch is only
+          // reached because the config is a leftover temporary one, so a real
+          // token means the account is the right target.
+          //
+          // An explicit `--temporary` never lands here. Being logged in is not
+          // a reason to refuse a temporary workspace — the flag IS the request,
+          // and overriding it also dragged in account mode's linked-project
+          // requirement, so `--temporary` in an unlinked directory failed
+          // outright instead of doing the one thing it was asked to do
+          // (pfb_9bbc936e5001).
           if (!opts.json) info('Already logged in — deploying to your account.');
           token = getToken();
-        } else if (hasReusableTempCredential(storedConfig)) {
+        } else if (besideRealLogin
+          ? isTempSessionLive(sideCar)
+          : hasReusableTempCredential(storedConfig)) {
           // Reuse silently — this is the "one credential across shells"
           // requirement: a second `--temporary` deploy in the same 3h window
           // (a different terminal, a re-run) must not mint a second project.
-          token = storedConfig.token;
+          const live = besideRealLogin
+            ? sideCar!
+            : {
+                token: (storedConfig as CliConfig).token,
+                claim_url: (storedConfig as CliConfig).claim_url,
+                temp_expires_at: (storedConfig as CliConfig).temp_expires_at,
+              };
+          token = live.token;
           tempSession = {
-            claimUrl: storedConfig.claim_url ?? '',
-            expiresAt: storedConfig.temp_expires_at,
+            claimUrl: live.claim_url ?? '',
+            expiresAt: live.temp_expires_at,
             reused: true,
           };
         } else {
@@ -402,13 +440,22 @@ export function registerDeploy(program: Command) {
           try {
             const account = await mintTempAccount();
             powSpinner?.stop();
-            saveConfig({
-              token: account.key,
-              temporary: true,
-              temp_expires_at: account.expires_at,
-              claim_url: account.claim_url,
-              user: { email: '', username: '' },
-            });
+            if (besideRealLogin) {
+              sideCar = {
+                token: account.key,
+                temp_expires_at: account.expires_at,
+                claim_url: account.claim_url,
+              };
+              saveTempSession(sideCar);
+            } else {
+              saveConfig({
+                token: account.key,
+                temporary: true,
+                temp_expires_at: account.expires_at,
+                claim_url: account.claim_url,
+                user: { email: '', username: '' },
+              });
+            }
             token = account.key;
             tempSession = {
               claimUrl: account.claim_url,
@@ -440,7 +487,12 @@ export function registerDeploy(program: Command) {
         scope = opts.scope;
       }
 
-      const linkedProjectEntry = findProjectConfigEntry(targetDir);
+      const foundProjectEntry = findProjectConfigEntry(targetDir);
+      // A temporary workspace minted beside a real login never targets the
+      // directory's linked project: that link names a project the ACCOUNT
+      // owns, and this credential is not the account. An explicit --project
+      // still wins, because then the caller named the target themselves.
+      const linkedProjectEntry = besideRealLogin && !opts.project ? null : foundProjectEntry;
       let targetProjectConfig = linkedProjectEntry?.config;
       let deployStateEntry: ProjectConfigEntry | null = null;
       let projectId = opts.project as string | undefined;
@@ -448,9 +500,14 @@ export function registerDeploy(program: Command) {
         if (linkedProjectEntry) {
           projectId = linkedProjectEntry.config.project_id;
           deployStateEntry = linkedProjectEntry;
+        } else if (besideRealLogin && sideCar?.project) {
+          // Same temporary session, same throwaway — a re-run redeploys it
+          // instead of littering the account's namespace with another.
+          targetProjectConfig = sideCar.project;
+          projectId = sideCar.project.project_id;
         } else if (tempSession) {
-          // No `.somewhere.json` and no account to run `somewhere init` —
-          // auto-create the project so a temp deploy is a single command.
+          // Nothing linked that this credential can write — auto-create the
+          // project so a temporary deploy stays a single command.
           const createSpinner = opts.json ? null : ora('Creating a temporary project...').start();
           try {
             const name = deriveTempProjectName(targetDir);
@@ -465,7 +522,16 @@ export function registerDeploy(program: Command) {
               name: created.name,
               subdomain: created.subdomain ?? name,
             };
-            saveProjectConfig(targetDir, targetProjectConfig);
+            if (besideRealLogin && sideCar) {
+              // Remembered with the temporary credential, NOT in the
+              // directory's `.somewhere.json` — that file is the developer's
+              // own link and a throwaway their account does not own has no
+              // business overwriting it.
+              sideCar = { ...sideCar, project: targetProjectConfig };
+              saveTempSession(sideCar);
+            } else {
+              saveProjectConfig(targetDir, targetProjectConfig);
+            }
             projectId = created.id;
           } catch (err) {
             createSpinner?.fail('Could not create a temporary project');
@@ -739,7 +805,11 @@ export function registerDeploy(program: Command) {
             const hours = formatTtlHours(tempSession.ttlSeconds);
             info(`Expires: about ${hours} hour${hours === 1 ? '' : 's'} after the temporary session was created`);
           }
-          info(`Next step: ${teal('somewhere login')} to keep it.`);
+          info(
+            besideRealLogin
+              ? `Your account login is untouched. Open the claim URL to move this app into it; drop ${teal('--temporary')} to deploy to your account instead.`
+              : `Next step: ${teal('somewhere login')} to keep it.`,
+          );
         } else {
           if (formatted.liveUrl) {
             success(`Live at ${teal(formatted.liveUrl)}`);

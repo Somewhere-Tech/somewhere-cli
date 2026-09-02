@@ -226,4 +226,85 @@ test('deploy --json with no stored credential deploys and emits the anonymous co
   assert.equal(result.stderr, '');
 });
 
+// --- `--temporary` means temporary, whatever the login state ---------------
+//
+// Being logged in used to override the flag ("Already logged in — deploying to
+// your account."), which also dragged in account mode's linked-project
+// requirement, so `--temporary` in an unlinked directory failed outright
+// instead of doing the one thing it was asked to do (pfb_9bbc936e5001).
+
+function realLoginHome(prefix) {
+  const HOME = mkdtempSync(join(tmpdir(), prefix));
+  mkdirSync(join(HOME, '.somewhere'), { recursive: true });
+  writeFileSync(join(HOME, '.somewhere', 'config.json'), JSON.stringify({
+    token: 'smt_real_account',
+    user: { email: 'dev@example.com', username: 'dev' },
+  }) + '\n');
+  return HOME;
+}
+
+test('--temporary while logged in and unlinked takes the temporary path, no link required', async () => {
+  const HOME = realLoginHome('sw-temp-e2e-home-loggedin-');
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-fixture-loggedin-'));
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>hi</body></html>\n');
+
+  const beforeTempCreate = tempCreateCalls;
+  const beforeProjects = projectsCalls;
+  const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
+
+  const first = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
+  assert.equal(first.status, 0, `expected exit 0, got ${first.status}\nstdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+  assert.doesNotMatch(first.stdout, /Already logged in/);
+  assert.doesNotMatch(first.stdout + first.stderr, /No project linked/);
+  // Where it went and how long it lives.
+  assert.match(first.stdout, /Live URL:/);
+  assert.match(first.stdout, /Claim URL:/);
+  assert.match(first.stdout, /Expires at:/);
+  assert.match(first.stdout, /Your account login is untouched/);
+  assert.equal(tempCreateCalls, beforeTempCreate + 1, 'one temporary session minted');
+  assert.equal(projectsCalls, beforeProjects + 1, 'the throwaway project was auto-created');
+
+  // The account login survives it, and the directory keeps its own link state.
+  const config = JSON.parse(readFileSync(join(HOME, '.somewhere', 'config.json'), 'utf8'));
+  assert.equal(config.token, 'smt_real_account', 'real login untouched');
+  assert.equal(config.temporary, undefined, 'real login was not downgraded to a temporary one');
+  assert.equal(existsSync(join(fixtureDir, '.somewhere.json')), false,
+    'a throwaway the account does not own is not written into the directory link');
+
+  const sideCar = JSON.parse(readFileSync(join(HOME, '.somewhere', 'temp-session.json'), 'utf8'));
+  assert.equal(sideCar.token, 'smt_e2e_temp');
+  assert.equal(sideCar.project.project_id, 'proj_e2e_1');
+
+  // A re-run in the same window redeploys the SAME throwaway.
+  const second = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
+  assert.equal(second.status, 0, `expected exit 0, got ${second.status}\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+  assert.equal(tempCreateCalls, beforeTempCreate + 1, 'no second temporary session');
+  assert.equal(projectsCalls, beforeProjects + 1, 'no second throwaway project');
+});
+
+test('logged in and linked with NO flag still deploys to the account, unchanged', async () => {
+  const HOME = realLoginHome('sw-temp-e2e-home-account-');
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-temp-e2e-fixture-account-'));
+  writeFileSync(join(fixtureDir, 'index.html'), '<html><body>hi</body></html>\n');
+  writeFileSync(join(fixtureDir, '.somewhere.json'), JSON.stringify({
+    project_id: 'proj_account_1',
+    name: 'mine',
+    subdomain: 'mine',
+  }) + '\n');
+
+  const beforeTempCreate = tempCreateCalls;
+  const beforeProjects = projectsCalls;
+  const result = await run(['deploy'], {
+    cwd: fixtureDir,
+    env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+  });
+
+  assert.equal(result.status, 0, `expected exit 0, got ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.doesNotMatch(result.stdout, /Claim URL:/, 'the account path relays no claim URL');
+  assert.match(result.stdout, /Live at /);
+  assert.equal(tempCreateCalls, beforeTempCreate, 'no temporary session minted for an account deploy');
+  assert.equal(projectsCalls, beforeProjects, 'no project auto-created for an account deploy');
+  assert.equal(existsSync(join(HOME, '.somewhere', 'temp-session.json')), false);
+});
+
 test.after(() => server.close());

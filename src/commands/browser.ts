@@ -16,9 +16,19 @@ interface BrowserStepResult {
   selector?: string;
   script?: string;
   path?: string;
+  /** The hosted browser returns an evaluated value here (`steps[].value`) —
+   *  an `eval` expression's result, a `snapshot`'s page outline. */
+  value?: unknown;
+  /** The local loopback browser (`src/local/browser-run.ts`) returns the same
+   *  thing under this name. Both are read; neither may be dropped. */
   result?: unknown;
   error?: string;
 }
+
+/** Step actions whose whole purpose is to hand back a value. When one of these
+ *  reports no value at all, saying so is the report — a blank line reads as
+ *  "it returned nothing", which is not the same as "nothing came back". */
+const VALUE_ACTIONS = new Set(['eval', 'snapshot']);
 
 /** The combined health response from POST /v1/browser (confirmed shape: the
  *  agent-native browser returns these signals whether or not `steps` ran). */
@@ -182,13 +192,43 @@ function failedRequestText(e: unknown): string {
   return String(e);
 }
 
-function stringifyResult(v: unknown): string {
+/**
+ * The evaluated value a step handed back, rendered for a terminal.
+ *
+ * A string prints as itself; everything else prints as the JSON `--json` would
+ * have shown, pretty-printed so an object is readable rather than one long
+ * line. `null` prints as `null` — the hosted browser maps an expression that
+ * returned `undefined` to null, and that IS the answer.
+ */
+export function stringifyResult(v: unknown): string {
   if (typeof v === 'string') return v;
   try {
-    return JSON.stringify(v);
+    const json = JSON.stringify(v, null, 2);
+    return json === undefined ? String(v) : json;
   } catch {
     return String(v);
   }
+}
+
+/**
+ * `  result:` lines for one step, or [] when the step carries no value and
+ * was never going to.
+ *
+ * The hosted browser puts the value in `value`; the local loopback browser
+ * puts it in `result`. Reading only one of them is how `--eval` came back
+ * blank in text mode while `--json` showed the answer (pfb_4a4d8dd84186).
+ * A multi-line object is indented under the label so every line still belongs
+ * to a visible owner.
+ */
+export function stepResultLines(s: BrowserStepResult): string[] {
+  const value = s.value !== undefined ? s.value : s.result;
+  if (value === undefined) {
+    if (!VALUE_ACTIONS.has(s.action ?? '') || s.error) return [];
+    return [`  result: ${dim('(no value returned)')}`];
+  }
+  const text = stringifyResult(value);
+  if (!text.includes('\n')) return [`  result: ${text}`];
+  return ['  result:', ...text.split('\n').map((l) => `    ${l}`)];
 }
 
 /**
@@ -226,7 +266,7 @@ export function formatBrowserReport(
     let line = `step ${i + 1} ${mark} ${label}`.trimEnd();
     if (s.error) line += ` ${dim(`— ${s.error}`)}`;
     lines.push(line);
-    if (s.result !== undefined) lines.push(`  result: ${stringifyResult(s.result)}`);
+    for (const l of stepResultLines(s)) lines.push(l);
   }
 
   for (const e of ce) lines.push(`console_error: ${signalText(e)}`);

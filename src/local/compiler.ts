@@ -416,20 +416,96 @@ export function detectBundleEntry(files: Record<string, string>): string | null 
   const entries = collectModuleEntryScripts(files);
   const indexHtml = files['index.html'];
   if (typeof indexHtml === 'string') {
-    const tagRe = /<script\b[^>]*>/gi;
-    let m: RegExpExecArray | null;
-    while ((m = tagRe.exec(indexHtml)) !== null) {
-      const tag = m[0];
-      if (!/\btype\s*=\s*["']module["']/i.test(tag)) continue;
-      const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag);
-      if (!srcMatch) continue;
-      let src = srcMatch[1];
-      if (src.startsWith('/')) src = src.slice(1);
+    for (const src of moduleScriptSrcs(indexHtml)) {
       if (entries.has(src)) return src;
     }
   }
   for (const e of entries) return e;
   return null;
+}
+
+/** Every `<script type="module" src>` in one HTML document, root-relative
+ *  paths normalized to deploy keys. Shared by every entry rule below so they
+ *  cannot disagree about what counts as a module script. */
+function moduleScriptSrcs(html: string): string[] {
+  const out: string[] = [];
+  const tagRe = /<script\b[^>]*>/gi;
+  let m: RegExpExecArray | null;
+  while ((m = tagRe.exec(html)) !== null) {
+    const tag = m[0];
+    if (!/\btype\s*=\s*["']module["']/i.test(tag)) continue;
+    const srcMatch = /\bsrc\s*=\s*["']([^"']+)["']/i.exec(tag);
+    if (!srcMatch) continue;
+    let src = srcMatch[1];
+    if (src.startsWith('/')) src = src.slice(1);
+    out.push(src);
+  }
+  return out;
+}
+
+/**
+ * A module entry the platform serves EXACTLY as written: plain JavaScript.
+ *
+ * Deliberately the complement of isCompilableEntry, not an oversight in it.
+ * The deploy pipeline compiles the TypeScript family and .jsx and serves
+ * .js/.mjs/.cjs raw as native ESM, which is what protects browser-Babel
+ * projects from being compiled twice. Both are entries; they differ only in
+ * whether the platform compiles them.
+ */
+export function isRawServedEntry(path: string): boolean {
+  return /\.[mc]?js$/i.test(path);
+}
+
+/** The client entry forms `somewhere dev` and `somewhere deploy` both accept,
+ *  for the message a project with no usable entry gets. */
+export const ACCEPTED_ENTRY_FORMS =
+  '.tsx / .ts / .jsx / .mts / .cts are compiled by the platform; .js / .mjs / .cjs are served as written';
+
+export type DevEntry =
+  | { kind: 'compiled'; entry: string }
+  | { kind: 'raw'; entry: string }
+  | { kind: 'none'; declared: string[] };
+
+/**
+ * What the local loop should do with this project's frontend, decided from
+ * index.html exactly as the deploy pipeline decides it.
+ *
+ * `somewhere dev` used to refuse any project whose entry was not compilable,
+ * so a project with `<script type="module" src="/src/main.js">` could be
+ * deployed and served but not run locally (pfb_e32a4e630c45). Deploy does not
+ * refuse it — `bundleProject` simply returns null and the file is served raw
+ * — and the local loop's whole promise is that it is the same build. So:
+ *
+ *   compiled → index.html points at a TS-family/.jsx entry: compile it.
+ *   raw      → index.html points at a .js/.mjs/.cjs entry that exists on
+ *              disk: serve it untouched, which is what deploy does.
+ *   none     → index.html declares module scripts but none of them is a file
+ *              in this directory. `declared` carries what it asked for, so
+ *              the message can name the missing path.
+ *
+ * An index.html with NO module script at all is `raw` with no entry to name:
+ * a browser-Babel page or a plain static site is a legitimate project that
+ * deploys and must therefore run here too.
+ */
+export function resolveDevEntry(files: Record<string, string>): DevEntry {
+  const compiled = detectBundleEntry(files);
+  if (compiled) return { kind: 'compiled', entry: compiled };
+
+  const htmlFiles = Object.entries(files).filter(
+    ([path, content]) => typeof content === 'string' && path.toLowerCase().endsWith('.html'),
+  );
+  // index.html first — it is the document the deploy serves at the root.
+  htmlFiles.sort(([a], [b]) => (a === 'index.html' ? -1 : b === 'index.html' ? 1 : 0));
+
+  const declared: string[] = [];
+  for (const [, content] of htmlFiles) {
+    for (const src of moduleScriptSrcs(content)) {
+      declared.push(src);
+      if (isRawServedEntry(src) && files[src] !== undefined) return { kind: 'raw', entry: src };
+    }
+  }
+  if (declared.length) return { kind: 'none', declared };
+  return { kind: 'raw', entry: '' };
 }
 
 /**

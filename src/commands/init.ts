@@ -158,7 +158,10 @@ export function registerInit(program: Command) {
         info(
           shouldScaffold
             ? 'Next: npm install → npm run typecheck → somewhere deploy-check → somewhere deploy'
-            : 'Project created. Run claude to keep building.',
+            // Whichever coding agent the developer uses drives this CLI, so the
+            // closing line names the PLATFORM's next commands and no vendor's
+            // (pfb_aaff8e9d14fb).
+            : 'Next: somewhere dev to run it here, somewhere deploy to publish it. Any coding agent can drive this CLI.',
         );
       } catch (err) {
         spinner?.fail('Failed to create project');
@@ -235,5 +238,5 @@ export async function linkExisting(
   }
 
   console.log('');
-  info('Project linked. Run claude to start building.');
+  info('Next: somewhere dev to run it here, somewhere deploy to publish it. Any coding agent can drive this CLI.');
 }

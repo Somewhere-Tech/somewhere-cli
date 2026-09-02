@@ -1,5 +1,51 @@
 # Changelog
 
+## 0.31.2
+
+### Fixed
+
+- **`somewhere dev` now runs the same entry files `somewhere deploy`
+  publishes.** A project whose `index.html` points at
+  `<script type="module" src="/src/main.js">` deploys and serves perfectly —
+  the platform serves plain JavaScript modules exactly as you wrote them,
+  rather than compiling them — but the local loop refused to start on it at
+  all, insisting on `.tsx`. It now follows the same rule deploy follows: your
+  `index.html` names the entry, `.tsx` / `.ts` / `.jsx` / `.mts` / `.cts` are
+  compiled, `.js` / `.mjs` / `.cjs` are served as written, and a page with no
+  module script at all (a browser-Babel page, a static site) simply runs. The
+  loop stops only when `index.html` names a file that is not in the directory
+  — and then it says which file, and which forms it accepts.
+- **The local runtime no longer suggests editing a package file outside your
+  project.** Running a function could print advice to add `"type": "module"` to
+  a `package.json` in a parent directory — on some machines, the one in your
+  home folder. The cause was a module-format lookup with no upper bound, which
+  walked straight past the project. The runtime now determines the format from
+  your project's own package file and your own source, stopping at the project
+  root, so no advice can ever name a file outside it. CommonJS and ES module
+  functions both keep working exactly as they do when deployed.
+- **`somewhere browser --eval` prints the evaluated value in normal output.**
+  The value came back correctly with `--json` but was dropped from the default
+  text report, so the command you use to check a live page did not show what it
+  found. Text output now prints the value under the step — strings as
+  themselves, objects readably indented — and an expression that returned
+  nothing says so instead of leaving a blank line.
+- **`somewhere deploy --temporary` means temporary, whether or not you are
+  signed in.** Being signed in used to override the flag and switch the deploy
+  to your account, which then failed in a directory with no linked project. The
+  flag is the request: it always deploys to a temporary workspace, never needs a
+  linked project, and prints the live URL, the claim link, and when the
+  workspace expires. Your account sign-in survives it untouched, the directory's
+  own link is left alone, and a second `--temporary` deploy in the same window
+  redeploys the same temporary app instead of creating another. A deploy without
+  the flag is unchanged.
+
+### Changed
+
+- `somewhere init` closes by naming what to run next on the platform —
+  `somewhere dev` to run your app here, `somewhere deploy` to publish it — and
+  notes that any coding agent can drive this CLI, in place of the previous
+  line naming one specific tool.
+
 ## 0.31.1
 
 ### Fixed

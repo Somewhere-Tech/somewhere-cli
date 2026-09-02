@@ -29,8 +29,8 @@
  * TypeScript runs through Node's native type stripping (>= 22.18 / 23.6).
  */
 import { registerHooks } from 'node:module';
-import { existsSync, realpathSync, statSync } from 'node:fs';
-import { dirname, resolve as resolvePath } from 'node:path';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, extname, resolve as resolvePath, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const EXT_CANDIDATES = ['.ts', '.tsx', '.mts', '.js', '.mjs', '.jsx'];
@@ -39,6 +39,111 @@ let generation = 1;
 let installedRoot: string | null = null;
 /** Extra dirs to resolve bare specifiers from, in order, after the project. */
 let fallbackModuleDirs: string[] = [];
+/** `"type"` from the PROJECT'S OWN package.json — see declaredFormat. */
+let projectModuleType: 'module' | 'commonjs' | null = null;
+let projectModuleTypeRead = false;
+
+/**
+ * The project's declared module type, read from the package.json AT THE
+ * PROJECT ROOT and nowhere else.
+ *
+ * Absent is not "look higher up" — it is the answer, and the default below
+ * applies. A project without a package.json of its own does not inherit one
+ * from whatever happens to sit above it on this machine.
+ */
+function readProjectModuleType(): 'module' | 'commonjs' | null {
+  if (projectModuleTypeRead) return projectModuleType;
+  projectModuleTypeRead = true;
+  projectModuleType = null;
+  if (!installedRoot) return null;
+  try {
+    const parsed = JSON.parse(readFileSync(resolvePath(installedRoot, 'package.json'), 'utf8')) as {
+      type?: unknown;
+    };
+    if (parsed.type === 'module' || parsed.type === 'commonjs') projectModuleType = parsed.type;
+  } catch {
+    // No package.json at the project root, or not readable JSON. Both mean
+    // "the project did not say", which the default handles.
+  }
+  return projectModuleType;
+}
+
+/**
+ * The module format for a file inside the project, so Node never has to guess.
+ *
+ * Guessing is what caused the damage (pfb_c4aee81d756a): with no format
+ * declared, Node walks UP from the module looking for the nearest package.json,
+ * a walk with no upper bound, and then prints advice naming whatever it found —
+ * on a real machine, `/Users/<name>/package.json`. Telling a developer (or the
+ * coding agent driving them) to edit a file outside the project is not advice
+ * anyone should act on, and the walk that produced it had already left the
+ * project.
+ *
+ * Declaring the format ends the walk. `export default async function (req, sw)`
+ * is the platform's function contract, so ESM is the default here exactly as it
+ * is on deploy; an explicit `"type"` in the project's OWN package.json still
+ * wins, because that is the developer saying otherwise about their own project.
+ */
+/** Does this source parse as a CommonJS module body? ES module syntax and
+ *  top-level await do not, which is precisely the question Node asks before it
+ *  falls back to ESM — asked here without compiling or RUNNING anything. */
+function parsesAsCommonJs(source: string): boolean {
+  try {
+    // eslint-disable-next-line no-new-func
+    new Function(source);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+const ESM_SYNTAX = /^[ \t]*(?:import|export)\b/m;
+const CJS_SYNTAX = /\bmodule\.exports\b|\bexports\.[A-Za-z_$]/;
+
+export function declaredFormat(
+  path: string,
+  projectType: 'module' | 'commonjs' | null,
+  readSource: () => string,
+): string | null {
+  const ext = extname(path).toLowerCase();
+  // Node decides these from the extension alone — no package.json, no walk.
+  if (ext === '.mts') return 'module-typescript';
+  if (ext === '.cts') return 'commonjs-typescript';
+  if (ext === '.mjs') return 'module';
+  if (ext === '.cjs') return 'commonjs';
+
+  const ts = ext === '.ts' || ext === '.tsx';
+  if (!ts && ext !== '.js') return null;
+  if (projectType) {
+    const cjs = projectType === 'commonjs';
+    return ts ? (cjs ? 'commonjs-typescript' : 'module-typescript') : (cjs ? 'commonjs' : 'module');
+  }
+
+  // The project did not say, so answer it the way Node would — from the source
+  // in front of us, never from a package.json above this project. A `.js`
+  // function written `module.exports = async function (req, sw)` deploys and
+  // runs today; guessing ESM for it would have broken it locally only.
+  let source: string;
+  try {
+    source = readSource();
+  } catch {
+    return null;
+  }
+  if (parsesAsCommonJs(source)) return ts ? 'commonjs-typescript' : 'commonjs';
+  if (!ts) return 'module';
+  // A `.ts` that failed the parse may have failed on its TYPE annotations
+  // rather than on module syntax, so the two syntaxes are looked for directly.
+  // The platform's function contract is `export default`, which is the tie-break.
+  if (ESM_SYNTAX.test(source)) return 'module-typescript';
+  if (CJS_SYNTAX.test(source)) return 'commonjs-typescript';
+  return 'module-typescript';
+}
+
+/** Is `filePath` inside the project this loader was installed for? */
+function withinProject(filePath: string): boolean {
+  if (!installedRoot) return false;
+  return filePath === installedRoot || filePath.startsWith(installedRoot + sep);
+}
 
 export function bumpGeneration(): number {
   return ++generation;
@@ -108,6 +213,7 @@ export function installLoader(projectRoot: string, moduleDirs: string[] = []): v
   // Each entry is a node_modules dir; resolve from its PARENT so Node performs
   // its normal node_modules lookup there.
   fallbackModuleDirs = moduleDirs.map((dir) => realPath(resolvePath(dir, '..')));
+  if (installedRoot !== root) projectModuleTypeRead = false;
   if (installedRoot !== null) {
     installedRoot = root;
     return;
@@ -164,6 +270,33 @@ export function installLoader(projectRoot: string, moduleDirs: string[] = []): v
       const gen = parentUrl.searchParams.get('gen');
       const url = pathToFileURL(found).href + (gen ? `?gen=${gen}` : '');
       return { url, shortCircuit: true };
+    },
+
+    /**
+     * Declare the format of every project module, so Node's own
+     * nearest-package.json walk never runs and never reports a file outside
+     * this project (pfb_c4aee81d756a). Only project files are touched:
+     * anything in node_modules, the CLI's own tree, or a URL Node has already
+     * classified passes straight through.
+     */
+    load(url, context, nextLoad) {
+      if (context.format || !installedRoot || !url.startsWith('file:')) {
+        return nextLoad(url, context);
+      }
+      let filePath: string;
+      try {
+        const parsed = new URL(url);
+        filePath = realPath(fileURLToPath(`file://${parsed.pathname}`));
+      } catch {
+        return nextLoad(url, context);
+      }
+      if (!withinProject(filePath) || filePath.includes(`${sep}node_modules${sep}`)) {
+        return nextLoad(url, context);
+      }
+      const format = declaredFormat(filePath, readProjectModuleType(), () =>
+        readFileSync(filePath, 'utf8'),
+      );
+      return format ? nextLoad(url, { ...context, format }) : nextLoad(url, context);
     },
   });
 }
