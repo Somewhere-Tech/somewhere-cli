@@ -44,6 +44,7 @@ import { homedir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { promisify } from 'node:util';
+import semver from 'semver';
 
 const execFileAsync = promisify(execFile);
 
@@ -180,14 +181,31 @@ async function prepareToolchain(
 }
 
 /**
- * Install React at the version the compile image bakes, not the floor of the
- * declared range (tsk_0312cf17).
+ * Install a dependency at the version the compile image BAKES, not the floor of
+ * the declared range (tsk_0312cf17 for React, tsk_a8cb3d23 for the rest of the
+ * baked set).
  *
  * The image keeps React 19 in a tree of its own and prefers it over installing
  * the app's range; locally that set does not exist, so the compiler took its
  * other branch and floor-pinned instead — `react: ^19.2.0` became exactly
  * 19.2.0 while the image served 19.2.7. The same tree, compiled by the same
  * compiler, against two different Reacts.
+ *
+ * That was never only about React. The image bakes ~20 more packages (router,
+ * query, forms, validation, dates, charts, icons…), and `ensureDeps` prefers a
+ * baked copy whenever its version satisfies the declared range — so `zod:
+ * ^3.23.0` served the image's baked 3.24.x on deploy and a floor-pinned 3.23.0
+ * locally. Same divergence, same fix: every group the vendor records is offered
+ * here, in the container's own order (baked first, then the isolated React 19
+ * set), each guarded by imagePinSatisfies so a pin is only ever taken when the
+ * container itself would have taken the baked copy.
+ *
+ * WHAT THIS DOES NOT COVER, stated plainly: when the project has its own
+ * node_modules, that tree is first on the search path and the local build uses
+ * the copy the developer installed. Deliberate — it is the exact tree they
+ * installed, and it is why a local loop beats a cloud one. These pins decide
+ * what the CLI's own dependency cache installs when a package is NOT already
+ * on the search path.
  *
  * The fix is to rewrite the spec, NOT to add a second node_modules tree. That
  * was tried and is actively worse: a package that physically lives inside the
@@ -200,13 +218,49 @@ async function prepareToolchain(
  * something else (react-router-dom pulls one in), which is how a warm cache
  * ended up serving a third version again.
  */
-export function applyImagePins(specs: string[], pins: Record<string, string>): string[] {
-  if (!Object.keys(pins).length) return specs;
+export function applyImagePins(
+  specs: string[],
+  deps: Record<string, string>,
+  pinGroups: Array<Record<string, string>>,
+): string[] {
+  const groups = pinGroups.filter((g) => g && Object.keys(g).length > 0);
+  if (!groups.length) return specs;
   return specs.map((spec) => {
     const at = spec.lastIndexOf('@');
     const name = at > 0 ? spec.slice(0, at) : spec;
-    return pins[name] ? `${name}@${pins[name]}` : spec;
+    const range = deps[name];
+    for (const group of groups) {
+      const version = group[name];
+      if (version && imagePinSatisfies(version, range)) return `${name}@${version}`;
+    }
+    return spec;
   });
+}
+
+/**
+ * May the image's baked VERSION stand in for the project's declared RANGE?
+ *
+ * This is `bakedSatisfies` from the compile core, asked from the other side:
+ * the container prefers its baked copy only when that copy satisfies the range,
+ * so the local loop may pin to it only under the same condition. Without the
+ * check a project that declares `react-router-dom: ^7.9.5` would be pinned to
+ * the image's baked 6.x — a build that works today refused tomorrow.
+ *
+ * The bias is the core's, one-directional: anything we cannot POSITIVELY prove
+ * satisfies — an unparseable range (`latest`, a git or alias spec), a version
+ * semver rejects, semver itself unavailable — returns false and leaves the
+ * core's own spec alone. A false negative costs an install of the floor-pin,
+ * which is exactly today's behaviour; a false positive would compile the
+ * developer's app against a library they did not ask for.
+ */
+export function imagePinSatisfies(version: string, range: string | undefined): boolean {
+  const wanted = typeof range === 'string' && range.trim() ? range.trim() : '*';
+  try {
+    if (semver.validRange(wanted) === null) return false;
+    return semver.satisfies(version, wanted, { includePrerelease: false });
+  } catch {
+    return false;
+  }
 }
 
 function digestOf(value: unknown): string {
@@ -231,7 +285,7 @@ function digestOf(value: unknown): string {
 function resolveAppDependencies(
   cwd: string,
   pkg: { dependencies?: Record<string, string> },
-  pins: Record<string, string>,
+  pinGroups: Array<Record<string, string>>,
 ): string[] {
   const search: string[] = [];
   const projectModules = join(cwd, 'node_modules');
@@ -239,9 +293,9 @@ function resolveAppDependencies(
 
   const deps = pkg.dependencies ?? {};
   // The pins are part of the cache identity (tsk_0312cf17): when the image
-  // bumps its React and the CLI re-vendors, the old cache is simply not reused,
-  // so a warm cache can never keep serving the version we just moved off.
-  const cacheDir = join(cacheHome(), 'dev-deps', digestOf([Object.entries(deps).sort(), pins]));
+  // bumps a baked package and the CLI re-vendors, the old cache is simply not
+  // reused, so a warm cache can never keep serving the version we moved off.
+  const cacheDir = join(cacheHome(), 'dev-deps', digestOf([Object.entries(deps).sort(), pinGroups]));
   // The core decides what is actually missing (its baked-satisfies rules run
   // against this exact search path) and calls host.installPackages for the
   // rest. All we do here is make the cache dir part of the search path.
@@ -374,8 +428,11 @@ export class LocalCompiler {
 
     const groups = ['base', ...(tailwindVersion === 4 ? ['tw4'] : tailwindVersion === 3 ? ['tw3'] : [])];
     const toolchainDirs = await prepareToolchain(manifest, groups, this.opts.onPrepare);
-    const react19Pins = manifest.toolchain.react19 ?? {};
-    this.searchPath = resolveAppDependencies(this.opts.cwd, pkg, react19Pins);
+    // The image's own versions, in the container's preference order: the baked
+    // tree first, the isolated React 19 set second (ensureDeps only reaches
+    // react19 when the baked React 18 does not satisfy the pin).
+    const imagePinGroups = [manifest.toolchain.baked ?? {}, manifest.toolchain.react19 ?? {}];
+    this.searchPath = resolveAppDependencies(this.opts.cwd, pkg, imagePinGroups);
     this.depCacheDir = resolve(this.searchPath[this.searchPath.length - 1], '..');
 
     const requireToolchain = (group: string) => createRequire(join(toolchainDirs[group], 'package.json'));
@@ -409,7 +466,7 @@ export class LocalCompiler {
       // is not a safety signal.
       requiresPackageProxy: false,
       installPackages: async ({ specs }: { specs: string[] }) => {
-        const pinned = applyImagePins(specs, react19Pins);
+        const pinned = applyImagePins(specs, pkg.dependencies ?? {}, imagePinGroups);
         this.opts.onPrepare?.(`${pinned.length} ${pinned.length === 1 ? 'dependency' : 'dependencies'} (${pinned.join(', ')})`);
         await installInto(this.depCacheDir, pinned);
       },

@@ -1,5 +1,69 @@
 # Changelog
 
+## 0.30.1
+
+### Added
+
+- `tsk_0e9e13b8` — `somewhere signup` exists. Someone who has never used the
+  platform ran `somewhere login`, and the CLI's answer assumed they already had
+  an account. `signup` prints the page that creates one, and `login` names it
+  too, so the front door is a door.
+- `tsk_c166924f` — `somewhere deploy` publishes your **app**, not the folder it
+  was built in. Notes, task lists, scratch files and agent instructions in your
+  project root stay on your machine: the deploy prints `Not published (N): …`
+  naming exactly what it held back, so the decision is visible rather than
+  silent. Publish one on purpose with `somewhere deploy --include <file>`, or
+  keep it permanently with a `!<file>` line in `.somewhereignore`.
+
+### Fixed
+
+- `tsk_926fbf8e` — `somewhere docs <topic>` answers from the public corpus with
+  no login. Reading the documentation used to require an account, which is the
+  wrong order: you read the docs to decide whether to make one.
+- `tsk_f250e561` — `somewhere status` exits 0 when the platform answers a plan
+  question. A feature your plan does not include is an ANSWER, not a failure;
+  exiting non-zero made every scripted `status` on a Free account look like a
+  broken command.
+- `tsk_a605ff7b`, `tsk_10be456b` — `somewhere browser` against a local URL now
+  fails inside a bound instead of hanging. Every wait on the local path has a
+  deadline, a port with nothing listening is reported as such with the remedy
+  named, and the browser's own favicon request — which the page never made — no
+  longer counts as your app returning a 404.
+- `tsk_9c5ed7f8` — a failed `somewhere deploy` now says something you can act
+  on. When the platform answers `retry: true` — its own statement that the
+  request changed nothing and the same one is safe to send again — the CLI
+  retries once instead of stopping (it parsed that field and never read it).
+  An error body it cannot classify prints the status and the response instead
+  of the bare words "Unknown error". And every deploy failure now prints the
+  request id from the response, so a failure you can see is a failure we can
+  find.
+- `tsk_eef0a0ef` — `somewhere dev` prints your app's output, not the platform's
+  telemetry. Database calls were emitting raw internal metrics JSON and a
+  repeated "deferred flush failed: HTTP 403" from a background channel you did
+  not ask for and cannot fix. Both are gone by default; set
+  `SOMEWHERE_DEV_TELEMETRY=1` to see them.
+- `tsk_a8cb3d23` — the local loop resolves a dependency at the version the build
+  image serves, for every package the image carries. This already held for
+  React; it now holds for the whole baked set (router, query, state, forms,
+  validation, http, dates, utils, styling, animation, charts, icons), so a
+  declared `^3.23.0` no longer compiles against 3.23.0 on your machine and a
+  newer one on deploy. A pin is taken only when the image's version satisfies
+  the range you declared — a project on a major the image does not carry is
+  untouched.
+
+### Known difference
+
+- The JavaScript bundle `somewhere dev` builds and the one `somewhere deploy`
+  builds are built by the same compiler, from the same source, with the same
+  toolchain. They are not byte-identical, and there are two reasons rather than
+  one. Build comments and source-map entries record where each module was read
+  from — your machine locally, the build image on deploy — which has no effect
+  on what your app does. Separately, the two builds can still resolve DIFFERENT
+  VERSIONS of an app dependency: `somewhere dev` uses the tree you installed,
+  while `somewhere deploy` resolves the range your `package.json` declares and
+  does not yet read your lockfile. If that matters to a library you depend on,
+  pin it exactly in `package.json` and both sides agree.
+
 ## 0.30.0
 
 ### Added
@@ -123,10 +187,15 @@
 ### Known difference
 
 - The JavaScript bundle `somewhere dev` builds and the one `somewhere deploy`
-  builds are the same code, built by the same compiler with the same dependency
-  versions — but they are not byte-identical. Build comments and source-map
-  entries record where each module was read from, which is your machine locally
-  and the build image on deploy. It has no effect on what your app does.
+  builds are the same code, built by the same compiler — but they are not
+  byte-identical. Build comments and source-map entries record where each module
+  was read from, which is your machine locally and the build image on deploy.
+  It has no effect on what your app does.
+
+  **Correction (0.30.1):** this entry also said the two builds use the same
+  dependency versions. That was not true — they can resolve different versions
+  of a dependency whose range you left open. See the Known difference under
+  0.30.1 for what actually holds and what to do about it.
 
 ## 0.29.0
 

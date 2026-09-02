@@ -51,9 +51,14 @@ export function printJsonLine(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value ?? null)}\n`);
 }
 
-export function printJsonError(errorCode: string, message: string): void {
+export function printJsonError(
+  errorCode: string,
+  message: string,
+  /** Envelope fields worth machine-reading — today the correlation ids. */
+  extra?: Record<string, unknown>,
+): void {
   jsonErrorWritten = true;
-  printJson({ ok: false, error: errorCode, message });
+  printJson({ ok: false, error: errorCode, message, ...(extra ?? {}) });
 }
 
 export function stripAnsi(value: string): string {

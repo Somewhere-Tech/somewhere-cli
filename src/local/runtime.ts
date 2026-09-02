@@ -26,6 +26,7 @@ import { fallbackProjectServingUrl } from '../lib/project-urls.js';
 import { compileRoutes, matchRoute, type LocalRoute } from './router.js';
 import { entryUrl } from './loader.js';
 import { loadLocalEnv } from './envfile.js';
+import { installTelemetryFilter } from './telemetry-filter.js';
 
 // ─── Vendored deployed runtime ──────────────────────────────────────────────
 
@@ -52,6 +53,11 @@ let contextModule: PlatformContextModule | null = null;
 /** Import the vendored runtime once: sw-init (globalThis.sw.endpoint) + context factory. */
 export async function loadVendoredRuntime(): Promise<PlatformContextModule> {
   if (contextModule) return contextModule;
+  // The vendored runtime instruments itself for the platform's telemetry sink,
+  // which does not exist on this machine — so its output would land in the
+  // developer's terminal instead. Filter it here, at the one place the runtime
+  // enters the process (tsk_eef0a0ef).
+  installTelemetryFilter();
   const root = packageRoot();
   await import(pathToFileURL(join(root, 'runtime', 'sw-init.mjs')).href);
   contextModule = (await import(

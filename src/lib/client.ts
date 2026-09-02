@@ -319,6 +319,15 @@ export class ApiClient {
       );
     }
     const text = await res.text();
+    // Every platform reply carries both ids (worker middleware/logging.ts):
+    // `X-Request-Id` is the edge ray, `X-Trace-Id` finds the request in our own
+    // logs. Read them BEFORE anything can throw, so a failure the CLI cannot
+    // classify still hands the developer something we can look up
+    // (tsk_9c5ed7f8 — the sole artefact of one 503 was the word "Unknown").
+    const meta: CliApiErrorMeta = {
+      requestId: res.headers.get('x-request-id') ?? undefined,
+      traceId: res.headers.get('x-trace-id') ?? undefined,
+    };
     let parsed: ApiResponse<T>;
 
     try {
@@ -328,6 +337,9 @@ export class ApiClient {
         'INVALID_RESPONSE',
         `Non-JSON response (${res.status}): ${text.slice(0, 200)}`,
         res.status,
+        undefined,
+        undefined,
+        meta,
       );
     }
 
@@ -339,15 +351,29 @@ export class ApiClient {
       message?: string;
       data?: Record<string, unknown>;
       hint?: string;
+      retry?: unknown;
+      retry_after_ms?: unknown;
     };
-    const { ok: _ok, error, message, data, hint, ...extra } = errBody;
+    const { ok: _ok, error, message, data, hint, retry, retry_after_ms, ...extra } = errBody;
     const extraData = Object.keys(extra).length > 0 ? extra : undefined;
+    // `retry` is the platform's own verdict and it is a TOP-LEVEL field
+    // (worker errorResponse `opts.retry`), not part of `data`. It used to fall
+    // into the rest object and then be dropped whenever `data` was also
+    // present, so the platform said "retry, nothing changed" and the CLI
+    // stopped anyway.
+    if (typeof retry === 'boolean') meta.retry = retry;
+    if (typeof retry_after_ms === 'number' && Number.isFinite(retry_after_ms)) {
+      meta.retryAfterMs = retry_after_ms;
+    }
     throw new CliApiError(
       error ?? 'UNKNOWN',
-      message ?? 'Unknown error',
+      error === undefined && message === undefined
+        ? unclassifiedResponseMessage(res.status, text)
+        : message ?? 'Unknown error',
       res.status,
       data ?? extraData,
       hint,
+      meta,
     );
   }
 
@@ -402,6 +428,25 @@ export class ApiClient {
   }
 }
 
+/**
+ * What the RESPONSE said about itself, as opposed to what the error said.
+ *
+ * Kept separate from `data` on purpose: `data` is the route's own payload,
+ * while these four come from the envelope every route shares — the two
+ * correlation ids the edge stamps, and the platform's explicit verdict on
+ * whether sending the same request again is safe.
+ */
+export interface CliApiErrorMeta {
+  /** `X-Request-Id` — the edge ray. */
+  requestId?: string;
+  /** `X-Trace-Id` — what finds this request in the platform's own logs. */
+  traceId?: string;
+  /** The platform's own answer to "is retrying safe?". Absent means it did not say. */
+  retry?: boolean;
+  /** How long the platform asked us to wait first, when it said. */
+  retryAfterMs?: number;
+}
+
 export class CliApiError extends Error {
   constructor(
     public readonly code: string,
@@ -410,8 +455,42 @@ export class CliApiError extends Error {
     /** Structured payload some errors carry (e.g. BUILD_ERROR file/line/frame). */
     public readonly data?: Record<string, unknown>,
     public readonly hint?: string,
+    public readonly meta: CliApiErrorMeta = {},
   ) {
     super(message);
     this.name = 'CliApiError';
   }
+}
+
+/**
+ * The message for a JSON error body carrying neither `error` nor `message`.
+ *
+ * `JSON.parse` succeeded and both fields were absent, so this is structured
+ * JSON of a shape the CLI does not know — not an HTML error page, which raises
+ * INVALID_RESPONSE and prints its first bytes. Rendering it as the bare string
+ * "Unknown error" threw away the only evidence there was (tsk_9c5ed7f8): show
+ * the status and the body, and let the caller add the correlation ids.
+ */
+export function unclassifiedResponseMessage(status: number, body: string): string {
+  const trimmed = body.trim();
+  const excerpt = trimmed.slice(0, 300);
+  return (
+    `The server answered ${status} with a response this CLI could not classify. ` +
+    (excerpt
+      ? `Response body: ${excerpt}${trimmed.length > 300 ? '…' : ''}`
+      : 'The response body was empty.')
+  );
+}
+
+/**
+ * The one-line reference a developer can hand us to find this exact request.
+ * Empty when the response carried neither id (an old platform, or a failure
+ * that never reached one).
+ */
+export function formatErrorReference(meta: CliApiErrorMeta | undefined): string | null {
+  if (!meta) return null;
+  const parts: string[] = [];
+  if (meta.requestId) parts.push(`request ${meta.requestId}`);
+  if (meta.traceId) parts.push(`trace ${meta.traceId}`);
+  return parts.length ? parts.join(' · ') : null;
 }

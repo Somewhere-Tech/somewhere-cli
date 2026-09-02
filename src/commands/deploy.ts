@@ -2,7 +2,7 @@ import { Command } from 'commander';
 import { basename, resolve } from 'node:path';
 import prompts from 'prompts';
 import ora, { type Ora } from '../lib/spinner.js';
-import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
+import { ApiClient, CliApiError, formatErrorReference, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import {
   getToken,
@@ -77,7 +77,14 @@ const NEXT_APP_WARNING =
   'Port API routes to functions/ handlers, or start from a Vite React app; the platform compiles raw JSX/TSX on deploy.';
 const DEPLOY_HEARTBEAT_MS = 30_000;
 const DEPLOY_MAX_ATTEMPTS = 2;
+// The CLI's OWN verdicts — transport failures it detected itself, where no
+// request ever reached a route. The platform's verdict is a separate input:
+// see isRetryableDeployError.
 const RETRYABLE_DEPLOY_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
+// The longest the CLI will sit on the platform's `retry_after_ms` before its
+// one retry. A wait the platform asks for is worth honouring; an unbounded one
+// is a hang, and `somewhere deploy` must stay a command that finishes.
+const DEPLOY_RETRY_MAX_WAIT_MS = 10_000;
 
 export function isNextAppShapeSignal(signal: string): boolean {
   return signal.startsWith(`${NEXT_APP_SIGNAL_PREFIX} (`);
@@ -793,12 +800,19 @@ export function registerDeploy(program: Command) {
         // with no code/status left a customer unable to tell auth from
         // routing from payload failures (pfb_70e9d140c5a0).
         if (err instanceof CliApiError) {
+          // The correlation ids, ALWAYS — a deploy failure the developer cannot
+          // name is one we cannot find either (tsk_9c5ed7f8).
+          const reference = formatErrorReference(err.meta);
           if (opts.json) {
-            printJsonError(err.code, err.message);
+            printJsonError(err.code, err.message, {
+              ...(err.meta.requestId ? { request_id: err.meta.requestId } : {}),
+              ...(err.meta.traceId ? { trace_id: err.meta.traceId } : {}),
+            });
           } else {
             error(
               `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
             );
+            if (reference) info(dim(reference));
           }
         } else {
           error(err instanceof Error ? err.message : String(err));
@@ -946,13 +960,15 @@ async function callDeployWithRetry<T>(
       if (attempt >= DEPLOY_MAX_ATTEMPTS) throw err;
 
       if (!isRetryableDeployError(err)) throw err;
+      const waitMs = retryWaitMs(err);
       if (!opts.json) {
         opts.spinner?.stop();
         warn(
-          `${opts.dryRun ? 'Deploy check' : 'Deploy'} ${retryReason(err)} after ${formatDeployElapsed(Date.now() - startedAt)}; retrying once.`,
+          `${opts.dryRun ? 'Deploy check' : 'Deploy'} ${retryReason(err)} after ${formatDeployElapsed(Date.now() - startedAt)}; retrying once${waitMs ? ` in ${Math.round(waitMs / 1000)}s` : ''}.`,
         );
         opts.spinner?.start(`${opts.baseText} (retry 2/2)`);
       }
+      if (waitMs) await new Promise((r) => setTimeout(r, waitMs));
     } finally {
       stopHeartbeat();
     }
@@ -968,8 +984,33 @@ function deployTimeoutMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : LONG_CALL_TIMEOUT_MS;
 }
 
+/**
+ * Should this failed deploy be sent again?
+ *
+ * Two independent answers, and both count (tsk_9c5ed7f8). The CLI knows about
+ * the failures it detected itself — a timeout, a stalled server, a dropped
+ * connection. The PLATFORM knows about the rest, and says so: `retry: true` on
+ * the error body is the route stating that this request changed nothing and
+ * the same one is safe to send again (PUBLISH_FROZEN, AUTHORITY_UNAVAILABLE,
+ * DRAFT_SANDBOX_NOT_READY, the post-verify family). The CLI parsed that field
+ * and never consulted it, so an operator retried by hand and the second
+ * attempt succeeded.
+ *
+ * Only an explicit `true` counts: `retry: false` is a refusal, and an absent
+ * field is silence — neither is permission to send a mutating request twice.
+ */
 function isRetryableDeployError(err: unknown): boolean {
-  return err instanceof CliApiError && RETRYABLE_DEPLOY_CODES.has(err.code);
+  if (!(err instanceof CliApiError)) return false;
+  if (RETRYABLE_DEPLOY_CODES.has(err.code)) return true;
+  return err.meta.retry === true;
+}
+
+/** The wait the platform asked for before the retry, bounded. */
+function retryWaitMs(err: unknown): number {
+  if (!(err instanceof CliApiError)) return 0;
+  const asked = err.meta.retryAfterMs;
+  if (typeof asked !== 'number' || !Number.isFinite(asked) || asked <= 0) return 0;
+  return Math.min(Math.floor(asked), DEPLOY_RETRY_MAX_WAIT_MS);
 }
 
 function retryReason(err: unknown): string {
@@ -977,6 +1018,7 @@ function retryReason(err: unknown): string {
   if (err.code === 'TIMEOUT') return 'timed out';
   if (err.code === 'SERVER_SLOW') return 'stalled waiting for the server';
   if (err.code === 'NETWORK_ERROR') return 'lost the connection';
+  if (err.meta.retry === true) return `was refused with a retryable failure (${err.code})`;
   return 'failed';
 }
 

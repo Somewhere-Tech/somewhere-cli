@@ -334,6 +334,54 @@ function readReact19Pins() {
   return pins;
 }
 
+/**
+ * The EXACT version of every package the compile image bakes into its own
+ * node_modules (tsk_a8cb3d23).
+ *
+ * The container's `ensureDeps` prefers a baked copy over installing whenever
+ * the baked VERSION satisfies the project's declared RANGE. The local loop has
+ * no baked tree, so it took the other branch and floor-pinned the range —
+ * `zod: ^3.23.0` became exactly 3.23.0 locally while the image served whatever
+ * its own lockfile installed. Same tree, same compiler, two different
+ * libraries. This is the general case of the React divergence tsk_0312cf17
+ * closed, and it is closed the same way: rewrite the install SPEC to the
+ * image's version, never add a second node_modules tree (see applyImagePins in
+ * the CLI — a package that physically lives beside the cache resolves its own
+ * sibling first, which is how two Reacts once landed in one bundle).
+ *
+ * Read from the LOCKFILE, because the image installs with `npm ci` — the
+ * lockfile is what it actually gets. package.json only carries the ranges, and
+ * pinning a range would reintroduce the very drift this removes.
+ *
+ * EVERY dependency is recorded, toolchain packages included: they sit in the
+ * image's node_modules too, so `bakedSatisfies` prefers them for a project that
+ * declares one. No hand-maintained split between "toolchain" and "customer"
+ * deps — a split is a list that goes stale on the next container bump.
+ */
+function readBakedPins() {
+  const lockPath = join(compilerSrcDir, 'package-lock.json');
+  const lock = JSON.parse(readFileSync(lockPath, 'utf8'));
+  const packages = lock.packages ?? {};
+  const declared = JSON.parse(readFileSync(join(compilerSrcDir, 'package.json'), 'utf8')).dependencies ?? {};
+  const pins = {};
+  for (const name of Object.keys(declared)) {
+    const version = packages[`node_modules/${name}`]?.version;
+    if (!version) {
+      throw new Error(
+        `the compile image's lockfile does not pin a version for the baked dependency ${name} ` +
+          `(${lockPath}). The local loop would floor-pin the declared range while the image serves ` +
+          'its baked copy. Re-vendor against a monorepo whose compile container has a lockfile in ' +
+          'sync with its package.json (`npm install` in worker/containers/compile).',
+      );
+    }
+    pins[name] = version;
+  }
+  if (Object.keys(pins).length === 0) {
+    throw new Error('the compile image declares no baked dependencies — extraction needs updating');
+  }
+  return pins;
+}
+
 const containerDeps = JSON.parse(readFileSync(join(compilerSrcDir, 'package.json'), 'utf8')).dependencies ?? {};
 const tw4Deps = JSON.parse(readFileSync(join(compilerSrcDir, 'tw4', 'package.json'), 'utf8')).dependencies ?? {};
 const toolchain = {
@@ -356,6 +404,11 @@ const toolchain = {
    * `npm ci`, so the lock is what it actually gets. package.json only says
    * ^19.0.0 and would re-introduce the very drift this pin removes. */
   react19: readReact19Pins(),
+  /* Every package the image bakes, at the version its own lockfile installs
+   * (tsk_a8cb3d23). Consulted BEFORE react19, mirroring the container's own
+   * order: ensureDeps tries the baked tree first and only reaches the isolated
+   * React 19 set when the baked React 18 does not satisfy the pin. */
+  baked: readBakedPins(),
 };
 for (const [group, pins] of Object.entries(toolchain)) {
   for (const [name, range] of Object.entries(pins)) {
