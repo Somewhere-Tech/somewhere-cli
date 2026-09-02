@@ -93,9 +93,33 @@ test('buildBrowserBody: action flags compile to an ordered steps array', () => {
   assert.equal(body.viewport, 'mobile');
 });
 
-test('buildBrowserBody: --snapshot is display-only (not a step)', () => {
+test('buildBrowserBody: --snapshot is not a step', () => {
   const body = buildBrowserBody('https://example.com', { snapshot: true });
   assert.equal('steps' in body, false);
+});
+
+// `--snapshot` PRINTS the interactive-element map, so it has to ASK for it. The
+// map is an opt-in section; without this the flag rendered whatever the
+// response happened to carry, which was nothing — `--wait button --snapshot`
+// matched a button and then printed "dom: 0 interactive elements" on a page
+// with three of them (tsk_bdd72f02c2).
+test('buildBrowserBody: --snapshot requests the DOM section', () => {
+  assert.deepEqual(buildBrowserBody('https://example.com', { snapshot: true }).include, ['dom']);
+});
+
+test('buildBrowserBody: --snapshot requests the DOM section alongside steps', () => {
+  const body = buildBrowserBody('https://example.com', { snapshot: true, wait: 'button' });
+  assert.deepEqual(body.steps, [{ action: 'wait_for', selector: 'button' }]);
+  assert.deepEqual(body.include, ['dom']);
+});
+
+test('buildBrowserBody: --snapshot merges with --include without duplicating', () => {
+  const body = buildBrowserBody('https://example.com', { snapshot: true, include: 'network, dom' });
+  assert.deepEqual(body.include, ['network', 'dom']);
+});
+
+test('buildBrowserBody: without --snapshot the DOM section stays opt-in', () => {
+  assert.equal('include' in buildBrowserBody('https://example.com', { wait: 'button' }), false);
 });
 
 test('buildBrowserBody: --store forwards store:true (EYES mode)', () => {

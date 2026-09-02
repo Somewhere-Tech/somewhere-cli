@@ -34,8 +34,8 @@ const compilerManifest = JSON.parse(readFileSync(join(compilerDir, 'VENDOR.json'
 test('every vendored runtime file matches the hash the vendor step recorded', () => {
   assert.deepEqual(
     Object.keys(runtimeManifest.files).sort(),
-    ['platform-context.mjs', 'sw-init.mjs'],
-    'the manifest lists both runtime blobs',
+    ['browser-probes.mjs', 'platform-context.mjs', 'sw-init.mjs'],
+    'the manifest lists every vendored runtime blob',
   );
   for (const [name, expected] of Object.entries(runtimeManifest.files)) {
     const path = join(runtimeDir, name);
@@ -75,6 +75,24 @@ test('the vendored runtime can carry an execution slot and a draft identity', ()
       context.includes(marker),
       `the vendored runtime no longer stamps ${marker}; local sw.* would bind the wrong workspace`,
     );
+  }
+});
+
+test('the vendored DOM probe is the platform\'s interactive-element probe', () => {
+  // `somewhere browser` against a local address has to report the SAME map the
+  // hosted browser reports for the deployed app, or the local check is a second
+  // opinion rather than a preview (tsk_9ec50c8423). The probe is vendored, not
+  // reimplemented; this asserts the shipped copy still builds the outline and
+  // the handle map the report is rendered from.
+  const probes = readFileSync(join(runtimeDir, 'browser-probes.mjs'), 'utf8');
+  for (const marker of [
+    'export const DOM_OUTLINE_SCRIPT',
+    'export const MAX_OUTLINE_NODES',
+    'outline.push(',
+    'testid_map',
+    'data-testid',
+  ]) {
+    assert.ok(probes.includes(marker), `the vendored DOM probe is missing ${marker}`);
   }
 });
 

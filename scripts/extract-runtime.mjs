@@ -114,8 +114,48 @@ async function assembleContext() {
   return js;
 }
 
+/**
+ * Lift the platform's DOM probe out of the browser engine.
+ *
+ * `somewhere browser` against the dev server has to report the SAME
+ * interactive-element map the hosted browser reports for the deployed app, or
+ * the local check is a second opinion instead of a preview. The probe is one
+ * browser-context template literal in worker/src/utils/browser-test.ts; it
+ * carries a single interpolation (the node cap), which is read from the same
+ * file rather than guessed.
+ */
+function extractDomOutlineScript() {
+  const engineSrc = readFileSync(join(monorepo, 'worker/src/utils/browser-test.ts'), 'utf8');
+  const stepsSrc = readFileSync(join(monorepo, 'worker/src/utils/browser-test-steps.ts'), 'utf8');
+  const cap = stepsSrc.match(/MAX_OUTLINE_NODES\s*=\s*(\d+)\s*;/);
+  if (!cap) throw new Error('MAX_OUTLINE_NODES not found in worker/src/utils/browser-test-steps.ts');
+  const marker = 'const DOM_OUTLINE_SCRIPT = `';
+  const start = engineSrc.indexOf(marker);
+  if (start === -1) throw new Error('DOM_OUTLINE_SCRIPT not found in worker/src/utils/browser-test.ts');
+  const bodyStart = start + marker.length;
+  const end = engineSrc.indexOf('`;', bodyStart);
+  if (end === -1) throw new Error('unterminated DOM_OUTLINE_SCRIPT template');
+  const raw = engineSrc.slice(bodyStart, end);
+  const unknown = raw.match(/(^|[^\\])\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g) || [];
+  for (const hit of unknown) {
+    if (!/MAX_OUTLINE_NODES/.test(hit)) {
+      throw new Error(
+        `DOM_OUTLINE_SCRIPT gained an interpolation this vendor step cannot resolve: ${hit.trim()}`,
+      );
+    }
+  }
+  const MAX_OUTLINE_NODES = Number(cap[1]);
+  // eslint-disable-next-line no-eval
+  const script = eval('`' + raw + '`');
+  if (!script.includes('outline.push(') || !script.includes('testid_map')) {
+    throw new Error('the lifted DOM probe does not build an outline + testid map — extraction needs updating');
+  }
+  return { script, cap: MAX_OUTLINE_NODES };
+}
+
 const swInit = extractLiteral('SW_INIT_JS');
 const platformContext = await assembleContext();
+const domOutline = extractDomOutlineScript();
 
 // Drift guard: the local runtime MUST stamp the execution slot on platform
 // calls (X-Sw-Env-Slot), or `dev --local`/`exec` bind PROD for flag-enrolled
@@ -194,9 +234,19 @@ writeVendored(
     platformContext +
     '\n\nexport { buildPlatformContext };\n',
 );
+writeVendored(
+  'browser-probes.mjs',
+  header('DOM_OUTLINE_SCRIPT', 'worker/src/utils/browser-test.ts') +
+    `export const MAX_OUTLINE_NODES = ${domOutline.cap};\n\n` +
+    'export const DOM_OUTLINE_SCRIPT = ' +
+    JSON.stringify(domOutline.script) +
+    ';\n',
+);
 writeFileSync(join(outDir, 'VENDOR.json'), JSON.stringify(runtimeManifest, null, 2) + '\n');
 
-console.log(`Vendored runtime @ ${commit} → runtime/sw-init.mjs, runtime/platform-context.mjs`);
+console.log(
+  `Vendored runtime @ ${commit} → runtime/sw-init.mjs, runtime/platform-context.mjs, runtime/browser-probes.mjs`,
+);
 
 /* ─── The COMPILER ─────────────────────────────────────────────────────────
  *
