@@ -390,6 +390,100 @@ async function runLocalRuntime(opts: { project?: string; port?: string; check?: 
   }
 }
 
+export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
+  'Private previews (`somewhere dev --cloud`) are available on the Pro and Scale plans. '
+  + 'This account is on a plan that does not include them.';
+
+/**
+ * Does this account have private previews?
+ *
+ * Returns `true`/`false` when the platform states it, and `null` when it does
+ * not — a read that fails, or a platform that stopped reporting the field.
+ * `null` must NEVER refuse: an unknown answer is not a denial, and blocking
+ * someone whose account works today would be a worse bug than the one this
+ * check exists to fix. Only an explicit `false` stops the command.
+ *
+ * On a never-published project the platform answers this with the plain plan
+ * entitlement (there is no release to bind a preview to yet), which is exactly
+ * the case the caller needs.
+ */
+export async function readCloudDevAllowed(
+  projectId: string,
+  call: typeof callPlatformTool = callPlatformTool,
+): Promise<boolean | null> {
+  try {
+    const project = unwrapPlatformData(
+      await call('project_get', { project_id: projectId }, { allTools: true }),
+    );
+    if (isRecord(project) && typeof project.cloud_dev_allowed === 'boolean') {
+      return project.cloud_dev_allowed;
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+export class CloudDevUnavailableError extends Error {
+  readonly code = 'CLOUD_DEV_NOT_ENABLED';
+
+  constructor() {
+    super(CLOUD_DEV_UNAVAILABLE_MESSAGE);
+    this.name = 'CloudDevUnavailableError';
+  }
+}
+
+/** The project's current live release, or null when it has never published. */
+export async function readActiveReleaseId(projectId: string): Promise<string | null> {
+  try {
+    const status = unwrapPlatformData(
+      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+    );
+    if (isRecord(status) && typeof status.active_release_id === 'string') {
+      return status.active_release_id;
+    }
+  } catch {
+    // Non-fatal: the caller treats "unknown" as "no base" and the deploy validates.
+  }
+  return null;
+}
+
+/**
+ * Guarantee there is a live version for a private preview to build on,
+ * publishing once if there is none.
+ *
+ * THE ORDER IS THE CONTRACT (tsk_cf48f4ab). A private preview builds a
+ * candidate against the project's live version, so a never-published project
+ * has nothing to build on and the platform refuses. Publishing once here — out
+ * loud, never silently — is what makes `somewhere dev --cloud` work on a brand
+ * new project. But private previews are also a plan feature, and the platform
+ * enforces that on the preview request, which is the step AFTER this publish.
+ * So the entitlement is read FIRST: an account without private previews is
+ * refused having created nothing, instead of being handed a live production
+ * version it never asked for and then told the command is unavailable.
+ *
+ * `publish` is injected so a fixture can prove it was never called on the
+ * refusal path — the ordering is the behaviour under test, not the call shape.
+ */
+export async function ensureBaseRelease(args: {
+  cloudDevAllowed: () => Promise<boolean | null>;
+  publish: () => Promise<void>;
+  readActiveReleaseId: () => Promise<string | null>;
+  announce?: (message: string) => void;
+}): Promise<string | null> {
+  // Only an explicit `false` refuses; `null` means the platform did not say,
+  // and an unknown answer must never block an account that works today.
+  if ((await args.cloudDevAllowed()) === false) throw new CloudDevUnavailableError();
+  args.announce?.(
+    'This project has never been published, so there is no live version for a private preview to build on.',
+  );
+  args.announce?.(
+    'Publishing it once now to create the first version. After this, every preview stays private to you.',
+  );
+  await args.publish();
+  return args.readActiveReleaseId();
+}
+
 async function runHotDeploy(opts: { project?: string }) {
   const token = getToken();
   const client = new ApiClient(token);
@@ -420,17 +514,7 @@ async function runHotDeploy(opts: { project?: string }) {
   // (base_release_id) — the platform binds the draft to that exact production
   // release. Read it from deploy_status; a project that has never published to
   // production has no base and starts the draft from empty.
-  let baseReleaseId: string | null = null;
-  try {
-    const status = unwrapPlatformData(
-      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
-    );
-    if (isRecord(status) && typeof status.active_release_id === 'string') {
-      baseReleaseId = status.active_release_id;
-    }
-  } catch {
-    // Non-fatal: fall through with no base. The deploy below still validates.
-  }
+  let baseReleaseId: string | null = await readActiveReleaseId(projectId);
   // An exact preview builds a private CANDIDATE against the project's live
   // version. A project that has never been published has no live version, so
   // there is nothing for the first candidate to build on and the platform
@@ -439,25 +523,30 @@ async function runHotDeploy(opts: { project?: string }) {
   // preview after this stays private and never changes what is live.
   if (!baseReleaseId) {
     spinner.stop();
-    info('This project has never been published, so there is no live version for a private preview to build on.');
-    info('Publishing it once now to create the first version. After this, every preview stays private to you.');
     try {
-      await callDraftCandidate<DeployResult>(client, '/deploy', {
-        project_id: projectId,
-        scope: 'all',
-        files,
-        binary_files: binaryFiles,
-        functions,
-        replace_functions: true,
+      baseReleaseId = await ensureBaseRelease({
+        cloudDevAllowed: () => readCloudDevAllowed(projectId),
+        announce: info,
+        publish: async () => {
+          await callDraftCandidate<DeployResult>(client, '/deploy', {
+            project_id: projectId,
+            scope: 'all',
+            files,
+            binary_files: binaryFiles,
+            functions,
+            replace_functions: true,
+          });
+        },
+        readActiveReleaseId: () => readActiveReleaseId(projectId),
       });
-      const status = unwrapPlatformData(
-        await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
-      );
-      if (isRecord(status) && typeof status.active_release_id === 'string') {
-        baseReleaseId = status.active_release_id;
-      }
       success('Published — this project now has a live version.');
     } catch (err) {
+      if (err instanceof CloudDevUnavailableError) {
+        error(err.message);
+        info('Nothing was created — this project has not been published.');
+        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app locally.');
+        process.exit(1);
+      }
       if (!(isBuildError(err) && renderBuildError(err, cwd))) {
         error(err instanceof Error ? err.message : String(err));
       }
