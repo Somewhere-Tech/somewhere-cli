@@ -1,5 +1,53 @@
 # Changelog
 
+## 0.31.3
+
+### Added
+
+- **`somewhere project allowed-origins list` and `… set` now exist.** Allowing
+  another web address to call your project from a browser was only possible
+  through the generic tool-call escape hatch with a raw project id — so the
+  command guidance told you to run was not a command the CLI had. It is now a
+  first-class command with the obvious spelling, it shows up in
+  `somewhere project --help`, and it takes `--project <ref>` like everything
+  else. `set` replaces the whole list (`--clear` empties it) and refuses an
+  address the allowlist could never match — a path, a query, a wildcard, a
+  trailing slash — before sending it, naming what is wrong. Your project's own
+  address and any verified custom domain are always trusted and never need
+  listing.
+
+### Fixed
+
+- **The promote command the CLI prints can now be run in the shell that printed
+  it.** `somewhere preview` and `somewhere status` printed
+  `somewhere promote <session> <preview>`, and `somewhere promote` then refused
+  that exact command whenever there was no terminal to confirm with — so in a
+  script, an agent, or a piped terminal the CLI handed you a command it would
+  reject. The printed command now matches the shell reading it: without a
+  terminal you get the runnable form, with `--yes` on it; at a keyboard you get
+  the ordinary confirming form first and the unattended one named beneath it.
+- **Promotion now says what happened to your data.** Promoting moved your app
+  and said nothing about the rows you created while previewing, which stay in
+  the preview database — the isolation is the point, but discovering it by
+  opening an empty production page and repeating your whole acceptance pass is
+  not. A successful promote now states that only the app was promoted, that
+  production is serving the data it already had, and that production is worth
+  checking and seeding before you call it shipped.
+- **One project now reports one size of itself.** The same directory was
+  described three different ways: `somewhere deploy` counted static files and
+  functions separately, `somewhere preview` reported a single "3 files" with the
+  function hidden inside it, and `somewhere promote` said "3 files + functions",
+  replacing the count with the word. Worse, deploy's number did not match what
+  the project itself listed. All three now print the same shape — `3 static
+  files + 1 function` — off the same counting rule, and promote reports what
+  production actually holds rather than a tally that disagreed with it.
+- **`--project` works on every command that names a project.** `logs`,
+  `errors`, `status`, `open` and `rollback` accepted only a positional project
+  and answered `unknown option '--project'`, while a dozen other commands took
+  the flag — so the syntax you learned on one command failed on the next. All of
+  them now take `--project <ref>`, the positional keeps working everywhere, and
+  naming two different projects in one command is refused rather than guessed.
+
 ## 0.31.2
 
 ### Fixed

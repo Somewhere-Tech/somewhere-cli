@@ -4,11 +4,13 @@ import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info } from '../lib/output.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
+import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
 
 export function registerOpen(program: Command) {
   program
     .command('open [project]')
     .description('Open the project URL in your browser')
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain — the same flag every other command takes. The positional form still works.')
     .option('--dashboard', 'Open the dashboard instead')
     .action(async (project: string | undefined, opts) => {
       if (opts.dashboard) {
@@ -20,18 +22,20 @@ export function registerOpen(program: Command) {
       const token = getToken();
       const client = new ApiClient(token);
 
-      let projectRef: string | undefined;
-
-      if (project) {
-        projectRef = project;
-      } else {
+      const chosen = chooseProjectRef(project, opts.project);
+      if (chosen.kind === 'conflict') {
+        error(projectRefConflictMessage(chosen));
+        process.exit(1);
+      }
+      let projectRef: string | undefined = chosen.kind === 'ref' ? chosen.ref : undefined;
+      if (!projectRef) {
         const config = loadProjectConfig();
         projectRef = config?.project_id;
       }
 
       if (!projectRef) {
         error(
-          'No project linked. Pass a project name or run from a linked directory.',
+          'No project linked. Pass a project name (positionally or with --project) or run from a linked directory.',
         );
         process.exit(1);
       }

@@ -15,6 +15,8 @@ import {
   timeAgo,
 } from '../lib/output.js';
 import { fallbackProjectServingUrl, getProjectServingUrl } from '../lib/project-urls.js';
+import { resolveProjectRef } from '../lib/platform-command.js';
+import { isExactOrigin } from '../lib/allowed-origins.js';
 
 export function registerProject(program: Command) {
   const proj = program
@@ -95,6 +97,106 @@ export function registerProject(program: Command) {
         info(`Status:    ${statusDot(String(p.status ?? ''))}`);
         if (servingUrl) info(`URL:       ${servingUrl}`);
         if (p.created_at) info(`Created:   ${String(p.created_at)}`);
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+
+  // ── Allowed origins (CORS) ──────────────────────────────────────────────
+  //
+  // The command an advisor, a doc, or a support reply would naturally print.
+  // It did not exist: the only working path was `somewhere call
+  // project_allowed_origins_get/set '{…}'` with a raw project id, so guidance
+  // and executable surface disagreed and a developer chasing a blocked
+  // cross-origin request hit `error: unknown command` first (parity finding
+  // #3). The platform's own tool names stay valid — this is the CLI-shaped
+  // spelling of the same two calls.
+  const origins = proj
+    .command('allowed-origins')
+    .alias('origins')
+    .description(
+      'Read or replace the other web addresses allowed to call this project\'s API from a browser. '
+        + 'The project always trusts its own addresses — its somewhere.site subdomain and any verified '
+        + 'custom domain — so those are never listed here and never need adding.',
+    );
+
+  origins
+    .command('list')
+    .alias('get')
+    .description('Show the other web addresses allowed to call this project from a browser')
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain (defaults to the linked project)')
+    .option('--json', 'Print the raw response as JSON')
+    .action(async (opts: { project?: string; json?: boolean }) => {
+      const client = new ApiClient(getToken());
+      let projectRef: string;
+      try {
+        projectRef = resolveProjectRef(opts.project);
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      try {
+        const result = await readAllowedOrigins(client, projectRef);
+        if (opts.json) {
+          printJson(result);
+          return;
+        }
+        printAllowedOrigins(result);
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+    });
+
+  origins
+    .command('set [origins...]')
+    .description(
+      'Replace the whole list. Each entry is one exact address — scheme, host and optional port, '
+        + 'no path and no wildcards (https://app.example.com, http://localhost:5173). '
+        + 'Pass --clear to allow no other addresses at all.',
+    )
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain (defaults to the linked project)')
+    .option('--clear', 'Remove every other address (equivalent to setting an empty list)')
+    .option('--json', 'Print the raw response as JSON')
+    .action(async (originArgs: string[] | undefined, opts: { project?: string; clear?: boolean; json?: boolean }) => {
+      const client = new ApiClient(getToken());
+      let projectRef: string;
+      try {
+        projectRef = resolveProjectRef(opts.project);
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
+      // Accept both `set a b` and `set a,b` — an agent that has read one form
+      // should not be tripped by the other.
+      const requested = (originArgs ?? []).flatMap((value) => value.split(',')).map((v) => v.trim()).filter(Boolean);
+      if (!requested.length && !opts.clear) {
+        error('Nothing to set. Pass one or more addresses, or --clear to allow no other addresses.');
+        process.exit(1);
+      }
+      if (requested.length && opts.clear) {
+        error('Pass addresses or --clear, not both.');
+        process.exit(1);
+      }
+      const invalid = requested.filter((value) => !isExactOrigin(value));
+      if (invalid.length) {
+        error(
+          `Not an exact web address: ${invalid.join(', ')}. Use scheme + host + optional port only — `
+            + 'https://app.example.com, http://localhost:5173 — with no path, query or wildcard.',
+        );
+        process.exit(1);
+      }
+      try {
+        const result = await writeAllowedOrigins(client, projectRef, requested);
+        if (opts.json) {
+          printJson(result);
+          return;
+        }
+        success(requested.length
+          ? `Allowed ${requested.length === 1 ? 'address' : 'addresses'} updated.`
+          : 'Cleared — no other addresses are allowed.');
+        printAllowedOrigins(result);
       } catch (err) {
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
@@ -292,4 +394,40 @@ async function listProjects(opts: { json?: boolean } = {}) {
     error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
+}
+
+/** The allowlist as the platform reports it. */
+export interface AllowedOriginsResult {
+  project_id?: string;
+  allowed_origins?: string[];
+  cors_mode?: string;
+}
+
+async function readAllowedOrigins(client: ApiClient, ref: string): Promise<AllowedOriginsResult> {
+  return client.call<AllowedOriginsResult>(
+    'GET',
+    `/projects/${encodeURIComponent(ref)}/allowed-origins`,
+  );
+}
+
+async function writeAllowedOrigins(
+  client: ApiClient,
+  ref: string,
+  allowedOrigins: string[],
+): Promise<AllowedOriginsResult> {
+  return client.call<AllowedOriginsResult>(
+    'PUT',
+    `/projects/${encodeURIComponent(ref)}/allowed-origins`,
+    { allowed_origins: allowedOrigins },
+  );
+}
+
+function printAllowedOrigins(result: AllowedOriginsResult): void {
+  const list = result.allowed_origins ?? [];
+  if (!list.length) {
+    info(dim('  No other web addresses are allowed. The project still trusts its own address and any verified custom domain.'));
+    return;
+  }
+  for (const origin of list) info(`  ${teal(origin)}`);
+  info(dim('  The project\'s own address and any verified custom domain are always trusted and are not listed here.'));
 }

@@ -25,6 +25,7 @@ import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
+import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
 // `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
@@ -716,6 +717,7 @@ export function registerDeploy(program: Command) {
         const formatted = formatDeploySuccess(result, {
           scope,
           functionCount: Object.keys(functions).length,
+          staticFileCount: Object.keys(files).length + Object.keys(binaryFiles).length,
           totalBytes,
           linkedProject: targetProjectConfig,
         });
@@ -914,6 +916,14 @@ export interface DeployResult {
 interface DeploySuccessFormatOptions {
   scope?: 'functions' | 'static';
   functionCount: number;
+  /**
+   * How many static files this command actually uploaded, counted from the
+   * tree it read. Preferred over the platform's own tally because it is the
+   * same count the project reports back and the same count `somewhere preview`
+   * prints — one project, one number (parity finding #12). The response fields
+   * remain the fallback for callers that have no local tree.
+   */
+  staticFileCount?: number;
   totalBytes: number;
   linkedProject?: Pick<ProjectConfig, 'project_id' | 'subdomain'>;
 }
@@ -932,27 +942,28 @@ export function formatDeploySuccess(
   options: DeploySuccessFormatOptions,
 ): FormattedDeploySuccess {
   const staticFileCount =
-    typeof result.files_deployed === 'number' && Number.isFinite(result.files_deployed)
-      ? result.files_deployed
-      : typeof result.files === 'number' && Number.isFinite(result.files)
-        ? result.files
-        : Array.isArray(result.files)
-          ? result.files.length
-          : null;
+    typeof options.staticFileCount === 'number' && Number.isFinite(options.staticFileCount)
+      ? options.staticFileCount
+      : countFromResponse(result.files_deployed) ?? countFromResponse(result.files);
   const staticLabel =
-    staticFileCount === null ? 'Static files' : `${staticFileCount} static file(s)`;
+    staticFileCount === null
+      ? 'Static files'
+      : formatPublishSurface({ staticFiles: staticFileCount, functions: 0 });
 
   let headline: string;
   if (options.scope === 'functions') {
-    headline = `${options.functionCount} function(s) deployed — site left untouched`;
+    headline = `${formatPublishSurface({ staticFiles: null, functions: options.functionCount })} deployed — site left untouched`;
   } else if (options.scope === 'static') {
     headline =
       `${staticLabel} deployed (${formatBytes(options.totalBytes)}) — functions left untouched`;
   } else {
-    const functionLabel =
-      options.functionCount > 0 ? ` + ${options.functionCount} function(s)` : '';
+    // The whole surface, in the shape preview and promote also print.
+    const both = formatPublishSurface({
+      staticFiles: staticFileCount,
+      functions: options.functionCount,
+    });
     headline =
-      `${staticLabel}${functionLabel} deployed (${formatBytes(options.totalBytes)})`;
+      `${staticFileCount === null && options.functionCount === 0 ? staticLabel : both} deployed (${formatBytes(options.totalBytes)})`;
   }
 
   const responseUrl =

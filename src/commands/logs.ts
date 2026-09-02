@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, printJsonLine, red, teal, yellow } from '../lib/output.js';
+import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
 
 interface LogRow {
   id?: string;
@@ -16,6 +17,7 @@ export function registerLogs(program: Command) {
   program
     .command('logs [project]')
     .description('Show recent logs')
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain — the same flag every other command takes. The positional form still works.')
     .option('--level <level>', 'Filter by level (debug, info, warn, error)')
     .option('--source <source>', 'Filter by source (server, client, job, cron, queue, function, …)')
     .option('--function <route>', 'Filter to one function route path (e.g. /api/checkout)')
@@ -28,11 +30,16 @@ export function registerLogs(program: Command) {
       const token = getToken();
       const client = new ApiClient(token);
 
-      let projectId = project;
+      const chosen = chooseProjectRef(project, opts.project);
+      if (chosen.kind === 'conflict') {
+        error(projectRefConflictMessage(chosen));
+        process.exit(1);
+      }
+      let projectId = chosen.kind === 'ref' ? chosen.ref : undefined;
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
-          error('No project. Pass a project ID or run from a linked directory.');
+          error('No project. Pass a project ID (positionally or with --project) or run from a linked directory.');
           process.exit(1);
         }
         projectId = config.project_id;

@@ -21,6 +21,8 @@ import {
   type ActivePointer,
 } from '../lib/promote-outcome.js';
 import { formatErrorReference } from '../lib/client.js';
+import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
+import { promotedDataNotes } from '../lib/promote-handoff.js';
 
 /**
  * Read what production is serving right now.
@@ -45,10 +47,47 @@ async function readActivePointer(projectId: string): Promise<ActivePointer> {
   }
 }
 
+/**
+ * What production actually holds, counted the way `somewhere deploy` and
+ * `somewhere preview` count (parity finding #12).
+ *
+ * The promote response cannot answer this on its own: it returns a static
+ * tally that does not match the project's own listing, and says only whether
+ * functions exist rather than how many. The project's file listing answers both
+ * with the same split every other command prints, so one project stops
+ * reporting three different sizes of itself.
+ *
+ * Best-effort by design — a promote that landed is never failed, downgraded, or
+ * delayed on a cosmetic read. `null` means "ask the response instead".
+ */
+async function readProductionSurface(
+  projectId: string,
+): Promise<{ staticFiles: number; functions: number } | null> {
+  try {
+    const listing = unwrapPlatformData(
+      await callPlatformTool('project_files_list', { project_id: projectId }, { allTools: true }),
+    );
+    if (!isRecord(listing) || !isRecord(listing.counts)) return null;
+    const staticFiles = countFromResponse(listing.counts.static);
+    const binary = countFromResponse(listing.counts.binary) ?? 0;
+    const functions = countFromResponse(listing.counts.functions);
+    if (staticFiles === null || functions === null) return null;
+    return { staticFiles: staticFiles + binary, functions };
+  } catch {
+    return null;
+  }
+}
+
 interface PromoteResult {
   version: number;
   files_promoted: number;
+  /** Sent by newer platform versions; absent ones only carry has_functions. */
+  functions_promoted?: number;
   has_functions: boolean;
+  /** The platform's own sentence about what promotion did to the data, when it
+   *  sends one. It wins over the CLI's wording so the line can be corrected
+   *  without a CLI release. */
+  data_note?: string;
   promoted_draft_id?: string;
   preview_session_id?: string;
   preview_id?: string;
@@ -150,10 +189,22 @@ export function registerPromote(program: Command) {
           printJson(r);
           return;
         }
-        success(`Promoted v${r.version} (${r.files_promoted} file${r.files_promoted === 1 ? '' : 's'}${r.has_functions ? ' + functions' : ''})`);
+        // Prefer the project's own listing so this line agrees with what
+        // deploy and preview printed for the same tree; fall back to the
+        // response, where a missing function count becomes the word rather
+        // than an invented number.
+        const surface = (await readProductionSurface(projectId)) ?? {
+          staticFiles: countFromResponse(r.files_promoted),
+          functions: countFromResponse(r.functions_promoted) ?? (r.has_functions ? 'some' as const : 0),
+        };
+        success(`Promoted v${r.version} (${formatPublishSurface(surface)})`);
         // Name the preview session this version was promoted from, when known.
         const fromDraft = draftId ?? r.promoted_draft_id;
         if (fromDraft) info(dim(`Promoted from preview session ${teal(fromDraft)}`));
+        // The app moved; the data did not. Said here, unprompted, because the
+        // alternative is a developer discovering it by opening an empty
+        // production page and repeating their whole acceptance pass.
+        for (const note of promotedDataNotes(r.data_note)) info(note);
         // The promote response carries no URL — resolve the platform's canonical
         // fallback URL (best-effort; never fail a successful promote on it).
         try {

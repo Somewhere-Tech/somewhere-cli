@@ -5,6 +5,8 @@ import { dim, error, info, printJson, statusDot, teal, timeAgo } from '../lib/ou
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
 import { fallbackProjectServingUrl, getProjectServingUrl } from '../lib/project-urls.js';
+import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
+import { promoteCommands } from '../lib/promote-handoff.js';
 
 export interface PreviewCandidateStatus {
   draft_id: string;
@@ -85,16 +87,22 @@ export function registerStatus(program: Command) {
   program
     .command('status [project]')
     .description('Show project and workspace status')
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain — the same flag every other command takes. The positional form still works.')
     .option('--json', 'Print the raw status responses as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const token = getToken();
       const client = new ApiClient(token);
 
-      let projectId = projectArg;
+      const chosen = chooseProjectRef(projectArg, opts.project);
+      if (chosen.kind === 'conflict') {
+        error(projectRefConflictMessage(chosen));
+        process.exit(1);
+      }
+      let projectId = chosen.kind === 'ref' ? chosen.ref : undefined;
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
-          error('No project specified and no .somewhere.json found. Pass a project ID or run `somewhere init`.');
+          error('No project specified and no .somewhere.json found. Pass a project ID (positionally or with --project) or run `somewhere init`.');
           process.exit(1);
         }
         projectId = config.project_id;
@@ -183,7 +191,15 @@ export function registerStatus(program: Command) {
             info(`Preview candidate${previewCandidates.length > 1 ? ` ${index + 1}` : ''}: ${teal(candidate.draft_id)}`);
             info(`Candidate release: ${dim(candidate.candidate_release_id)}`);
             if (candidate.preview_origin) info(`Preview host: ${candidate.preview_origin}`);
-            info(`Promote: ${dim(`somewhere promote ${candidate.draft_id} ${candidate.candidate_release_id}`)}`);
+            // Runnable in the shell reading it — a non-interactive caller gets
+            // the `--yes` form, since bare promote refuses without a terminal.
+            for (const line of promoteCommands({
+              previewSessionId: candidate.draft_id,
+              previewId: candidate.candidate_release_id,
+              interactive: process.stdin.isTTY === true,
+            })) {
+              info(`Promote: ${dim(line)}`);
+            }
             if (candidate.expires_at) info(`Preview expires: ${candidate.expires_at}`);
           }
         }

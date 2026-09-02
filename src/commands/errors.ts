@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, red, table, teal, timeAgo, yellow } from '../lib/output.js';
+import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
 
 interface ErrorRow {
   endpoint?: string | null;
@@ -31,17 +32,23 @@ export function registerErrors(program: Command) {
         'and REFUSALS (your handler answered 4xx on purpose, e.g. a 401 from ' +
         'your own auth gate). Use --exceptions to see only what broke.',
     )
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain — the same flag every other command takes. The positional form still works.')
     .option('--limit <n>', 'Max rows to show (default 20, max 100)', '20')
     .option('--exceptions', 'Show only exceptions — hide the 4xx your own handlers returned on purpose.')
     .option('--json', 'Print the raw rows as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const client = new ApiClient(getToken());
 
-      let projectId = projectArg;
+      const chosen = chooseProjectRef(projectArg, opts.project);
+      if (chosen.kind === 'conflict') {
+        error(projectRefConflictMessage(chosen));
+        process.exit(1);
+      }
+      let projectId = chosen.kind === 'ref' ? chosen.ref : undefined;
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
-          error('No project. Pass a project ID or run from a linked directory.');
+          error('No project. Pass a project ID (positionally or with --project) or run from a linked directory.');
           process.exit(1);
         }
         projectId = config.project_id;

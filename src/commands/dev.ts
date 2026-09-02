@@ -25,6 +25,8 @@ import { showProjectNotices } from '../lib/project-notices.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
+import { countPublishSurface, formatPublishSurface } from '../lib/surface-counts.js';
+import { promoteCommandForShell, promoteCommandLines } from '../lib/promote-handoff.js';
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
@@ -82,6 +84,7 @@ export interface PreviewCandidateHandoff {
   draftId: string;
   candidateReleaseId: string;
   capabilityUrl: string;
+  /** Runnable in THIS shell — carries `--yes` when nobody can answer a prompt. */
   promoteCommand: string;
 }
 
@@ -103,21 +106,32 @@ export async function mintPreviewHandoff(
     draftId,
     candidateReleaseId,
     capabilityUrl: cap.preview_url,
-    promoteCommand: `somewhere promote ${draftId} ${candidateReleaseId}`,
+    promoteCommand: promoteCommandForShell({
+      previewSessionId: draftId,
+      previewId: candidateReleaseId,
+      interactive: process.stdin.isTTY === true,
+    }),
   };
 }
 
 function printPreviewHandoff(handoff: PreviewCandidateHandoff): void {
   console.log(`${teal('🌐')} ${bold('Preview capability:')} ${teal(handoff.capabilityUrl)}`);
-  console.log(dim(`   preview_session_id: ${handoff.draftId}`));
-  console.log(dim(`   preview_id: ${handoff.candidateReleaseId}`));
-  console.log(dim(`   promote command: \`${handoff.promoteCommand}\``));
+  printPreviewIdentity(handoff.draftId, handoff.candidateReleaseId);
 }
 
 function printPreviewIdentity(draftId: string, candidateReleaseId: string): void {
   console.log(dim(`   preview_session_id: ${draftId}`));
   console.log(dim(`   preview_id: ${candidateReleaseId}`));
-  console.log(dim(`   promote command: \`somewhere promote ${draftId} ${candidateReleaseId}\``));
+  // The printed command has to run in the shell that is reading it: an agent or
+  // a script gets the `--yes` form, because a bare promote refuses when there
+  // is no terminal to answer its confirmation.
+  for (const line of promoteCommandLines({
+    previewSessionId: draftId,
+    previewId: candidateReleaseId,
+    interactive: process.stdin.isTTY === true,
+  })) {
+    console.log(dim(`   ${line}`));
+  }
 }
 
 export async function callDraftCandidate<T>(
@@ -875,12 +889,11 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
     )).capabilityUrl;
     initialHandoff = await mintPreviewHandoff(client, projectId, draftId, candidateReleaseId);
     spinner.stop();
-    const n = typeof res.files_deployed === 'number'
-      ? res.files_deployed
-      : typeof res.files === 'number'
-        ? res.files
-        : (res.files ?? []).length;
-    success(`Synced ${n} files to preview`);
+    // The same two numbers, in the same shape, that `somewhere deploy` and
+    // `somewhere promote` print. "Synced 3 files" hid the function inside one
+    // number and then a later line counted it separately, so one project
+    // reported three different sizes of itself.
+    success(`Synced ${formatPublishSurface(countPublishSurface({ files, binaryFiles, functions }))} to preview`);
     if (res.warnings?.length) for (const w of res.warnings) warn(w);
   } catch (err) {
     spinner.fail('Initial sync failed');

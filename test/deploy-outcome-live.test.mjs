@@ -116,8 +116,18 @@ async function purge(projectId) {
     second.status >= 200 && second.status < 300,
     `delete confirm failed ${second.status}: ${JSON.stringify(second.payload)}`,
   );
+  // Gone means gone — but the platform stopped answering 404 for a deleted
+  // project and now returns its tombstone instead: offline, unreachable, data
+  // retained for a recovery window, and a note saying so. Both answers are a
+  // real deletion; a live project answering 200 with no `deleted` flag is not,
+  // and still fails here.
   const readBack = await api('GET', `/projects/${encodeURIComponent(projectId)}`);
-  assert.equal(readBack.status, 404, `throwaway ${projectId} still resolves after delete`);
+  const tombstoned = readBack.status === 200
+    && (readBack.payload?.deleted === true || readBack.payload?.data?.deleted === true);
+  assert.ok(
+    readBack.status === 404 || tombstoned,
+    `throwaway ${projectId} still resolves after delete (HTTP ${readBack.status}): ${JSON.stringify(readBack.payload)}`,
+  );
 }
 
 test(

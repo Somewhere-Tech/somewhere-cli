@@ -26,7 +26,7 @@ test('formats the current release activation deploy response with its real count
   });
 
   assert.equal(formatted.staticFileCount, 7);
-  assert.equal(formatted.headline, '7 static file(s) deployed (1 KB)');
+  assert.equal(formatted.headline, '7 static files deployed (1 KB)');
   assert.equal(formatted.liveUrl, 'https://release-v1-app.somewhere.site');
   assert.equal(formatted.liveMessage, 'Live at https://release-v1-app.somewhere.site');
 });
@@ -49,7 +49,7 @@ test('does not construct a linked-project URL when the deploy response omits pro
   );
 
   assert.equal(formatted.staticFileCount, 2);
-  assert.equal(formatted.headline, '2 static file(s) deployed (1 KB)');
+  assert.equal(formatted.headline, '2 static files deployed (1 KB)');
   assert.equal(formatted.liveUrl, null);
   assert.equal(formatted.liveMessage, 'Deployed — check the dashboard for the live URL.');
 });

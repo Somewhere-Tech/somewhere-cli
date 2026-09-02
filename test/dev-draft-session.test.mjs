@@ -62,10 +62,16 @@ test('preview handoff exposes the exact candidate capability and promote command
     path: '/projects/project%20id/preview/mint',
     body: { draft_id: 'draft-current', candidate_release_id: 'rel-current' },
   }]);
-  assert.deepEqual(handoff, {
-    draftId: 'draft-current',
-    candidateReleaseId: 'rel-current',
-    capabilityUrl: 'https://fixture-dev.somewhere.site/__sw_cap?t=one-time',
-    promoteCommand: 'somewhere promote draft-current rel-current',
-  });
+  assert.equal(handoff.draftId, 'draft-current');
+  assert.equal(handoff.candidateReleaseId, 'rel-current');
+  assert.equal(handoff.capabilityUrl, 'https://fixture-dev.somewhere.site/__sw_cap?t=one-time');
+  // The command is shaped for the shell that will read it (parity finding #9):
+  // a test runner has no TTY, so the runnable form is the `--yes` one. A bare
+  // `somewhere promote …` here would be a command promote itself refuses.
+  assert.equal(
+    handoff.promoteCommand,
+    process.stdin.isTTY === true
+      ? 'somewhere promote draft-current rel-current'
+      : 'somewhere promote draft-current rel-current --yes',
+  );
 });

@@ -4,6 +4,7 @@ import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
+import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
 
 interface RollbackResult {
   restored_at: string;
@@ -33,12 +34,20 @@ export function registerRollback(program: Command) {
         'before, including its functions. (Requires a previous production ' +
         'version to return to.)',
     )
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain — the same flag every other command takes. The positional form still works.')
     .option('-y, --yes', 'Skip the confirmation prompt')
     .option('--json', 'Print the raw rollback response as JSON')
     .action(async (projectArg: string | undefined, opts) => {
       const client = new ApiClient(getToken());
 
-      let projectId = projectArg;
+      const chosen = chooseProjectRef(projectArg, opts.project);
+      if (chosen.kind === 'conflict') {
+        const conflictMessage = projectRefConflictMessage(chosen);
+        if (opts.json) printJsonError('PROJECT_REF_CONFLICT', conflictMessage);
+        else error(conflictMessage);
+        process.exit(1);
+      }
+      let projectId = chosen.kind === 'ref' ? chosen.ref : undefined;
       if (!projectId) {
         const config = loadProjectConfig();
         if (!config) {
