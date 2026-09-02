@@ -1,5 +1,10 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
+import {
+  excludedRootFileReason,
+  isAppSurfaceRootFile,
+  isReferenceCorpusPath,
+} from './publish-surface.js';
 
 // Directories / files never uploaded. Mirrors the deploy collector.
 export const IGNORE = new Set([
@@ -47,18 +52,78 @@ export interface CollectedFiles {
    *  replacement, so a silent skip DELETES the file from production — the caller
    *  must surface these, not drop them quietly. */
   skipped: Array<{ path: string; reason: string }>;
+  /** Root files held back because they are not part of the app (notes, logs,
+   *  transcripts). Always printed by name — see printExcludedFiles. */
+  excluded: Array<{ path: string; reason: string }>;
+}
+
+export interface CollectOptions {
+  /** Root files to publish on purpose (`somewhere deploy --include NOTES.md`). */
+  include?: string[];
 }
 
 /** Walk a directory tree and bucket every file into static / binary / function,
  *  applying the same path remapping the deploy command uses. */
-export function collectFiles(baseDir: string): CollectedFiles {
-  const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {}, skipped: [] };
+export function collectFiles(baseDir: string, options: CollectOptions = {}): CollectedFiles {
+  const out: CollectedFiles = { files: {}, binaryFiles: {}, functions: {}, skipped: [], excluded: [] };
   const ignore = loadDeployIgnore(baseDir);
-  walk(baseDir, baseDir, out, ignore);
+  const candidates: string[] = [];
+  walk(baseDir, baseDir, out, ignore, candidates);
+
+  // ── Root publish surface (tsk_c166924f) ─────────────────────────────────
+  // Split the candidates into "definitely the app" and "root files nothing
+  // vouches for yet", then let the definite half vouch for the rest. A deploy
+  // is a full replacement, so getting this wrong DELETES a live file — hence
+  // the reference pass, which is deliberately generous: a bare filename
+  // anywhere in the published source is enough to publish it.
+  const optIn = new Set(
+    (options.include ?? []).map((p) => toDeployPath(p.trim())).filter(Boolean),
+  );
+  const publish: string[] = [];
+  const deferred: string[] = [];
+  for (const relPath of candidates) {
+    const isRootFile = !relPath.includes('/');
+    if (
+      !isRootFile ||
+      isAppSurfaceRootFile(relPath) ||
+      optIn.has(relPath) ||
+      ignore.reincludes(relPath)
+    ) {
+      publish.push(relPath);
+    } else {
+      deferred.push(relPath);
+    }
+  }
+
+  if (deferred.length > 0) {
+    const corpus = publish
+      .filter(isReferenceCorpusPath)
+      .map((relPath) => {
+        try {
+          return readFileSync(join(baseDir, relPath), 'utf-8');
+        } catch {
+          return '';
+        }
+      })
+      .join('\n');
+    for (const relPath of deferred) {
+      if (corpus.includes(relPath)) publish.push(relPath);
+      else out.excluded.push({ path: relPath, reason: excludedRootFileReason(relPath) });
+    }
+    out.excluded.sort((a, b) => a.path.localeCompare(b.path));
+  }
+
+  for (const relPath of publish) classifyInto(out, baseDir, relPath);
   return out;
 }
 
-function walk(baseDir: string, currentDir: string, out: CollectedFiles, ignore: DeployIgnoreMatcher) {
+function walk(
+  baseDir: string,
+  currentDir: string,
+  out: CollectedFiles,
+  ignore: DeployIgnoreMatcher,
+  candidates: string[],
+) {
   for (const entry of readdirSync(currentDir, { withFileTypes: true })) {
     const fullPath = join(currentDir, entry.name);
     const relPath = toDeployPath(relative(baseDir, fullPath));
@@ -78,7 +143,7 @@ function walk(baseDir: string, currentDir: string, out: CollectedFiles, ignore: 
       continue;
     }
     if (entry.isDirectory()) {
-      walk(baseDir, fullPath, out, ignore);
+      walk(baseDir, fullPath, out, ignore, candidates);
       continue;
     }
     if (!entry.isFile()) continue;
@@ -91,7 +156,7 @@ function walk(baseDir: string, currentDir: string, out: CollectedFiles, ignore: 
       continue;
     }
 
-    classifyInto(out, baseDir, relPath);
+    candidates.push(relPath);
   }
 }
 
@@ -166,6 +231,15 @@ class DeployIgnoreMatcher {
       ignored = !rule.negate;
     }
     return ignored;
+  }
+
+  /** A `!<pattern>` line naming this path — the explicit "publish it anyway"
+   *  opt-in the platform already documents for .somewhereignore. */
+  reincludes(relPath: string): boolean {
+    const normalized = toDeployPath(relPath);
+    return this.rules.some(
+      (rule) => rule.negate && matchesIgnoreRule(rule, normalized, false),
+    );
   }
 }
 

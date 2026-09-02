@@ -35,6 +35,8 @@ export interface ProjectConfig {
   name: string;
   subdomain: string;
   last_deploy?: ProjectDeployState;
+  /** Set once the deploy output has explained the publish surface (tsk_c166924f). */
+  publish_notice_seen?: boolean;
 }
 
 export interface ProjectDeployState {

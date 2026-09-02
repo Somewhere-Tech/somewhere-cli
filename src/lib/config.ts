@@ -142,6 +142,24 @@ export function readProjectDeployState(
   return state;
 }
 
+/** Has this project directory already been told that files outside the app are
+ *  not published? Kept on the project's own .somewhere.json so no new file is
+ *  ever written into a customer's repo. An unlinked directory has no store, so
+ *  the notice repeats — the safe direction (tsk_c166924f). */
+export function publishNoticeSeen(dir: string): boolean {
+  return loadProjectConfig(dir)?.publish_notice_seen === true;
+}
+
+export function markPublishNoticeSeen(dir: string): void {
+  const config = loadProjectConfig(dir);
+  if (!config) return;
+  try {
+    saveProjectConfig(dir, { ...config, publish_notice_seen: true });
+  } catch {
+    // Read-only checkout: repeating the notice next time is harmless.
+  }
+}
+
 export function projectConfigMatchesRef(config: ProjectConfig, ref: string): boolean {
   return ref === config.project_id;
 }
