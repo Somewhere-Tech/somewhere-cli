@@ -179,6 +179,36 @@ async function prepareToolchain(
   return dirs;
 }
 
+/**
+ * Install React at the version the compile image bakes, not the floor of the
+ * declared range (tsk_0312cf17).
+ *
+ * The image keeps React 19 in a tree of its own and prefers it over installing
+ * the app's range; locally that set does not exist, so the compiler took its
+ * other branch and floor-pinned instead — `react: ^19.2.0` became exactly
+ * 19.2.0 while the image served 19.2.7. The same tree, compiled by the same
+ * compiler, against two different Reacts.
+ *
+ * The fix is to rewrite the spec, NOT to add a second node_modules tree. That
+ * was tried and is actively worse: a package that physically lives inside the
+ * dependency cache resolves `react` to its own sibling before any search path
+ * is consulted, so a separate pinned tree gets bundled ALONGSIDE the cache's
+ * copy — two Reacts in one bundle, which renders a blank page. The image has no
+ * such problem because it ends up with one flat tree, and this keeps one too.
+ *
+ * Pinning the spec also stops npm resolving React on its own as a peer of
+ * something else (react-router-dom pulls one in), which is how a warm cache
+ * ended up serving a third version again.
+ */
+export function applyImagePins(specs: string[], pins: Record<string, string>): string[] {
+  if (!Object.keys(pins).length) return specs;
+  return specs.map((spec) => {
+    const at = spec.lastIndexOf('@');
+    const name = at > 0 ? spec.slice(0, at) : spec;
+    return pins[name] ? `${name}@${pins[name]}` : spec;
+  });
+}
+
 function digestOf(value: unknown): string {
   return createHash('sha256').update(JSON.stringify(value)).digest('hex').slice(0, 12);
 }
@@ -198,13 +228,20 @@ function digestOf(value: unknown): string {
  * overwrite each other, and two projects with identical dependencies share the
  * install for free.
  */
-function resolveAppDependencies(cwd: string, pkg: { dependencies?: Record<string, string> }): string[] {
+function resolveAppDependencies(
+  cwd: string,
+  pkg: { dependencies?: Record<string, string> },
+  pins: Record<string, string>,
+): string[] {
   const search: string[] = [];
   const projectModules = join(cwd, 'node_modules');
   if (existsSync(projectModules)) search.push(projectModules);
 
   const deps = pkg.dependencies ?? {};
-  const cacheDir = join(cacheHome(), 'dev-deps', digestOf(Object.entries(deps).sort()));
+  // The pins are part of the cache identity (tsk_0312cf17): when the image
+  // bumps its React and the CLI re-vendors, the old cache is simply not reused,
+  // so a warm cache can never keep serving the version we just moved off.
+  const cacheDir = join(cacheHome(), 'dev-deps', digestOf([Object.entries(deps).sort(), pins]));
   // The core decides what is actually missing (its baked-satisfies rules run
   // against this exact search path) and calls host.installPackages for the
   // rest. All we do here is make the cache dir part of the search path.
@@ -337,7 +374,8 @@ export class LocalCompiler {
 
     const groups = ['base', ...(tailwindVersion === 4 ? ['tw4'] : tailwindVersion === 3 ? ['tw3'] : [])];
     const toolchainDirs = await prepareToolchain(manifest, groups, this.opts.onPrepare);
-    this.searchPath = resolveAppDependencies(this.opts.cwd, pkg);
+    const react19Pins = manifest.toolchain.react19 ?? {};
+    this.searchPath = resolveAppDependencies(this.opts.cwd, pkg, react19Pins);
     this.depCacheDir = resolve(this.searchPath[this.searchPath.length - 1], '..');
 
     const requireToolchain = (group: string) => createRequire(join(toolchainDirs[group], 'package.json'));
@@ -371,8 +409,9 @@ export class LocalCompiler {
       // is not a safety signal.
       requiresPackageProxy: false,
       installPackages: async ({ specs }: { specs: string[] }) => {
-        this.opts.onPrepare?.(`${specs.length} ${specs.length === 1 ? 'dependency' : 'dependencies'} (${specs.join(', ')})`);
-        await installInto(this.depCacheDir, specs);
+        const pinned = applyImagePins(specs, react19Pins);
+        this.opts.onPrepare?.(`${pinned.length} ${pinned.length === 1 ? 'dependency' : 'dependencies'} (${pinned.join(', ')})`);
+        await installInto(this.depCacheDir, pinned);
       },
       // The local loop is not a publication: no artifact upload capability, and
       // an identity that says plainly where this build came from.
