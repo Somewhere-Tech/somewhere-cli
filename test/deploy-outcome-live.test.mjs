@@ -133,7 +133,12 @@ async function purge(projectId, subdomain) {
 
   const liveUrl = `https://${subdomain}.somewhere.site`;
   let hostStatus = 0;
-  for (let attempt = 0; attempt < 6; attempt++) {
+  // Taking a project offline is asynchronous. The delete response is the
+  // accepted purge, not proof that every serving route has observed it yet:
+  // live measurements on 2026-09-02 reached 404 after roughly 45 seconds.
+  // Keep the required host-level proof, with a bounded window that covers
+  // normal propagation instead of turning a correct purge into a false red.
+  for (let attempt = 0; attempt < 60; attempt++) {
     const response = await fetch(liveUrl, { headers: { 'Cache-Control': 'no-cache' } });
     hostStatus = response.status;
     if (hostStatus === 404) break;
