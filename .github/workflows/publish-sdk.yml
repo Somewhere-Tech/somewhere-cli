@@ -18,9 +18,22 @@
 #
 # This workflow is intentionally NOT merged to master. It does not touch the
 # CLI's own release path or version guard.
+# HOW THIS IS TRIGGERED, and why it is not workflow_dispatch:
+#   GitHub only registers a workflow_dispatch workflow if the file exists on the
+#   repo's DEFAULT branch. This file is deliberately NOT merged to master, so
+#   `gh workflow run` returns 404. A `push` trigger has no such restriction: it
+#   runs from the branch it was pushed to. So the knobs below are env vars, and
+#   a run is triggered by committing a change to them and pushing this branch.
+#   workflow_dispatch is kept as well, for whenever this does land on master.
+#
+#   PUBLISH_REF  - tag/SHA in the SDK repo to publish
+#   DRY_RUN      - 'true' => npm publish --dry-run; 'false' => real publish
 name: Publish SDK (cross-repo, one-off)
 
 on:
+  push:
+    branches: [chore/publish-sdk]
+    paths: ['.github/workflows/publish-sdk.yml']
   workflow_dispatch:
     inputs:
       ref:
@@ -34,6 +47,10 @@ on:
         default: 'true'
         options: ['true', 'false']
 
+env:
+  PUBLISH_REF: 'v0.7.4'
+  DRY_RUN: 'true'
+
 permissions:
   contents: read
 
@@ -41,11 +58,24 @@ jobs:
   publish-sdk:
     runs-on: ubuntu-latest
     steps:
+      - name: Resolve knobs (workflow_dispatch inputs win, else the env above)
+        id: cfg
+        run: |
+          REF="${{ inputs.ref || env.PUBLISH_REF }}"
+          DRY="${{ inputs.dry_run || env.DRY_RUN }}"
+          case "$DRY" in
+            true|false) ;;
+            *) echo "::error::DRY_RUN must be exactly 'true' or 'false', got '$DRY'"; exit 1 ;;
+          esac
+          echo "ref=$REF"   >> "$GITHUB_OUTPUT"
+          echo "dry=$DRY"   >> "$GITHUB_OUTPUT"
+          echo "publishing ref=$REF dry_run=$DRY"
+
       - name: Checkout the SDK repo (public; default token suffices)
         uses: actions/checkout@v4
         with:
           repository: Somewhere-Tech/somewhere-sdk-js
-          ref: ${{ inputs.ref }}
+          ref: ${{ steps.cfg.outputs.ref }}
           fetch-depth: 0
 
       - name: Show what we are about to publish
@@ -64,13 +94,13 @@ jobs:
       - run: npm run build
 
       - name: npm publish --dry-run
-        if: ${{ inputs.dry_run == 'true' }}
+        if: ${{ steps.cfg.outputs.dry == 'true' }}
         run: npm publish --dry-run --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: npm publish
-        if: ${{ inputs.dry_run == 'false' }}
+        if: ${{ steps.cfg.outputs.dry == 'false' }}
         run: npm publish --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
