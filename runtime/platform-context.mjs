@@ -1,4 +1,4 @@
-// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 3237dc1e
+// VENDORED from worker/src/runtime/context.ts (PLATFORM_CONTEXT_JS) @ 28d67b0a
 // — the exact runtime deployed functions run against. Do not edit by hand;
 // re-sync with: node scripts/extract-runtime.mjs <monorepo>
 // ── Primordial freeze (tsk_327fe8a4, opinionated-not-greenfield) ───────────

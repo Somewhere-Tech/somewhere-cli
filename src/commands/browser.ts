@@ -1,9 +1,20 @@
 import { resolve } from 'node:path';
-import { Command } from 'commander';
+import { readFileSync } from 'node:fs';
+import { Command, InvalidArgumentError } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { isLoopbackUrl, runLocalBrowser, type LocalBrowserReport } from '../local/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
+import {
+  normalizeBrowserActions,
+  parseExpectFlag,
+  parseExpectedRequestFlag,
+  parseFillFlag,
+  parseSelectFlag,
+  type BrowserRequestExpectationResult,
+  type BrowserSequenceAction,
+  type ExpectedBrowserRequest,
+} from '../lib/browser-actions.js';
 
 /** The browser run drives a real headless session server-side (navigate +
  *  settle + screenshot) — give it a wider budget than a normal API call. */
@@ -38,6 +49,7 @@ export interface BrowserResult {
   console_errors?: unknown[];
   page_errors?: unknown[];
   failed_requests?: unknown[];
+  request_expectations?: BrowserRequestExpectationResult[];
   steps?: BrowserStepResult[];
   /** A screenshot is a bare path string (legacy) OR an object. In VERIFY mode
    *  it carries `fs_path` (where the file lives) plus `url` (a short-lived link
@@ -68,6 +80,8 @@ export interface BrowserResult {
     aria?: string;
     text?: string;
     selector?: string;
+    visible?: boolean;
+    disabled?: boolean;
   }>;
   testid_map?: Record<string, unknown>;
   /** Structured extraction (--extract / --include markdown): the page as clean markdown. */
@@ -92,6 +106,9 @@ export interface BrowserOptions {
   include?: string;
   extract?: boolean;
   session?: string;
+  actionSequence?: BrowserSequenceAction[];
+  expectedRequests?: ExpectedBrowserRequest[];
+  visibleOnly?: boolean;
   json?: boolean;
 }
 
@@ -125,10 +142,13 @@ export function buildBrowserBody(
 
   const steps: Array<Record<string, unknown>> = [];
   if (opts.path) steps.push({ action: 'goto', path: opts.path });
-  if (opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
-  if (opts.eval) steps.push({ action: 'eval', script: opts.eval });
+  if (!opts.actionSequence?.length && opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
+  if (!opts.actionSequence?.length && opts.eval) steps.push({ action: 'eval', script: opts.eval });
   if (opts.screenshot) steps.push({ action: 'screenshot' });
   if (steps.length) body.steps = steps;
+  if (opts.actionSequence?.length) body.actions = opts.actionSequence;
+  if (opts.expectedRequests?.length) body.expect_requests = opts.expectedRequests;
+  if (opts.visibleOnly) body.visible_only = true;
 
   if (opts.viewport) body.viewport = opts.viewport;
   if (opts.store) body.store = true;
@@ -160,6 +180,7 @@ export function browserExitCode(r: BrowserResult): number {
   if (r.passed === false) return 1;
   if ((r.failed_requests?.length ?? 0) > 0) return 1;
   if ((r.page_errors?.length ?? 0) > 0) return 1;
+  if (r.request_expectations?.some((expectation) => !expectation.ok)) return 1;
   return 0;
 }
 
@@ -257,6 +278,11 @@ export function formatBrowserReport(
   lines.push(`console_errors: ${ce.length}`);
   lines.push(`page_errors: ${pe.length}`);
   lines.push(`failed_requests: ${fr.length}`);
+  for (const expectation of r.request_expectations ?? []) {
+    const mark = expectation.ok ? green('✓') : red('✗');
+    const suffix = expectation.error ? ` ${dim(`— ${expectation.error}`)}` : '';
+    lines.push(`expect_request: ${mark} ${expectation.path}:${expectation.status}${suffix}`);
+  }
   lines.push(`dom: ${dom.length} interactive element${dom.length === 1 ? '' : 's'}`);
 
   for (const [i, s] of (r.steps ?? []).entries()) {
@@ -322,7 +348,8 @@ export function formatBrowserReport(
     for (const el of dom) {
       const handle = el.testid ? `[data-testid=${el.testid}]` : el.selector ?? el.tag ?? '?';
       const text = el.text ? ` "${el.text}"` : '';
-      lines.push(`dom: ${el.tag ?? '?'} ${handle}${text}`);
+      const state = el.visible === false ? ' [hidden]' : el.disabled ? ' [disabled]' : ' [visible]';
+      lines.push(`dom: ${el.tag ?? '?'} ${handle}${state}${text}`);
     }
   }
   return lines;
@@ -341,20 +368,26 @@ const VIEWPORTS = {
  */
 const LOCAL_UNSUPPORTED: Array<{ flag: keyof BrowserOptions; why: string }> = [
   { flag: 'store', why: 'the scratch store is a platform feature; the local run writes the image to a file with --screenshot' },
-  { flag: 'session', why: 'persistent sessions are kept alive on the platform; a local run is always a fresh browser' },
+  { flag: 'session', why: 'named sessions are hosted-browser only; omit --session to run a fresh local browser call, and pass the local URL again on the next call' },
   { flag: 'extract', why: 'markdown extraction runs on the platform' },
 ];
+
+export function localBrowserUnsupportedMessage(opts: BrowserOptions): string | undefined {
+  for (const { flag, why } of LOCAL_UNSUPPORTED) {
+    if (opts[flag]) return `--${flag} is not available against a local address — ${why}.`;
+  }
+  return undefined;
+}
 
 /**
  * Run the health check against a page this machine is serving, and print it
  * with the same formatter the hosted run uses.
  */
 async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promise<void> {
-  for (const { flag, why } of LOCAL_UNSUPPORTED) {
-    if (opts[flag]) {
-      error(`--${flag} is not available against a local address — ${why}.`);
-      process.exit(1);
-    }
+  const unsupported = localBrowserUnsupportedMessage(opts);
+  if (unsupported) {
+    error(unsupported);
+    process.exit(1);
   }
   const unsupportedSections = (opts.include ?? '')
     .split(',')
@@ -378,8 +411,11 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
     report = await runLocalBrowser({
       url,
       path: opts.path,
-      wait: opts.wait,
-      eval: opts.eval,
+      wait: opts.actionSequence?.length ? undefined : opts.wait,
+      eval: opts.actionSequence?.length ? undefined : opts.eval,
+      actions: opts.actionSequence,
+      expectedRequests: opts.expectedRequests,
+      visibleOnly: opts.visibleOnly,
       // No project is involved, so there is nowhere on the platform to store
       // the image; write it beside the developer instead.
       screenshotPath: opts.screenshot ? resolve('somewhere-browser.jpg') : undefined,
@@ -403,6 +439,44 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
 }
 
 export function registerBrowser(program: Command) {
+  const actionSequence: BrowserSequenceAction[] = [];
+  const expectedRequests: ExpectedBrowserRequest[] = [];
+  const invalid = (err: unknown): never => {
+    throw new InvalidArgumentError(err instanceof Error ? err.message : String(err));
+  };
+  const collectClick = (selector: string): string => {
+    if (!selector) invalid('--click needs a non-empty CSS selector.');
+    actionSequence.push({ click: selector });
+    return selector;
+  };
+  const collectFill = (value: string): string => {
+    try { actionSequence.push(parseFillFlag(value)); } catch (err) { invalid(err); }
+    return value;
+  };
+  const collectSelect = (value: string): string => {
+    try { actionSequence.push(parseSelectFlag(value)); } catch (err) { invalid(err); }
+    return value;
+  };
+  const collectExpect = (value: string): string => {
+    try { actionSequence.push(parseExpectFlag(value)); } catch (err) { invalid(err); }
+    return value;
+  };
+  const collectActionsFile = (file: string): string => {
+    try {
+      const raw = JSON.parse(readFileSync(resolve(file), 'utf8')) as unknown;
+      const normalized = normalizeBrowserActions(raw);
+      if (!normalized.ok) throw new InvalidArgumentError(normalized.error);
+      actionSequence.push(...normalized.actions);
+    } catch (err) {
+      invalid(err);
+    }
+    return file;
+  };
+  const collectExpectedRequest = (value: string): string => {
+    try { expectedRequests.push(parseExpectedRequestFlag(value)); } catch (err) { invalid(err); }
+    return value;
+  };
+
   program
     .command('browser [target]')
     .description(
@@ -425,10 +499,17 @@ export function registerBrowser(program: Command) {
       "Explicit URL to open — any public page, or a path on --project's origin.",
     )
     .option('--path <path>', 'Navigate to this path first (e.g. /login) before the other steps.')
-    .option('--wait <selector>', 'Wait for a CSS selector to appear before capturing the signal.')
-    .option('--eval <js>', 'Evaluate a JS expression in the page and print its result.')
+    .option('--wait <selector>', 'Wait for a CSS selector to become visible before capturing (legacy single-step flag).')
+    .option('--eval <js>', 'Evaluate JavaScript in the page and print its result (legacy single-step flag).')
+    .option('--click <selector>', 'Click a visible CSS selector. Repeat to build an ordered action sequence.', collectClick)
+    .option('--fill <selector=value>', "Fill an input, e.g. --fill '#email=a@b.co'. Repeatable.", collectFill)
+    .option('--select <selector=value>', "Select an option value, e.g. --select '#plan=pro'. Repeatable.", collectSelect)
+    .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
+    .option('--actions <file.json>', 'Append the shared JSON action-sequence array from a file at this point in the command.', collectActionsFile)
+    .option('--expect-request <path:status>', "Treat an observed request status as expected, e.g. --expect-request '/api/tasks:401'. Repeatable.", collectExpectedRequest)
     .option('--screenshot', 'Capture a screenshot and print its stored path (requires a project).')
     .option('--snapshot', 'Print the full interactive-element / DOM map, not just the count.')
+    .option('--visible-only', 'Return only visible controls in the DOM outline; annotations remain on every returned node.')
     .option('--viewport <size>', 'desktop (default) or mobile.')
     .option(
       '--store',
@@ -444,10 +525,16 @@ export function registerBrowser(program: Command) {
     )
     .option(
       '--session <id>',
-      'Keep ONE live browser page alive across calls under this handle (1–64 chars: letters/digits/dot/dash/underscore). Navigate in one call, then reconnect with the same --session to wait/screenshot the SAME page (cookies, current URL, in-flight stream preserved). A reconnect skips the initial navigation — use --path to move. Idles out after ~3 min. Omit for the default fresh-per-call browser.',
+      'Hosted/deployed pages only: keep one live browser page across calls under this handle. Localhost is excluded because the local browser is intentionally bounded to one CLI process; omit --session and pass the local URL again for a fresh local call. Hosted sessions idle out after ~3 min.',
     )
     .option('--json', 'Print the raw browser response envelope as JSON.')
     .action(async (target: string | undefined, opts: BrowserOptions) => {
+      opts.actionSequence = [...actionSequence];
+      opts.expectedRequests = [...expectedRequests];
+      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval || opts.screenshot)) {
+        error('--path, --wait, --eval, and --screenshot cannot be mixed with --click/--fill/--select/--expect/--actions; put wait/eval in the actions file, and navigate or capture in a separate call.');
+        process.exit(1);
+      }
       if (opts.viewport && opts.viewport !== 'desktop' && opts.viewport !== 'mobile') {
         error(`--viewport must be "desktop" or "mobile" (got "${opts.viewport}")`);
         process.exit(1);

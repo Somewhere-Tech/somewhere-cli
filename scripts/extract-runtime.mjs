@@ -121,8 +121,8 @@ async function assembleContext() {
  * interactive-element map the hosted browser reports for the deployed app, or
  * the local check is a second opinion instead of a preview. The probe is one
  * browser-context template literal in worker/src/utils/browser-test.ts; it
- * carries a single interpolation (the node cap), which is read from the same
- * file rather than guessed.
+ * carries source-derived interpolations (the visibility helper and node cap),
+ * both read from the same files rather than guessed.
  */
 function extractDomOutlineScript() {
   const engineSrc = readFileSync(join(monorepo, 'worker/src/utils/browser-test.ts'), 'utf8');
@@ -138,12 +138,27 @@ function extractDomOutlineScript() {
   const raw = engineSrc.slice(bodyStart, end);
   const unknown = raw.match(/(^|[^\\])\$\{\s*([A-Za-z_$][\w$]*)\s*\}/g) || [];
   for (const hit of unknown) {
-    if (!/MAX_OUTLINE_NODES/.test(hit)) {
+    if (!/MAX_OUTLINE_NODES/.test(hit) && !/computeOutlineVisibility/.test(hit)) {
       throw new Error(
         `DOM_OUTLINE_SCRIPT gained an interpolation this vendor step cannot resolve: ${hit.trim()}`,
       );
     }
   }
+  const helperMatch = engineSrc.match(
+    /export function computeOutlineVisibility\([\s\S]*?^}\n/m,
+  );
+  if (!helperMatch) {
+    throw new Error('computeOutlineVisibility not found in worker/src/utils/browser-test.ts');
+  }
+  const helperJs = helperMatch[0]
+    .replace(/^export\s+/, '')
+    .replace(/info:\s*OutlineVisibilityInput/, 'info')
+    .replace(/\):\s*\{\s*visible:\s*boolean;\s*disabled:\s*boolean\s*}\s*\{/, ') {');
+  if (/OutlineVisibilityInput|:\s*boolean/.test(helperJs)) {
+    throw new Error('computeOutlineVisibility TypeScript shape changed — extraction needs updating');
+  }
+  // eslint-disable-next-line no-eval
+  const computeOutlineVisibility = eval('(' + helperJs + ')');
   const MAX_OUTLINE_NODES = Number(cap[1]);
   // eslint-disable-next-line no-eval
   const script = eval('`' + raw + '`');

@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { spawn } from 'node:child_process';
+import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 
 // client.ts reads BASE_URL at module load, so point it at the mock server
 // BEFORE the first import (browser.js imports client.js transitively).
@@ -40,9 +44,22 @@ const { port } = server.address();
 process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${port}`;
 
 const { ApiClient } = await import('../dist/lib/client.js');
-const { buildBrowserBody, formatBrowserReport, browserExitCode, normalizeBrowserVerdict } = await import(
+const { buildBrowserBody, formatBrowserReport, browserExitCode, normalizeBrowserVerdict, localBrowserUnsupportedMessage } = await import(
   '../dist/commands/browser.js'
 );
+
+function runCli(args, home) {
+  return new Promise((resolve) => {
+    const child = spawn(process.execPath, [join(process.cwd(), 'dist/index.js'), ...args], {
+      env: { ...process.env, HOME: home, USERPROFILE: home, SOMEWHERE_API_URL: process.env.SOMEWHERE_API_URL },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (status) => resolve({ status, stdout, stderr }));
+  });
+}
 
 test('buildBrowserBody: a URL positional becomes `url`', () => {
   assert.deepEqual(buildBrowserBody('https://example.com', {}), {
@@ -91,6 +108,23 @@ test('buildBrowserBody: action flags compile to an ordered steps array', () => {
     { action: 'screenshot' },
   ]);
   assert.equal(body.viewport, 'mobile');
+});
+
+test('buildBrowserBody: concise actions, expected requests, and visible-only use the shared wire contract', () => {
+  const actions = [
+    { fill: '#email', value: 'a@b.co' },
+    { click: '#save' },
+    { expect: { selector: '.saved', text: 'Saved', visible: true, count: 1 } },
+  ];
+  const body = buildBrowserBody('https://example.com', {
+    actionSequence: actions,
+    expectedRequests: [{ path: '/api/tasks', status: 401 }],
+    visibleOnly: true,
+  });
+  assert.deepEqual(body.actions, actions);
+  assert.deepEqual(body.expect_requests, [{ path: '/api/tasks', status: 401 }]);
+  assert.equal(body.visible_only, true);
+  assert.equal('steps' in body, false);
 });
 
 test('buildBrowserBody: --snapshot is not a step', () => {
@@ -181,6 +215,13 @@ test('buildBrowserBody: --session forwards session_id (feature B)', () => {
   assert.equal(body.session_id, 'checkout-flow');
 });
 
+test('localhost session refusal names the fresh-run alternative', () => {
+  const message = localBrowserUnsupportedMessage({ session: 'checkout-flow' });
+  assert.match(message, /named sessions are hosted-browser only/);
+  assert.match(message, /omit --session/);
+  assert.match(message, /pass the local URL again/);
+});
+
 test('formatBrowserReport: surfaces the session handle + expiry', () => {
   const lines = formatBrowserReport({
     passed: true,
@@ -218,6 +259,59 @@ test('request shape: POSTs /browser with bearer auth and the built body', async 
     url: 'https://example.com',
     steps: [{ action: 'eval', script: 'document.title' }],
   });
+});
+
+test('repeatable action flags and --actions preserve command-line order on the wire', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-actions-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  const actionsFile = join(home, 'actions.json');
+  writeFileSync(actionsFile, JSON.stringify([{ wait: '#ready' }, { eval: 'document.title' }]));
+  lastRequest = null;
+  const result = await runCli([
+    'browser',
+    'https://example.com',
+    '--fill', '#email=a@b.co',
+    '--click', '#save',
+    '--actions', actionsFile,
+    '--select', '#plan=pro',
+    '--expect', '.saved:text=Saved',
+    '--expect-request', '/api/tasks:401',
+    '--visible-only',
+    '--json',
+  ], home);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(lastRequest.body.actions, [
+    { fill: '#email', value: 'a@b.co' },
+    { click: '#save' },
+    { wait: '#ready' },
+    { eval: 'document.title' },
+    { select: '#plan', value: 'pro' },
+    { expect: { selector: '.saved', text: 'Saved' } },
+  ]);
+  assert.deepEqual(lastRequest.body.expect_requests, [{ path: '/api/tasks', status: 401 }]);
+  assert.equal(lastRequest.body.visible_only, true);
+});
+
+test('existing --wait/--eval/--screenshot combinations remain on the legacy step contract', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-legacy-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  lastRequest = null;
+  const result = await runCli([
+    'browser', '--project', 'fixture-project',
+    '--wait', '#ready',
+    '--eval', 'document.title',
+    '--screenshot',
+    '--json',
+  ], home);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(lastRequest.body.steps, [
+    { action: 'wait_for', selector: '#ready' },
+    { action: 'eval', script: 'document.title' },
+    { action: 'screenshot' },
+  ]);
+  assert.equal('actions' in lastRequest.body, false);
 });
 
 test('formatBrowserReport: surfaces the health signal as grep-able lines', () => {
@@ -279,7 +373,34 @@ test('formatBrowserReport: --snapshot prints the full DOM map', () => {
     { passed: true, dom_outline: [{ tag: 'button', testid: 'submit', text: 'Go' }] },
     { snapshot: true },
   );
-  assert.match(lines.join('\n'), /dom: button \[data-testid=submit\] "Go"/);
+  assert.match(lines.join('\n'), /dom: button \[data-testid=submit\] \[visible\] "Go"/);
+});
+
+test('formatBrowserReport: DOM state annotations distinguish hidden and disabled controls', () => {
+  const lines = formatBrowserReport(
+    {
+      passed: true,
+      dom_outline: [
+        { tag: 'button', selector: '#hidden', visible: false },
+        { tag: 'button', selector: '#disabled', visible: true, disabled: true },
+      ],
+    },
+    { snapshot: true },
+  );
+  assert.match(lines.join('\n'), /#hidden \[hidden\]/);
+  assert.match(lines.join('\n'), /#disabled \[disabled\]/);
+});
+
+test('formatBrowserReport: request expectations show pass/fail reasons', () => {
+  const lines = formatBrowserReport({
+    passed: false,
+    request_expectations: [
+      { path: '/api/allowed', status: 401, ok: true },
+      { path: '/api/missing', status: 403, ok: false, error: 'no matching request was observed' },
+    ],
+  });
+  assert.ok(lines.some((line) => line.includes('/api/allowed:401')));
+  assert.ok(lines.some((line) => line.includes('/api/missing:403') && line.includes('no matching request')));
 });
 
 test('browserExitCode: clean pass is 0; a failed request or page error is 1', () => {
@@ -287,6 +408,7 @@ test('browserExitCode: clean pass is 0; a failed request or page error is 1', ()
   assert.equal(browserExitCode({ passed: false }), 1);
   assert.equal(browserExitCode({ passed: true, failed_requests: [{ status: 500 }] }), 1);
   assert.equal(browserExitCode({ passed: true, page_errors: [{ message: 'boom' }] }), 1);
+  assert.equal(browserExitCode({ passed: true, request_expectations: [{ path: '/api/x', status: 401, ok: false }] }), 1);
   // Console errors alone are advisory — they don't fail the gate.
   assert.equal(browserExitCode({ passed: true, console_errors: ['noise'] }), 0);
 });
