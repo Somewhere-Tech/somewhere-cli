@@ -242,8 +242,13 @@ instead of serving locally, and prints the preview capability URL and the
 send someone, or when the agent doing the work reaches the platform only over
 MCP and has no local machine to serve from. It needs the development
 environment, which is on the Pro and Scale plans and is enabled per account;
-without it the command returns `CLOUD_DEV_NOT_ENABLED` before creating any
-resources. Serving locally has no such requirement, on any plan.
+without it the command returns `CLOUD_DEV_NOT_ENABLED`. Serving locally has no
+such requirement, on any plan.
+
+A private preview is a candidate built against your live version, so a project
+that has never been published has nothing for the first one to build on. On
+such a project `--cloud` publishes once — it says so before it does — and every
+preview after that stays private to you and never changes what is live.
 
 `somewhere dev --local` is accepted for compatibility and does what bare
 `somewhere dev` does.

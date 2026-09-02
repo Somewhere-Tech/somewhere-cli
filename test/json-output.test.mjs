@@ -477,6 +477,23 @@ test('rollback replaces stale snapshot wording while preserving JSON', async () 
   });
 });
 
+/**
+ * This case is about the JSON SHAPE every `--json` command emits on a terminal
+ * path — it needs no live platform, and must never touch one.
+ *
+ * It used to run with no SOMEWHERE_API_URL at all, so `deploy`, `deploy-check`
+ * and `browser` ran logged-out against api.somewhere.tech. `somewhere deploy`
+ * is anonymous-when-logged-out, so every `npm test` minted a real temporary
+ * account and a real project named after the mkdtemp working directory
+ * (sw-json-contract-cwd-*). 14+ landed on production on 2026-09-01 alone, and
+ * the case asserted nothing about what those deploys DID — it was a green
+ * light over a red surface (tsk_e929774b).
+ *
+ * Everything now points at the local stub, which answers every route with a
+ * JSON error. A command that reaches the network still takes a terminal path;
+ * it just takes it against 127.0.0.1. For an assertion about a REAL deploy's
+ * outcome, see test/deploy-outcome-live.test.mjs.
+ */
 test('every command advertising --json emits parseable JSON on an error or terminal path', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-contract-home-'));
   const cwd = mkdtempSync(join(tmpdir(), 'sw-json-contract-cwd-'));
@@ -514,21 +531,43 @@ test('every command advertising --json emits parseable JSON on an error or termi
     ['check', '--json'],
   ];
 
-  for (const args of cases) {
-    const result = await run(args, {
-      cwd,
-      env: { HOME, USERPROFILE: HOME },
-    });
-    assert.doesNotThrow(
-      () => JSON.parse(result.stdout),
-      `${args.join(' ')} did not emit one JSON value\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-    );
-    assert.equal(
-      result.stderr.trim(),
-      '',
-      `${args.join(' ')} leaked human output to stderr:\n${result.stderr}`,
-    );
-  }
+  await withServer((req, res) => {
+    sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: `stub: ${req.method} ${req.url}` });
+  }, async (apiUrl) => {
+    for (const args of cases) {
+      const result = await run(args, {
+        cwd,
+        env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      });
+      assert.doesNotThrow(
+        () => JSON.parse(result.stdout),
+        `${args.join(' ')} did not emit one JSON value\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+      );
+      assert.equal(
+        result.stderr.trim(),
+        '',
+        `${args.join(' ')} leaked human output to stderr:\n${result.stderr}`,
+      );
+    }
+  });
+});
+
+test('the --json contract case never reaches a remote platform', async () => {
+  // The defect this guards is invisible in the assertions above: the case
+  // passed just as green while it was deploying to production. So assert the
+  // mechanism directly — every invocation in the case is pinned to the stub.
+  const source = readFileSync(join(repoRoot, 'test', 'json-output.test.mjs'), 'utf8');
+  const start = source.indexOf("test('every command advertising --json emits parseable JSON");
+  assert.ok(start > 0, 'the --json contract case is still in this file');
+  const body = source.slice(start, source.indexOf('\ntest(', start + 1));
+  assert.ok(
+    body.includes('SOMEWHERE_API_URL: apiUrl'),
+    'the --json contract case must run every command against the local stub, never a remote platform',
+  );
+  assert.ok(
+    /await withServer\(/.test(body),
+    'the --json contract case must be wrapped in withServer',
+  );
 });
 
 test('logs --follow keeps polling when the initial query has no matches', async () => {

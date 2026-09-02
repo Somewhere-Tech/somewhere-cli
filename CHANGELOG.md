@@ -1,5 +1,57 @@
 # Changelog
 
+## 0.29.0
+
+### Added
+
+- `tsk_95377909` — `somewhere dev` is now a LOCAL loop. It serves your app on
+  localhost and compiles it with the platform's own compiler — the same
+  `compile-core` the deploy pipeline runs, vendored into the CLI at the exact
+  esbuild version the compile container pins, with a hash manifest and a test
+  that fails if anyone edits it. No install step, no build step, no deploy:
+  a fresh `somewhere init` scaffold starts in a couple of seconds and a saved
+  TSX or CSS edit is on the page in a few hundred milliseconds. Compile errors
+  print file:line:column in the terminal and show on the page with the last
+  working page still underneath; `api/` functions run in local Node with
+  `sw.db` / `sw.fs` / `sw.ai` / `sw.auth` calling your real project.
+  There is no dev version of your app — same app, same data, same build.
+  Functions execute in your machine's Node during the loop rather than on the
+  platform's runtime, so a deploy is still what proves a function in production.
+- `tsk_737ff0d2` — the local server now answers on both `127.0.0.1` and `::1`,
+  so the `http://localhost:...` URL it prints opens in a browser that resolves
+  `localhost` to IPv6 first. Non-loopback addresses are still refused.
+- `tsk_3269026d` — `api/` functions resolve npm packages through the same
+  search path the compiler used, so a fresh scaffold's routes work with no
+  `npm install`. The project's own `node_modules` always wins.
+- `tsk_8796c588` — the pre-start typecheck is skipped, with one line saying
+  why, when the project has no `node_modules` — instead of reporting dozens of
+  unresolvable-type errors about code you did not write.
+
+### Changed
+
+- `tsk_95377909` — the cloud preview watcher, which used to be bare
+  `somewhere dev`, is now `somewhere dev --cloud`. `--local` is still accepted
+  and does what bare `somewhere dev` does. `somewhere dev <cmd...>` still runs
+  your own command with the project's environment variables injected.
+
+### Fixed
+
+- `tsk_8a3f6540` — `somewhere dev --cloud` on a project that has never been
+  published now publishes the first version once, announced in plain words,
+  instead of failing the initial sync. A private preview is a candidate built
+  against your live version, so there was previously nothing for the first one
+  to build on.
+- `tsk_e929774b` — the `--json` contract test no longer deploys to the live
+  platform on every `npm test`. It ran logged out with no API URL, so
+  `deploy`, `deploy-check` and `browser` reached production and minted a real
+  temporary account and a real project per run — while asserting nothing about
+  what those deploys did. The shape contract now runs against the local stub,
+  and the one test that does deploy for real
+  (`test/deploy-outcome-live.test.mjs`) uses an explicitly created throwaway,
+  asserts the deploy outcome and what the live URL serves, purges the
+  throwaway and confirms it is gone, and skips with a named reason when there
+  is no signed-in credential.
+
 ## 0.24.0
 
 ### Security
