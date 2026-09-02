@@ -116,6 +116,23 @@ export async function callDraftCandidate<T>(
   }
 }
 
+export function registerPreview(program: Command) {
+  program
+    .command('preview')
+    .description(
+      'Run your app on the platform instead of your machine. Every save goes to a private URL: '
+        + 'the same build and the same data as production, reachable only by you until you share the link. '
+        + 'Nothing your users see changes — production keeps serving what you last promoted, until you run '
+        + '`somewhere promote`. Reach for this when you want the real hosted app in front of you, or when '
+        + 'your agent reaches the platform over MCP and cannot serve on localhost. '
+        + 'Available on the Pro and Scale plans; `somewhere dev` runs the same app on your machine on every plan.',
+    )
+    .option('--project <id>', 'Override project ID')
+    .action(async (opts: { project?: string }) => {
+      await runHotDeploy(opts);
+    });
+}
+
 export function registerDev(program: Command) {
   program
     .command('dev [cmd...]')
@@ -127,14 +144,11 @@ export function registerDev(program: Command) {
         'production app, and this is a faster window onto it. Same app, same build. ' +
         'Reaching the project DATABASE from the local loop is a plan feature and the command says so ' +
         'once at startup when your plan does not include it; deploying is unaffected on every plan. ' +
-        '--cloud deploys every save to a shareable private preview URL instead of serving locally. ' +
+        'To see the same app running on the platform instead of your machine, use `somewhere preview`. ' +
         'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
     )
     .option('--project <id>', 'Override project ID')
-    .option(
-      '--cloud',
-      'Deploy every save to a shareable private preview URL instead of serving locally — the loop for an agent that reaches the platform only over MCP',
-    )
+    .option('--cloud', 'Alias for `somewhere preview`')
     .option('--port <port>', 'Port to serve on (default 8787)')
     .option('--open', 'Open the app in your browser once it is serving')
     .option(
@@ -153,6 +167,9 @@ export function registerDev(program: Command) {
           return runLegacyExec(cmdParts);
         }
         if (opts.cloud) {
+          // Pre-launch alias. One line, then the identical loop — no ceremony,
+          // no grandfathering. `preview` is the name.
+          info('This is `somewhere preview`. Use that name — `--cloud` still works for now.');
           return runHotDeploy(opts);
         }
         return runLocalDev(opts);
@@ -455,8 +472,8 @@ export function localDevDbNotice(
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
-  'Private previews (`somewhere dev --cloud`) are available on the Pro and Scale plans. '
-  + 'This account is on a plan that does not include them.';
+  '`somewhere preview` is available on the Pro and Scale plans. '
+  + 'This account is on a plan that does not include it.';
 
 /**
  * Does this account have private previews?
@@ -519,7 +536,7 @@ export async function readActiveReleaseId(projectId: string): Promise<string | n
  * THE ORDER IS THE CONTRACT (tsk_cf48f4ab). A private preview builds a
  * candidate against the project's live version, so a never-published project
  * has nothing to build on and the platform refuses. Publishing once here — out
- * loud, never silently — is what makes `somewhere dev --cloud` work on a brand
+ * loud, never silently — is what makes `somewhere preview` work on a brand
  * new project. But private previews are also a plan feature, and the platform
  * enforces that on the preview request, which is the step AFTER this publish.
  * So the entitlement is read FIRST: an account without private previews is
@@ -608,7 +625,7 @@ async function runHotDeploy(opts: { project?: string }) {
       if (err instanceof CloudDevUnavailableError) {
         error(err.message);
         info('Nothing was created — this project has not been published.');
-        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app locally.');
+        info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
         process.exit(1);
       }
       if (!(isBuildError(err) && renderBuildError(err, cwd))) {
