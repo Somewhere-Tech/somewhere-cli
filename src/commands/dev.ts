@@ -31,7 +31,12 @@ import { promoteCommandForShell, promoteCommandLines } from '../lib/promote-hand
 
 const WATCH_EXTS = /\.(ts|tsx|js|jsx|mjs|html|css|json|svg|md|txt|png|jpe?g|gif|webp|ico|woff2?|ttf|otf)$/i;
 const DEBOUNCE_MS = 500;
-const RETRYABLE_DRAFT_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR']);
+const RETRYABLE_DRAFT_CODES = new Set([
+  'TIMEOUT',
+  'SERVER_SLOW',
+  'NETWORK_ERROR',
+  'RELEASE_PREVERIFY_UNAVAILABLE',
+]);
 
 /**
  * The preview this loop was watching has finished — it was promoted, or closed.
@@ -950,7 +955,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
         return phase(label, () => readBaseReleaseState(projectId));
       },
       confirmPublish: () => readPublishConsent(opts.publishFirst === true),
-      announce: info,
+      announce: opts.json ? () => {} : info,
       publish: async () => {
         await phase('Publishing the first production version', () =>
           callDraftCandidate<DeployResult>(client, '/deploy', {
@@ -972,6 +977,10 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
     // is exactly as you left it. Nothing below may claim anything about whether
     // this project is published — that is precisely the read that failed.
     if (err instanceof CloudDevUnavailableError) {
+      if (opts.json) {
+        printJsonError(err.code, err.message);
+        process.exit(1);
+      }
       error(err.message);
       info('Nothing was created or changed — whatever is live stays live.');
       info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
@@ -989,6 +998,15 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
       process.exit(1);
     }
     if (err instanceof PublishConsentRequiredError) {
+      if (opts.json) {
+        printJsonError(
+          err.code,
+          err.why === 'declined'
+            ? 'Publishing the first production version was declined. Nothing was created or changed.'
+            : 'This project has never been published, so a preview has no live version to build on. Re-run with --publish-first to publish deliberately. Nothing was created or changed.',
+        );
+        process.exit(1);
+      }
       if (err.why === 'declined') {
         warn('Nothing was published — whatever is live stays live.');
       } else {
