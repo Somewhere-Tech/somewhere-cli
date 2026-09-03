@@ -180,7 +180,7 @@ test('status prints the canonical serving host returned as prod_fallback', async
     assert.match(result.stdout, /Preview candidate: draft-current/);
     assert.match(result.stdout, /Candidate release: rel-current/);
     assert.match(result.stdout, /Preview host: https:\/\/canonical-serving-dev\.somewhere\.site/);
-    assert.match(result.stdout, /Promote: somewhere promote draft-current rel-current/);
+    assert.match(result.stdout, /Promote: somewhere promote draft-current rel-current --project proj-host --yes/);
     assert.match(result.stdout, /Promoted from candidate rel-tested-candidate/);
     assert.match(result.stdout, /Content hash: sha256:abcdef012345/);
   } finally {

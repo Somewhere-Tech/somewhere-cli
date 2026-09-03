@@ -87,6 +87,13 @@ function fixtureServer(projectId, toolError) {
         } });
         return;
       }
+      if (req.method === 'GET' && url.pathname === `/v1/projects/${projectId}/deploys`) {
+        sendJson(res, { ok: true, data: {
+          active_release_id: 'rel_free_live',
+          deploys: [{ version: 4, release_id: 'rel_free_live', status: 'success' }],
+        } });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/v1/hosted/status') {
         sendJson(res, { ok: false, error: 'NOT_FOUND', message: 'No workspace' }, 404);
         return;
@@ -159,6 +166,8 @@ test('a healthy Free project exits 0 and states the plan entitlement as informat
     assert.match(human.stdout, /Healthy Free App/);
     assert.match(human.stdout, /not included on this plan/);
     assert.match(human.stdout, /Pro and Scale plans/);
+    assert.match(human.stdout, /Production version: 4/);
+    assert.match(human.stdout, /Active release: rel_free_live/);
     assert.doesNotMatch(human.stderr, /Deploy status:/);
 
     const json = await run(['status', 'proj-free', '--json'], env);
@@ -168,6 +177,8 @@ test('a healthy Free project exits 0 and states the plan entitlement as informat
     assert.equal(parsed.deployment_entitlement.code, 'CLOUD_DEV_NOT_ENABLED');
     assert.equal(parsed.deployment_entitlement.deploy_affected, false);
     assert.equal(parsed.project.status, 'deployed');
+    assert.equal(parsed.deployment.prod_version, 4);
+    assert.equal(parsed.deployment.active_release_id, 'rel_free_live');
   });
 });
 
@@ -222,7 +233,7 @@ test('only plan-entitlement codes are read as information', () => {
     code: 'CLOUD_DEV_NOT_ENABLED',
     message: 'Cloud dev is included on the Pro and Scale plans.',
   });
-  assert.match(planEntitlementLine(note), /^Cloud dev: not included on this plan — /);
+  assert.match(planEntitlementLine(note), /^Preview: not included on this plan — /);
 
   assert.equal(planEntitlementFromError(new Error('DEPLOY_FAILED: compile error')), null);
   assert.equal(planEntitlementFromError(new Error('UNAUTHORIZED: token expired')), null);

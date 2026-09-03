@@ -101,9 +101,82 @@ export function planEntitlementFromError(err: unknown): PlanEntitlementNote | nu
  *  wording is kept — it is the thing that knows which plans include it. */
 export function planEntitlementLine(note: PlanEntitlementNote): string {
   const subject = note.code === 'CLOUD_DEV_NOT_ENABLED'
-    ? 'Cloud dev'
+    ? 'Preview'
     : 'Deploy status';
   return `${subject}: not included on this plan — ${note.message}`;
+}
+
+interface ProductionDeployRecord {
+  version?: unknown;
+  release_id?: unknown;
+  active_release_id?: unknown;
+  status?: unknown;
+  active?: unknown;
+}
+
+/** Build the production-only status from the plan-neutral deploy history API.
+ * Preview candidates intentionally do not exist on this surface. */
+export function productionDeploymentFromHistory(value: unknown): Record<string, unknown> {
+  const response = isRecord(value) ? value : {};
+  const rawDeploys = Array.isArray(value)
+    ? value
+    : Array.isArray(response.deploys)
+      ? response.deploys
+      : Array.isArray(response.releases)
+        ? response.releases
+        : [];
+  const deploys = rawDeploys.filter(isRecord) as ProductionDeployRecord[];
+  const topLevelActiveId = typeof response.active_release_id === 'string'
+    ? response.active_release_id
+    : null;
+  const active = deploys.find((deploy) =>
+    topLevelActiveId !== null && deploy.release_id === topLevelActiveId)
+    ?? deploys.find((deploy) => deploy.active === true)
+    ?? [...deploys]
+      .filter((deploy) => deploy.status === 'success' || deploy.status === 'live' || deploy.status === 'active')
+      .sort((a, b) =>
+        (typeof b.version === 'number' ? b.version : -1)
+        - (typeof a.version === 'number' ? a.version : -1))[0]
+    ?? null;
+  const activeReleaseId = topLevelActiveId
+    ?? (typeof active?.active_release_id === 'string'
+      ? active.active_release_id
+      : typeof active?.release_id === 'string'
+        ? active.release_id
+        : null);
+  const prodVersion = typeof response.prod_version === 'number'
+    ? response.prod_version
+    : typeof response.production_version === 'number'
+      ? response.production_version
+      : typeof active?.version === 'number'
+        ? active.version
+        : 0;
+
+  return {
+    published: activeReleaseId !== null || prodVersion > 0,
+    prod_version: prodVersion,
+    active_release_id: activeReleaseId,
+    preview_candidates: [],
+  };
+}
+
+function printProductionDeployment(deployment: Record<string, unknown>): void {
+  const prodVersion = typeof deployment.prod_version === 'number'
+    ? deployment.prod_version
+    : typeof deployment.dev_version === 'number' && deployment.in_sync === true
+      ? deployment.dev_version
+      : null;
+  if (prodVersion !== null) info(`Production version: ${teal(String(prodVersion))}`);
+  if (typeof deployment.active_release_id === 'string') {
+    info(`Active release: ${dim(deployment.active_release_id)}`);
+  }
+  const provenance = deploymentProvenanceFromStatus(deployment);
+  if (provenance.promotedFromCandidate) {
+    info(`Promoted from candidate ${teal(provenance.promotedFromCandidate)}`);
+  }
+  if (provenance.shortContentHash) {
+    info(`Content hash: ${dim(provenance.shortContentHash)}`);
+  }
 }
 
 export function registerStatus(program: Command) {
@@ -195,22 +268,7 @@ export function registerStatus(program: Command) {
         if (!isRecord(deployment)) throw new Error('deploy_status returned an unexpected response.');
         deploymentStatus = deployment;
         if (!opts.json) {
-          const prodVersion = typeof deployment.prod_version === 'number'
-            ? deployment.prod_version
-            : typeof deployment.dev_version === 'number' && deployment.in_sync === true
-              ? deployment.dev_version
-              : null;
-          if (prodVersion !== null) info(`Production version: ${teal(String(prodVersion))}`);
-          if (typeof deployment.active_release_id === 'string') {
-            info(`Active release: ${dim(deployment.active_release_id)}`);
-          }
-          const provenance = deploymentProvenanceFromStatus(deployment);
-          if (provenance.promotedFromCandidate) {
-            info(`Promoted from candidate ${teal(provenance.promotedFromCandidate)}`);
-          }
-          if (provenance.shortContentHash) {
-            info(`Content hash: ${dim(provenance.shortContentHash)}`);
-          }
+          printProductionDeployment(deployment);
           if (deployment.dev_ahead === true) {
             info(`Preview: ${deployment.files_changed ?? 'some'} file(s) ahead of production`);
           } else if (deployment.in_sync === true) {
@@ -226,6 +284,7 @@ export function registerStatus(program: Command) {
             for (const line of promoteCommands({
               previewSessionId: candidate.draft_id,
               previewId: candidate.candidate_release_id,
+              projectRef: projectId,
               interactive: process.stdin.isTTY === true,
             })) {
               info(`Promote: ${dim(line)}`);
@@ -240,6 +299,18 @@ export function registerStatus(program: Command) {
         // exits non-zero.
         deploymentEntitlement = planEntitlementFromError(err);
         if (deploymentEntitlement) {
+          try {
+            const history = await client.call<unknown>(
+              'GET',
+              `/projects/${encodeURIComponent(projectId)}/deploys`,
+            );
+            deploymentStatus = productionDeploymentFromHistory(history);
+            if (!opts.json) printProductionDeployment(deploymentStatus);
+          } catch (historyErr) {
+            deploymentError = historyErr instanceof Error ? historyErr.message : String(historyErr);
+            if (!opts.json) error(`Production status: ${deploymentError}`);
+            process.exitCode = 1;
+          }
           if (!opts.json) {
             info(planEntitlementLine(deploymentEntitlement));
             info(dim('— your deployed app and `somewhere deploy` are unaffected'));

@@ -1,6 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { callDraftCandidate, mintPreviewHandoff } from '../dist/commands/dev.js';
+import {
+  callDraftCandidate,
+  mintPreviewHandoff,
+  previewPlatformState,
+  previewSessionStateFromDeployment,
+  runPreviewPhase,
+} from '../dist/commands/dev.js';
 import { CliApiError } from '../dist/lib/client.js';
 
 test('draft transport retries one exact operation after a lost response', async () => {
@@ -64,6 +70,7 @@ test('preview handoff exposes the exact candidate capability and promote command
   }]);
   assert.equal(handoff.draftId, 'draft-current');
   assert.equal(handoff.candidateReleaseId, 'rel-current');
+  assert.equal(handoff.projectRef, 'project id');
   assert.equal(handoff.capabilityUrl, 'https://fixture-dev.somewhere.site/__sw_cap?t=one-time');
   // The command is shaped for the shell that will read it (parity finding #9):
   // a test runner has no TTY, so the runnable form is the `--yes` one. A bare
@@ -71,7 +78,63 @@ test('preview handoff exposes the exact candidate capability and promote command
   assert.equal(
     handoff.promoteCommand,
     process.stdin.isTTY === true
-      ? 'somewhere promote draft-current rel-current'
-      : 'somewhere promote draft-current rel-current --yes',
+      ? "somewhere promote draft-current rel-current --project 'project id'"
+      : "somewhere promote draft-current rel-current --project 'project id' --yes",
+  );
+});
+
+test('preview session state fixtures distinguish active, promoted, closed and unreadable', () => {
+  const session = 'draft-current';
+  const preview = 'rel-current';
+  assert.equal(previewSessionStateFromDeployment({
+    preview_candidates: [{ draft_id: session, candidate_release_id: preview, status: 'active' }],
+  }, session, preview), 'active');
+  assert.equal(previewSessionStateFromDeployment({
+    active_release_id: 'rel-production',
+    promoted_from_candidate_id: preview,
+    preview_candidates: [],
+  }, session, preview), 'promoted');
+  assert.equal(previewSessionStateFromDeployment({
+    preview_candidates: [{ draft_id: session, candidate_release_id: preview, terminal_status: 'expired' }],
+  }, session, preview), 'closed');
+  assert.equal(previewSessionStateFromDeployment({ preview_candidates: [] }, session, preview), 'missing');
+  assert.equal(previewSessionStateFromDeployment('bad response', session, preview), 'unknown');
+});
+
+test('publish-first progress prints elapsed heartbeats and successful typed platform states', async () => {
+  const oldHeartbeat = process.env.SOMEWHERE_PREVIEW_HEARTBEAT_MS;
+  const oldLog = console.log;
+  const oldError = console.error;
+  const lines = [];
+  process.env.SOMEWHERE_PREVIEW_HEARTBEAT_MS = '5';
+  console.log = (...parts) => lines.push(parts.join(' '));
+  console.error = (...parts) => lines.push(parts.join(' '));
+  try {
+    const result = await runPreviewPhase('Publishing the first production version', async () => {
+      await new Promise((resolve) => setTimeout(resolve, 18));
+      return { status: 'success', release_publish: true };
+    });
+    assert.equal(result.release_publish, true);
+  } finally {
+    console.log = oldLog;
+    console.error = oldError;
+    if (oldHeartbeat === undefined) delete process.env.SOMEWHERE_PREVIEW_HEARTBEAT_MS;
+    else process.env.SOMEWHERE_PREVIEW_HEARTBEAT_MS = oldHeartbeat;
+  }
+  assert.match(lines.join('\n'), /\(0\.0s\)/);
+  assert.match(lines.join('\n'), /still running after/);
+  assert.match(lines.join('\n'), /platform state: status=success, release_publish=true/);
+});
+
+test('publish-first failures retain the platform code and phase', () => {
+  const failure = new CliApiError(
+    'RELEASE_PUBLISH_FAILED',
+    'The release could not be published.',
+    409,
+    { phase: 'release_publish', status: 'failed' },
+  );
+  assert.equal(
+    previewPlatformState(failure),
+    'code=RELEASE_PUBLISH_FAILED, phase=release_publish, status=failed',
   );
 });

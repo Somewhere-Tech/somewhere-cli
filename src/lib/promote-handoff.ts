@@ -34,17 +34,27 @@
 export function promoteCommands(args: {
   previewSessionId: string;
   previewId: string;
+  projectRef: string;
   interactive: boolean;
 }): string[] {
-  const base = `somewhere promote ${args.previewSessionId} ${args.previewId}`;
+  const project = shellArgument(args.projectRef);
+  const base = `somewhere promote ${args.previewSessionId} ${args.previewId} --project ${project}`;
   if (!args.interactive) return [`${base} --yes`];
   return [base, `${base} --yes`];
+}
+
+/** Quote an opaque project ref so the printed command is safe to paste into a
+ * POSIX shell even when the ref is a project name rather than a UUID/slug. */
+export function shellArgument(value: string): string {
+  if (/^[A-Za-z0-9_./:@+-]+$/.test(value)) return value;
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
 }
 
 /** The single command to print when only one line fits. Always runnable here. */
 export function promoteCommandForShell(args: {
   previewSessionId: string;
   previewId: string;
+  projectRef: string;
   interactive: boolean;
 }): string {
   const commands = promoteCommands(args);
@@ -55,6 +65,7 @@ export function promoteCommandForShell(args: {
 export function promoteCommandLines(args: {
   previewSessionId: string;
   previewId: string;
+  projectRef: string;
   interactive: boolean;
 }): string[] {
   const commands = promoteCommands(args);

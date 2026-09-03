@@ -127,5 +127,5 @@ test('a burst of saves coalesces into one preview update', () => {
   assert.match(dev, /if \(deploying\) \{\s*\n\s*schedule\(\); \/\/ re-arm; a deploy is in flight\s*\n\s*return;/);
   assert.match(dev, /deploying = true;/);
   // Whatever arrived during the update goes out next, as one batch.
-  assert.match(dev, /deploying = false;\s*\n\s*if \(pendingChanged\.size \|\| pendingDeleted\.size\) schedule\(\);/);
+  assert.match(dev, /deploying = false;\s*\n\s*if \(!previewEnded && \(pendingChanged\.size \|\| pendingDeleted\.size\)\) schedule\(\);/);
 });
