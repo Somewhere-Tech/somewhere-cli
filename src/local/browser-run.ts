@@ -263,17 +263,18 @@ export async function executeLocalAction(
       const state = await evaluate(session, `(() => {
         const nodes = Array.from(document.querySelectorAll(${JSON.stringify(action.expect.selector)}));
         const el = nodes[0];
-        if (!el) return { count: nodes.length, text: '', visible: false };
+        if (!el) return { count: nodes.length, text: '', value: '', visible: false };
         const style = getComputedStyle(el);
         const rect = el.getBoundingClientRect();
         return {
           count: nodes.length,
           text: String(el.innerText || el.value || el.textContent || ''),
+          value: 'value' in el ? String(el.value ?? '') : '',
           visible: !el.closest('[hidden]') && !el.closest('[aria-hidden="true"]')
             && style.display !== 'none' && style.visibility !== 'hidden'
             && !(rect.width === 0 && rect.height === 0),
         };
-      })()`) as { count: number; text: string; visible: boolean };
+      })()`) as { count: number; text: string; value: string; visible: boolean };
       if (action.expect.count !== undefined && state.count !== action.expect.count) {
         throw new Error(`expect failed at "${action.expect.selector}": expected count ${action.expect.count}, got ${state.count}.`);
       }
@@ -281,6 +282,12 @@ export async function executeLocalAction(
         if (state.count === 0) throw new Error(`expect failed at "${action.expect.selector}": selector did not match any element.`);
         if (!state.text.includes(action.expect.text)) {
           throw new Error(`expect failed at "${action.expect.selector}": text did not contain "${action.expect.text}". Got: "${state.text.trim().slice(0, 120)}".`);
+        }
+      }
+      if (action.expect.value !== undefined) {
+        if (state.count === 0) throw new Error(`expect failed at "${action.expect.selector}": selector did not match any element.`);
+        if (state.value !== action.expect.value) {
+          throw new Error(`expect failed at "${action.expect.selector}": expected value "${action.expect.value}", got "${state.value.slice(0, 120)}".`);
         }
       }
       if (action.expect.visible !== undefined) {
