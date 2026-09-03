@@ -58,6 +58,11 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
     { name: 'feedback', description: 'Project feedback', inputSchema: { type: 'object' } },
     { name: 'project_grep', description: 'Search source', inputSchema: { type: 'object' } },
     { name: 'usage_summary', description: 'Usage totals', inputSchema: { type: 'object' } },
+    { name: 'cron_list', description: 'List scheduled triggers', inputSchema: { type: 'object' } },
+    { name: 'cron_create', description: 'Create a scheduled trigger', inputSchema: { type: 'object' } },
+    { name: 'cron_update', description: 'Update a scheduled trigger', inputSchema: { type: 'object' } },
+    { name: 'cron_delete', description: 'Delete a scheduled trigger', inputSchema: { type: 'object' } },
+    { name: 'email_send', description: 'Send transactional email', inputSchema: { type: 'object' } },
   ];
 
   const server = createServer((req, res) => {
@@ -96,6 +101,12 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
               ? { matches: [], truncated: false, files_searched: 3 }
               : rpc.params.name === 'usage_summary'
                 ? { period: '7d', totals: { deploys: 1 } }
+                : rpc.params.name === 'cron_list'
+                  ? { crons: [] }
+                  : rpc.params.name.startsWith('cron_')
+                    ? { id: 'cron_1' }
+                    : rpc.params.name === 'email_send'
+                      ? { id: 'email_1' }
                 : { id: 'tsk_1', title: 'Test task' };
         sendJson(res, {
           jsonrpc: '2.0',
@@ -128,6 +139,11 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       ['feedback', 'list', '--project', 'platform', '--json'],
       ['grep', 'TODO', '--project', 'platform', '--max-results', '4', '--json'],
       ['usage', 'platform', '--period', '7d', '--json'],
+      ['cron', 'list', '--project', 'platform', '--json'],
+      ['cron', 'create', '0 8 * * *', '/api/digest', '--project', 'platform', '--name', 'Daily digest', '--payload', '{"kind":"digest"}', '--json'],
+      ['cron', 'update', 'cron_1', '--disable', '--json'],
+      ['cron', 'delete', 'cron_1', '--json'],
+      ['email', 'send', 'alice@example.com', '--project', 'platform', '--from', 'hello@example.com', '--subject', 'Welcome', '--text', 'You are in.', '--json'],
     ];
     for (const command of commands) {
       const result = await run(command, env);
@@ -141,7 +157,26 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       { name: 'feedback', arguments: { project_id: 'platform' } },
       { name: 'project_grep', arguments: { project_id: 'platform', pattern: 'TODO', env: 'prod', max_results: 4 } },
       { name: 'usage_summary', arguments: { project_id: 'platform', period: '7d' } },
+      { name: 'cron_list', arguments: { project_id: 'platform' } },
+      { name: 'cron_create', arguments: { project_id: 'platform', schedule: '0 8 * * *', handler: '/api/digest', name: 'Daily digest', payload: { kind: 'digest' } } },
+      { name: 'cron_update', arguments: { cron_id: 'cron_1', enabled: false } },
+      { name: 'cron_delete', arguments: { cron_id: 'cron_1' } },
+      { name: 'email_send', arguments: { project_id: 'platform', to: 'alice@example.com', from: 'hello@example.com', subject: 'Welcome', text: 'You are in.' } },
     ]);
+
+    const callCount = calls.length;
+    const badCron = await run([
+      'cron', 'create', '0 8 * * *', '/api/digest', '--project', 'platform', '--payload', '[]',
+    ], env);
+    assert.equal(badCron.status, 1);
+    assert.match(badCron.stderr, /Payload must be a JSON object/);
+
+    const badEmail = await run([
+      'email', 'send', 'alice@example.com', '--project', 'platform', '--from', 'hello@example.com', '--subject', 'Welcome',
+    ], env);
+    assert.equal(badEmail.status, 1);
+    assert.match(badEmail.stderr, /Pass --text <body>, --html <body>, or both/);
+    assert.equal(calls.length, callCount, 'invalid commands must not call the platform');
     assert.ok(urls.every((url) => url?.includes('groups=all')));
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));

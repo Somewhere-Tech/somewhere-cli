@@ -31,9 +31,9 @@ export function isNewer(a: string, b: string): boolean {
   return false;
 }
 
-function readCache(): UpdateCache | null {
+function readCache(cachePath = CACHE_PATH): UpdateCache | null {
   try {
-    const c = JSON.parse(readFileSync(CACHE_PATH, 'utf8')) as UpdateCache;
+    const c = JSON.parse(readFileSync(cachePath, 'utf8')) as UpdateCache;
     // Guard a corrupt/absent checkedAt: NaN comparisons read as "fresh forever",
     // which would silence updates until the file is hand-deleted.
     if (typeof c?.checkedAt !== 'number') return null;
@@ -43,14 +43,44 @@ function readCache(): UpdateCache | null {
   }
 }
 
-function writeCache(latest: string | null): void {
+function writeCache(latest: string | null, checkedAt: number, cachePath = CACHE_PATH): void {
   try {
-    const dir = dirname(CACHE_PATH);
+    const dir = dirname(cachePath);
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-    writeFileSync(CACHE_PATH, JSON.stringify({ checkedAt: Date.now(), latest }) + '\n', { mode: 0o600 });
+    writeFileSync(cachePath, JSON.stringify({ checkedAt, latest }) + '\n', { mode: 0o600 });
   } catch {
     // best-effort cache; a failed write just means we re-check next time
   }
+}
+
+export interface UpdateNoticeOptions {
+  cachePath?: string;
+  fetchLatest?: () => Promise<string | null>;
+  now?: () => number;
+}
+
+/** Resolve the ambient update notice without changing the installed CLI. The
+ * injectable clock/cache/fetch keep both version directions and daily
+ * throttling deterministic in tests. */
+export async function getUpdateNotice(
+  currentVersion: string,
+  options: UpdateNoticeOptions = {},
+): Promise<string | null> {
+  const cachePath = options.cachePath ?? CACHE_PATH;
+  const now = options.now ?? Date.now;
+  const getLatest = options.fetchLatest ?? fetchLatest;
+  let cache = readCache(cachePath);
+  const checkedAt = now();
+  if (!cache || checkedAt - cache.checkedAt > ONE_DAY) {
+    const latest = await getLatest();
+    // Stamp checkedAt even on failure so a blackholed network (captive portal,
+    // proxy) doesn't make every command re-pay the fetch — retry is daily.
+    const known = latest ?? cache?.latest ?? null;
+    writeCache(known, checkedAt, cachePath);
+    cache = { checkedAt, latest: known };
+  }
+  if (!cache.latest || !isNewer(cache.latest, currentVersion)) return null;
+  return `${teal('▲ somewhere CLI update available')}  ${dim(currentVersion)} → ${teal(cache.latest)}  Run ${teal('somewhere update')} to upgrade.`;
 }
 
 async function fetchLatest(): Promise<string | null> {
@@ -76,20 +106,7 @@ export const updateProvider: NoticeProvider = {
   id: 'cli-update',
   async getNotice({ currentVersion }) {
     try {
-      let cache = readCache();
-      if (!cache || Date.now() - cache.checkedAt > ONE_DAY) {
-        const latest = await fetchLatest();
-        // Stamp checkedAt even on failure so a blackholed network (captive portal,
-        // proxy) doesn't make every command re-pay the fetch — retry is daily.
-        const known = latest ?? cache?.latest ?? null;
-        writeCache(known);
-        cache = { checkedAt: Date.now(), latest: known };
-      }
-      if (!cache.latest || !isNewer(cache.latest, currentVersion)) return null;
-      return (
-        `  ${teal('▲ Update available')}  ${dim(currentVersion)} → ${teal(cache.latest)}\n` +
-        `  Run ${teal('somewhere update')} to upgrade.  ${dim('(SOMEWHERE_NO_NOTIFICATIONS=1 to silence)')}`
-      );
+      return await getUpdateNotice(currentVersion);
     } catch {
       return null;
     }
