@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.31.10
+
+### Fixed
+
+- **A preview that cannot finish verifying now says so, and retries itself.**
+  When the platform could not yet confirm the uploaded preview build, the CLI
+  reported a generic internal error and dropped the session. That case is now a
+  named, retryable condition: `somewhere preview` replays the same save once on
+  its own, and only reports a failure — with a reference you can quote — if the
+  retry also does not complete. Nothing is created or changed on the failed
+  attempt, and whatever is live stays live.
+- **`somewhere preview --json` always answers with JSON.** A refusal — the plan
+  does not include previews, or the project has never been published and
+  `--publish-first` was not passed — used to print human prose on a `--json`
+  run. It now returns the same typed JSON error shape as every other refusal,
+  so a script or agent can read the reason instead of parsing sentences.
+
 ## 0.31.9
 
 ### Added
