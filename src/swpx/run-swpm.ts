@@ -67,7 +67,7 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
     timedOut = false,
   ): Promise<SwpmOutcome> => {
     if (timedOut) {
-      d.errLog(`${yellow('⚠')} verdict pending — the check timed out; proceeding with npm install.`);
+      d.errLog(`${yellow('⚠')} verdict pending — proceeding with npm install without waiting for a result.`);
     } else {
       loudUnavailable(d.errLog, 'this install', rateLimited, cause);
     }

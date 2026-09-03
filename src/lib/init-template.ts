@@ -429,7 +429,7 @@ Deploy the raw source. There is intentionally no build script.
 
 export function createHappyPathTemplate(): InitScaffoldFile[] {
   return [
-    { path: '.gitignore', content: 'node_modules\\ndist\\nbuild\\n.env\\n' },
+    { path: '.gitignore', content: 'node_modules\ndist\nbuild\n.env\n' },
     { path: 'AGENTS.md', content: AGENT_GUIDE },
     { path: 'CLAUDE.md', content: AGENT_GUIDE },
     { path: 'README.md', content: README },

@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.31.9
+
+### Added
+
+- **Cron and email are first-class CLI command groups.** `somewhere cron`
+  exposes list, create, update, and delete commands, while `somewhere email`
+  exposes transactional send. Each group names its commands and includes a
+  copyable example in `--help`.
+- **Stale CLI installs get one concise update line.** The existing daily,
+  fail-open version check now has explicit newer/current and cache-throttling
+  coverage, and its notice fits on one line.
+
+### Fixed
+
+- **Every registered command owns its help output.** Command help can no
+  longer silently look like the generic top-level banner, and the complete
+  non-pass-through command surface is fixture-covered.
+- **Every bundled init template writes a valid `.gitignore`.** The current
+  green starter already emitted real line breaks; the older exported template
+  no longer carries literal `\\n` text.
+- **A pending package verdict is described as pending.** npm installation
+  continues without waiting for a result, without presenting that non-blocking
+  fallback as a failed install.
+
 ## 0.31.8
 
 ### Added

@@ -1,6 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { isNewer } from '../dist/lib/notify/providers/update.js';
+import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import {
+  getUpdateNotice,
+  isNewer,
+} from '../dist/lib/notify/providers/update.js';
 import { collectNotices, subcommandSuppressesNotifications } from '../dist/lib/notify/index.js';
 
 test('isNewer — basic precedence', () => {
@@ -37,4 +43,39 @@ test('collectNotices — central gate: silent on non-interactive output', async 
 test('notification gate — update owns its output and cannot reprint the old-process version', () => {
   assert.equal(subcommandSuppressesNotifications(['node', 'sw', 'update']), true);
   assert.equal(subcommandSuppressesNotifications(['node', 'sw', 'whoami']), false);
+});
+
+test('update notice — newer and current directions are one-line and deterministic', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-update-notice-'));
+  const cachePath = join(dir, 'update-check.json');
+  const now = 1_800_000_000_000;
+
+  writeFileSync(cachePath, JSON.stringify({ checkedAt: now, latest: '0.31.9' }));
+  const newer = await getUpdateNotice('0.31.8', { cachePath, now: () => now });
+  assert.match(newer, /0\.31\.8.*0\.31\.9.*somewhere update/);
+  assert.doesNotMatch(newer, /\n/);
+
+  const current = await getUpdateNotice('0.31.9', { cachePath, now: () => now });
+  assert.equal(current, null);
+});
+
+test('update notice — stale cache checks once, then reuses the daily cache', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-update-throttle-'));
+  const cachePath = join(dir, 'update-check.json');
+  const now = 1_800_000_000_000;
+  writeFileSync(cachePath, JSON.stringify({ checkedAt: now - 86_400_001, latest: '0.31.8' }));
+  let fetches = 0;
+  const fetchLatest = async () => {
+    fetches += 1;
+    return '0.31.9';
+  };
+
+  await getUpdateNotice('0.31.8', { cachePath, fetchLatest, now: () => now });
+  await getUpdateNotice('0.31.8', { cachePath, fetchLatest, now: () => now + 1 });
+
+  assert.equal(fetches, 1);
+  assert.deepEqual(JSON.parse(readFileSync(cachePath, 'utf8')), {
+    checkedAt: now,
+    latest: '0.31.9',
+  });
 });

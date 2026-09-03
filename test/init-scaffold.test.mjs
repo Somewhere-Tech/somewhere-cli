@@ -105,6 +105,10 @@ test('default green starter is a small typed frontend, function, and schema', ()
     typescript: '5.9.3',
     vite: '7.2.2',
   });
+  assert.equal(
+    readFileSync(join(dir, '.gitignore'), 'utf8'),
+    'node_modules\ndist\nbuild\n.env\n',
+  );
   for (const version of [
     ...Object.values(pkg.dependencies),
     ...Object.values(pkg.devDependencies),
@@ -173,6 +177,10 @@ test('init dependency installation is required for a green completion', async ()
 test('one generated template consumes the SDK auth adapter and server data/files contract', () => {
   const { dir, result } = generate();
   assert.equal(result.created.length, 18);
+  assert.equal(
+    readFileSync(join(dir, '.gitignore'), 'utf8'),
+    'node_modules\ndist\nbuild\n.env\n',
+  );
 
   const auth = readFileSync(join(dir, 'api/auth/[...path].ts'), 'utf8');
   assert.match(auth, /from '@somewhere-tech\/sdk\/server'/);

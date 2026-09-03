@@ -358,6 +358,7 @@ test('swpm install — a verdict timeout says verdict pending and proceeds', asy
   assert.equal(r.exitCode, 0);
   assert.match(cap.errText(), /verdict pending/);
   assert.match(cap.errText(), /proceeding with npm install/);
+  assert.doesNotMatch(cap.errText(), /timed out/i);
   assert.deepEqual(runReal.calls, [{ cmd: 'npm', args: ['install'] }]);
 });
 
