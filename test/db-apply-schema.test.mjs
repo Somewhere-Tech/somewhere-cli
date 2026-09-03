@@ -97,7 +97,7 @@ test('apply-schema sends the schema source unchanged and prints an additive succ
     url: '/v1/db/schema/apply',
     body: {
       project_id: 'proj_apply_schema',
-      schema_module: schemaSource,
+      schema_source: schemaSource,
       target: 'production',
     },
   }]);
@@ -106,13 +106,14 @@ test('apply-schema sends the schema source unchanged and prints an additive succ
   assert.match(result.stdout, /Declared owner access/);
 });
 
-test('apply-schema preserves a destructive refusal and does not send confirmation implicitly', async (t) => {
+test('apply-schema preserves the planner refusal and has no confirmation bypass', async (t) => {
+  const plannerMessage = 'Removing table notes requires removedTable("notes") in db/schema.ts. Nothing changed.';
   const api = await stub(() => ({
     status: 409,
     body: {
       ok: false,
-      error: 'SCHEMA_DESTRUCTIVE_CONFIRMATION_REQUIRED',
-      message: 'This schema would remove the notes table. Nothing changed.',
+      error: 'SCHEMA_DEPLOY_REFUSED',
+      message: plannerMessage,
     },
   }));
   t.after(api.close);
@@ -125,29 +126,37 @@ test('apply-schema preserves a destructive refusal and does not send confirmatio
   assert.equal(result.status, 1);
   assert.equal(api.requests.length, 1);
   assert.equal('confirm_destructive' in api.requests[0].body, false);
-  assert.match(result.stderr, /would remove the notes table/);
-  assert.match(result.stderr, /Nothing changed/);
-  assert.match(result.stdout + result.stderr, /--confirm-destructive/);
+  assert.match(result.stderr, new RegExp(plannerMessage.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.doesNotMatch(result.stdout + result.stderr, /--confirm-destructive/);
 });
 
-test('--confirm-destructive is the only flag that opts into removals', async (t) => {
+test('apply-schema prints an already-current result as a no-op', async (t) => {
   const api = await stub(() => ({
     status: 200,
-    body: { ok: true, data: { applied: true, report_lines: ['Removed table notes.'] } },
+    body: { ok: true, data: { applied: false, report_lines: ['Schema is already current.'] } },
   }));
   t.after(api.close);
   const project = fixture();
-  const result = await run(['db', 'apply-schema', '--confirm-destructive', '--json'], {
+  const result = await run(['db', 'apply-schema'], {
     ...project,
     apiUrl: api.apiUrl,
   });
 
   assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-  assert.equal(api.requests[0].body.confirm_destructive, true);
-  assert.deepEqual(JSON.parse(result.stdout), {
-    applied: true,
-    report_lines: ['Removed table notes.'],
+  assert.equal('confirm_destructive' in api.requests[0].body, false);
+  assert.match(result.stdout, /already matches/);
+  assert.match(result.stdout, /Schema is already current/);
+});
+
+test('apply-schema help exposes source-marker safety, not a force flag', async () => {
+  const project = fixture();
+  const result = await run(['db', 'apply-schema', '--help'], {
+    ...project,
+    apiUrl: 'http://127.0.0.1:1/v1',
   });
+
+  assert.equal(result.status, 0);
+  assert.doesNotMatch(result.stdout, /confirm-destructive|force/i);
 });
 
 test('a missing schema path fails before any platform request and names the path', async (t) => {

@@ -1,5 +1,35 @@
 # Changelog
 
+## 0.31.6
+
+### Added
+
+- **Device login now shows what is asking for access.** The approval page can
+  show the machine name, CLI and runtime versions, operating system, and the
+  requested project scope before access is allowed or denied. After approval,
+  `somewhere login` prints that scope, `somewhere whoami` names the current
+  session and its access, and `somewhere logout` revokes the session on the
+  server before removing the local credential.
+- **`somewhere browser` can drive routine flows without custom JavaScript.**
+  Repeatable `--fill`, `--select`, `--click`, and `--expect` flags run in command
+  order, while `--actions <file.json>` accepts the same shared action sequence
+  as the platform browser. `--expect-request <path:status>` treats an intended
+  response such as an authorization refusal as expected, and `--visible-only`
+  removes hidden controls from the page outline. Localhost session help now
+  says plainly that named sessions are unavailable there and points to a fresh
+  local browser run.
+- **`somewhere db apply-schema` prepares a managed database before the first
+  deploy.** It reads `db/schema.ts` by default, applies the declaration to the
+  production database without publishing the app, reports an already-current
+  schema as a no-op, and preserves the planner's exact safety message when a
+  removal needs an explicit `removed()` or `removedTable()` marker.
+
+### Fixed
+
+- **Local browser checks no longer stall when the CLI uses an isolated home on
+  macOS.** The headless browser still runs with a new scratch profile and no
+  extensions, while the CLI's credentials remain inside the isolated home.
+
 ## 0.31.5
 
 ### Fixed

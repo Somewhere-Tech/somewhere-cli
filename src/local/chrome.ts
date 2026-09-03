@@ -19,7 +19,7 @@
  */
 import { spawn, type ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { homedir, tmpdir, userInfo } from 'node:os';
 import { join } from 'node:path';
 import { readdirSync } from 'node:fs';
 import { WebSocket } from 'undici';
@@ -307,6 +307,14 @@ export async function launchLocalBrowser(opts: {
   timeoutMs: number;
 }): Promise<LaunchedBrowser> {
   const profileDir = mkdtempSync(join(tmpdir(), 'somewhere-browser-'));
+  // Current macOS Chrome can launch and expose DevTools while inheriting a
+  // temporary HOME, then stop answering Page.navigate. Keep the CLI's HOME
+  // (and therefore its credentials) isolated, but give only the browser child
+  // the OS account home it expects. Its actual browser state remains isolated
+  // by the explicit scratch --user-data-dir and disabled extensions below.
+  const browserEnv = process.platform === 'darwin'
+    ? { ...process.env, HOME: userInfo().homedir }
+    : process.env;
   const child = spawn(
     opts.executablePath,
     [
@@ -322,7 +330,7 @@ export async function launchLocalBrowser(opts: {
       '--hide-scrollbars',
       'about:blank',
     ],
-    { stdio: ['ignore', 'ignore', 'pipe'] },
+    { stdio: ['ignore', 'ignore', 'pipe'], env: browserEnv },
   );
 
   const cleanup = async (): Promise<void> => {

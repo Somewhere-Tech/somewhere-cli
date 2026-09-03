@@ -2,7 +2,7 @@ import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import ora from '../lib/spinner.js';
-import { ApiClient, CliApiError } from '../lib/client.js';
+import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, success, table, teal, yellow } from '../lib/output.js';
 
@@ -104,14 +104,10 @@ export function registerDb(program: Command) {
     .command('apply-schema [path]')
     .description('Apply db/schema.ts to the project database without publishing the app')
     .option('--project <id>', 'Project ID (defaults to .somewhere.json)')
-    .option(
-      '--confirm-destructive',
-      'Confirm schema changes that remove declared tables or columns',
-    )
     .option('--json', 'Print the raw apply result')
     .action(async (
       schemaPath: string | undefined,
-      opts: { project?: string; confirmDestructive?: boolean; json?: boolean },
+      opts: { project?: string; json?: boolean },
     ) => {
       let projectId: string | undefined = opts.project;
       if (!projectId) {
@@ -138,9 +134,8 @@ export function registerDb(program: Command) {
       try {
         const result = await client.call<ApplySchemaResult>('POST', '/db/schema/apply', {
           project_id: projectId,
-          schema_module: schemaModule,
+          schema_source: schemaModule,
           target: 'production',
-          ...(opts.confirmDestructive ? { confirm_destructive: true } : {}),
         });
         spinner?.stop();
         if (opts.json) {
@@ -158,13 +153,6 @@ export function registerDb(program: Command) {
         spinner?.fail('Database schema was not applied');
         if (err instanceof Error) {
           error(err.message);
-          if (
-            err instanceof CliApiError
-            && /(?:DESTRUCTIVE.*CONFIRM|CONFIRM.*DESTRUCTIVE)/i.test(err.code)
-            && !opts.confirmDestructive
-          ) {
-            info('Review the proposed removals, then rerun with --confirm-destructive to approve them.');
-          }
         } else {
           error(String(err));
         }
