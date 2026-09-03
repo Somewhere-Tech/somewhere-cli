@@ -1,5 +1,39 @@
 # Changelog
 
+## 0.31.8
+
+### Added
+
+- **`somewhere verify` runs a complete browser acceptance flow in one command.**
+  Give it a live or local URL and an optional flow file to get one report with
+  every named step, page/console/network health, and desktop and mobile
+  screenshots. `somewhere deploy --verify <flow.json>` can run the same check
+  immediately after publishing.
+  During the platform #24 rollout, hosted action flows on an older serving
+  release fail honestly with a missing-screenshot or unfiltered expected-
+  refusal health result; they do not crash or report a false pass. Re-run the
+  same command after the rollout reaches the project.
+- **Browser action files now have one canonical shape everywhere.**
+  `somewhere browser --actions` and `somewhere verify --flow` use the same
+  concise action array, such as `{"fill":"#email","value":"a@b.co"}` followed
+  by `{"click":"#save"}`.
+
+### Fixed
+
+- **Preview handoffs are directly runnable from any directory.** Every promote
+  command printed by `somewhere preview` carries its project context, and the
+  non-interactive form includes `--yes`. The watcher now notices a promotion
+  promptly and exits without consuming or silently dropping the next save.
+- **A first preview no longer looks frozen while it publishes production.**
+  `somewhere preview --publish-first` reports each bootstrap phase, elapsed
+  heartbeats, retries, and the platform's typed failure state.
+- **Preview access refusals are safe to automate.** Wrong-account lookups return
+  a stable `PROJECT_NOT_FOUND` result in human and `--json` output without
+  listing unrelated projects or attempting a deploy.
+- **`somewhere status` keeps production visible on Free plans.** It reports the
+  live production version and release even when private preview status is
+  unavailable on the account's plan.
+
 ## 0.31.7
 
 ### Added
