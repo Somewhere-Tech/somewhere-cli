@@ -7,7 +7,7 @@ import {
   truncateText,
   unwrapPlatformData,
 } from '../lib/platform-command.js';
-import { dim, error, printJson, success, table } from '../lib/output.js';
+import { dim, error, printJson, printJsonError, success, table } from '../lib/output.js';
 
 interface ProjectOptions {
   project?: string;
@@ -29,6 +29,21 @@ interface CronUpdateOptions {
   disable?: boolean;
   json?: boolean;
 }
+
+interface CronRow extends Record<string, unknown> {
+  cron_id?: string;
+  id?: string;
+  name?: string;
+}
+
+interface CronRunResult extends Record<string, unknown> {
+  cron_id: string;
+  job_id: string;
+  status: string;
+  trigger: string;
+}
+
+const CRON_RUN_UNAVAILABLE = 'Cron run is not available on this platform version yet.';
 
 function parsePayload(value: string | undefined): Record<string, unknown> | undefined {
   if (value === undefined) return undefined;
@@ -58,7 +73,7 @@ async function runCronTool(
   }
 }
 
-function cronRows(value: unknown): Record<string, unknown>[] {
+function cronRows(value: unknown): CronRow[] {
   const data = unwrapPlatformData(value);
   const rows = Array.isArray(data)
     ? data
@@ -67,6 +82,60 @@ function cronRows(value: unknown): Record<string, unknown>[] {
       : null;
   if (!rows) throw new Error('cron_list returned an unexpected response.');
   return rows.filter(isRecord);
+}
+
+function cronRowId(row: CronRow): string | null {
+  if (typeof row.cron_id === 'string' && row.cron_id.length > 0) return row.cron_id;
+  if (typeof row.id === 'string' && row.id.length > 0) return row.id;
+  return null;
+}
+
+function cronRunResult(value: unknown): CronRunResult {
+  const data = unwrapPlatformData(value);
+  if (!isRecord(data)
+      || typeof data.cron_id !== 'string'
+      || typeof data.job_id !== 'string'
+      || typeof data.status !== 'string'
+      || typeof data.trigger !== 'string') {
+    throw new Error('cron_run returned an unexpected response.');
+  }
+  return data as CronRunResult;
+}
+
+function platformErrorParts(err: unknown): { code: string; message: string } {
+  const message = err instanceof Error ? err.message : String(err);
+  const match = /^([A-Z][A-Z0-9_]+):\s*(.+)$/s.exec(message);
+  return match ? { code: match[1], message: match[2] } : { code: 'CLI_ERROR', message };
+}
+
+function cronRunUnavailable(err: unknown): boolean {
+  const { code, message } = platformErrorParts(err);
+  if (/unknown tool\s+["']?cron_run/i.test(message)) return true;
+  if (code === 'FORBIDDEN') return true;
+  return code === 'NOT_FOUND' && !/^Scheduled task not found\.?$/i.test(message.trim());
+}
+
+function printTypedCronError(code: string, message: string, json: boolean | undefined): void {
+  if (json) printJsonError(code, message);
+  else error(`${code}: ${message}`);
+  process.exitCode = 1;
+}
+
+async function resolveCronRunId(target: string, project: string | undefined): Promise<string> {
+  if (target.startsWith('cron_')) return target;
+  const rows = cronRows(await callPlatformTool('cron_list', compactRecord([
+    ['project_id', project],
+  ]), { allTools: true }));
+  const matches = rows.filter((row) => row.name === target);
+  if (matches.length === 0) {
+    throw new Error(`CRON_NOT_FOUND: No scheduled task named "${target}" was found${project ? ` in project "${project}"` : ''}.`);
+  }
+  if (matches.length > 1) {
+    throw new Error(`CRON_NAME_AMBIGUOUS: More than one scheduled task is named "${target}". Pass --project or use a cron ID.`);
+  }
+  const id = cronRowId(matches[0]);
+  if (!id) throw new Error('cron_list returned a scheduled task without a cron_id.');
+  return id;
 }
 
 function printCronMutation(verb: string, value: unknown): void {
@@ -104,13 +173,39 @@ export function registerCron(program: Command): void {
           return;
         }
         table(['ID', 'Name', 'Schedule (UTC)', 'Handler', 'Enabled'], rows.map((row) => [
-          typeof row.id === 'string' ? row.id : '—',
+          cronRowId(row) ?? '—',
           truncateText(row.name, 32),
           typeof row.schedule === 'string' ? row.schedule : '—',
           truncateText(row.handler, 48),
           row.enabled === false ? 'no' : 'yes',
         ]));
       });
+    });
+
+  cron
+    .command('run <cron-id-or-name>')
+    .description('Run a scheduled task once now without changing its schedule')
+    .option('-p, --project <project>', 'Project slug or ID; used to resolve a task name')
+    .option('--json', 'Print the complete response as JSON')
+    .action(async (target: string, opts: ProjectOptions) => {
+      try {
+        const cronId = await resolveCronRunId(target, opts.project);
+        const value = await callPlatformTool('cron_run', { cron_id: cronId }, { allTools: true });
+        if (opts.json) {
+          printJson(value);
+          return;
+        }
+        const result = cronRunResult(value);
+        success('Scheduled task ran once, see history.');
+        console.log(dim(`Cron ${result.cron_id}  Job ${result.job_id}  ${result.status}  trigger: ${result.trigger}`));
+      } catch (err) {
+        if (cronRunUnavailable(err)) {
+          printTypedCronError('CRON_RUN_NOT_AVAILABLE', CRON_RUN_UNAVAILABLE, opts.json);
+          return;
+        }
+        const { code, message } = platformErrorParts(err);
+        printTypedCronError(code, message, opts.json);
+      }
     });
 
   cron

@@ -5,9 +5,12 @@
 ### Added
 
 - **Cron and email are first-class CLI command groups.** `somewhere cron`
-  exposes list, create, update, and delete commands, while `somewhere email`
-  exposes transactional send. Each group names its commands and includes a
-  copyable example in `--help`.
+  exposes list, create, update, delete, and run-once commands, while
+  `somewhere email` exposes transactional send. `somewhere cron run` accepts a
+  cron ID or a task name and runs it once without changing its schedule. Each
+  group names its commands and includes a copyable example in `--help`. During
+  the platform rollout, run-once exits with a typed
+  `CRON_RUN_NOT_AVAILABLE` message on older platform versions.
 - **Stale CLI installs get one concise update line.** The existing daily,
   fail-open version check now has explicit newer/current and cache-throttling
   coverage, and its notice fits on one line.

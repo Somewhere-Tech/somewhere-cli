@@ -57,6 +57,7 @@ test('cron and email group help names subcommands and gives one copyable example
 
   assert.equal(cron.status, 0, cron.stderr);
   assert.match(cron.stdout, /Commands:\n[\s\S]*create \[options\] <schedule> <handler>/);
+  assert.match(cron.stdout, /run \[options\] <cron-id-or-name>/);
   assert.match(cron.stdout, /somewhere cron create "0 8 \* \* \*" \/api\/daily-digest/);
 
   assert.equal(email.status, 0, email.stderr);
