@@ -90,6 +90,10 @@ const RETRYABLE_DEPLOY_CODES = new Set(['TIMEOUT', 'SERVER_SLOW', 'NETWORK_ERROR
 // is a hang, and `somewhere deploy` must stay a command that finishes.
 const DEPLOY_RETRY_MAX_WAIT_MS = 10_000;
 
+export const POST_DEPLOY_HINT =
+  'Next: keep building with `somewhere dev`; run `somewhere deploy` to update this live app. ' +
+  'Once it has real users or data, use `somewhere preview` before changing what they see.';
+
 export function isNextAppShapeSignal(signal: string): boolean {
   return signal.startsWith(`${NEXT_APP_SIGNAL_PREFIX} (`);
 }
@@ -818,6 +822,7 @@ export function registerDeploy(program: Command) {
           } else {
             success(formatted.liveMessage);
           }
+          if (!hasFunctionErrors) info(POST_DEPLOY_HINT);
         }
 
         // Remind the dev of the round-trip trade-off they opted into. Raw

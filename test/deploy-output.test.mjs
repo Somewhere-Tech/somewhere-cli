@@ -1,6 +1,16 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { formatDeploySuccess } from '../dist/commands/deploy.js';
+const deployModule = process.env.SOMEWHERE_TEST_SOURCE
+  ? '../src/commands/deploy.ts'
+  : '../dist/commands/deploy.js';
+const { formatDeploySuccess, POST_DEPLOY_HINT } = await import(deployModule);
+
+test('post-deploy copy keeps greenfield live and introduces preview after users or data', () => {
+  assert.equal(
+    POST_DEPLOY_HINT,
+    'Next: keep building with `somewhere dev`; run `somewhere deploy` to update this live app. Once it has real users or data, use `somewhere preview` before changing what they see.',
+  );
+});
 
 test('formats the current release activation deploy response with its real count and URL', () => {
   const response = {

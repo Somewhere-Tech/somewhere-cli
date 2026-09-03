@@ -44,16 +44,12 @@ test('no command tells the developer to run a specific vendor tool', () => {
   assert.deepEqual(offenders, [], `vendor-specific next step:\n${offenders.join('\n')}`);
 });
 
-test('init closes by naming the platform commands and any agent', () => {
+test('init closes with the greenfield on-ramp language', () => {
   const init = readFileSync(join(srcDir, 'commands', 'init.ts'), 'utf8');
-  const closings = init
-    .split('\n')
-    .filter((l) => /Any coding agent can drive this CLI/.test(l));
-  // Both closings — project created with existing source preserved, and
-  // project linked — say it.
-  assert.equal(closings.length, 2, init);
-  for (const line of closings) {
-    assert.match(line, /somewhere dev/);
-    assert.match(line, /somewhere deploy/);
-  }
+  assert.match(init, /Next: somewhere dev → somewhere deploy → open the live URL/);
+  assert.match(
+    init,
+    /Project created\. Run somewhere dev to build locally, then somewhere deploy to put it live\./,
+  );
+  assert.doesNotMatch(init, /Project created:.*\(preview\)/);
 });

@@ -11,14 +11,21 @@ import { pathToFileURL } from 'node:url';
 import test from 'node:test';
 import ts from 'typescript';
 
-import {
-  canWriteInitScaffold,
-  writeInitScaffold,
-} from '../dist/lib/init-scaffold.js';
-import { createHappyPathTemplate } from '../dist/lib/init-template.js';
-import { collectFiles } from '../dist/lib/files.js';
-import { buildCheckBody } from '../dist/commands/check.js';
-import { runTypecheck } from '../dist/lib/typecheck.js';
+const moduleRoot = process.env.SOMEWHERE_TEST_SOURCE ? '../src' : '../dist';
+const { canWriteInitScaffold, writeInitScaffold } =
+  await import(`${moduleRoot}/lib/init-scaffold.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { installInitDependencies } =
+  await import(`${moduleRoot}/lib/init-install.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { createGreenTemplate } =
+  await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { createHappyPathTemplate } =
+  await import(`${moduleRoot}/lib/init-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { collectFiles } =
+  await import(`${moduleRoot}/lib/files.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { buildCheckBody } =
+  await import(`${moduleRoot}/commands/check.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { runTypecheck } =
+  await import(`${moduleRoot}/lib/typecheck.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 
 function tempDir() {
   return mkdtempSync(join(tmpdir(), 'somewhere-init-scaffold-'));
@@ -27,6 +34,12 @@ function tempDir() {
 function generate() {
   const dir = tempDir();
   const result = writeInitScaffold(dir, createHappyPathTemplate());
+  return { dir, result };
+}
+
+function generateGreen() {
+  const dir = tempDir();
+  const result = writeInitScaffold(dir, createGreenTemplate());
   return { dir, result };
 }
 
@@ -60,6 +73,101 @@ test('writer preflights every target and never partially overwrites a project', 
   );
   assert.equal(readFileSync(join(dir, 'keep.txt'), 'utf8'), 'mine\n');
   assert.throws(() => readFileSync(join(dir, 'new.txt')), /ENOENT/);
+});
+
+test('default green starter is a small typed frontend, function, and schema', () => {
+  const { dir, result } = generateGreen();
+  assert.deepEqual(result.created.sort(), [
+    '.gitignore',
+    'README.md',
+    'api/greeting.ts',
+    'db/schema.ts',
+    'index.html',
+    'package.json',
+    'src/App.tsx',
+    'src/main.tsx',
+    'src/services/greeting.ts',
+    'src/styles.css',
+    'tsconfig.json',
+    'types/app.ts',
+    'types/runtime.ts',
+    'types/somewhere-db.d.ts',
+  ]);
+
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  assert.deepEqual(pkg.dependencies, {
+    react: '19.2.7',
+    'react-dom': '19.2.7',
+  });
+  assert.deepEqual(pkg.devDependencies, {
+    '@types/react': '19.2.2',
+    '@types/react-dom': '19.2.2',
+    typescript: '5.9.3',
+    vite: '7.2.2',
+  });
+  for (const version of [
+    ...Object.values(pkg.dependencies),
+    ...Object.values(pkg.devDependencies),
+  ]) {
+    assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
+  }
+
+  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query<GreetingRow>/);
+  assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /export default schema\(/);
+  assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /scope: shared\(\)/);
+  assert.doesNotMatch(
+    Object.values(collectFiles(dir).files).join('\n'),
+    /\bany\b/,
+  );
+});
+
+test('default green starter typechecks before an agent edits it', async () => {
+  const { dir } = generateGreen();
+  const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
+  mkdirSync(typesDir, { recursive: true });
+  writeFileSync(join(typesDir, 'index.d.ts'), `declare module 'react' {
+  export interface ReactNode {}
+  export const StrictMode: (props: { children?: ReactNode }) => JSX.Element;
+  export function useEffect(effect: () => void, dependencies: unknown[]): void;
+  export function useState<T>(initial: T): [T, (next: T) => void];
+}
+declare module 'react/jsx-runtime' {
+  namespace JSX {
+    interface Element {}
+    interface IntrinsicElements { [name: string]: Record<string, unknown> }
+  }
+  export function jsx(type: unknown, props: unknown): JSX.Element;
+  export function jsxs(type: unknown, props: unknown): JSX.Element;
+  export const Fragment: unknown;
+}
+declare module 'react-dom/client' {
+  export function createRoot(node: Element): { render(value: unknown): void };
+}
+`);
+
+  const result = await runTypecheck(dir);
+  assert.equal(result.ok, true, result.raw);
+  assert.deepEqual(result.errors, []);
+});
+
+test('init dependency installation is required for a green completion', async () => {
+  const calls = [];
+  await installInitDependencies(
+    { cwd: '/fixture/app', quiet: true },
+    async (options) => {
+      calls.push(options);
+      return 0;
+    },
+  );
+  assert.deepEqual(calls, [{ cwd: '/fixture/app', quiet: true }]);
+
+  await assert.rejects(
+    () => installInitDependencies(
+      { cwd: '/fixture/app', quiet: false },
+      async () => 9,
+    ),
+    /somewhere npm install/,
+  );
 });
 
 test('one generated template consumes the SDK auth adapter and server data/files contract', () => {
