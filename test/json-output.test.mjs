@@ -641,7 +641,7 @@ test('init --link --project links an exact existing project non-interactively', 
   });
 });
 
-test('init creates the happy-path starter in an empty directory and preserves existing source', async () => {
+test('init creates the green starter, --bare stays minimal, and existing source is preserved', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-home-'));
   writeConfig(HOME);
   const project = {
@@ -650,42 +650,63 @@ test('init creates the happy-path starter in an empty directory and preserves ex
     slug: 'scaffold-app',
     subdomain: 'scaffold-app',
   };
+  let deployCheckBody = null;
 
   await withServer((req, res) => {
-    req.resume();
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
       if (req.method === 'POST' && req.url === '/v1/projects') {
         sendJson(res, 200, { ok: true, data: project });
         return;
       }
+      if (req.method === 'POST' && req.url === '/v1/deploy/check') {
+        deployCheckBody = JSON.parse(body);
+        sendJson(res, 200, { ok: true, data: { ok: true, errors: [] } });
+        return;
+      }
       sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
     });
   }, async (apiUrl) => {
+    const env = {
+      HOME,
+      USERPROFILE: HOME,
+      SOMEWHERE_API_URL: apiUrl,
+      SWPX_DRY_RUN: '1',
+    };
     const empty = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-empty-'));
     const created = await run(['init', '--name', project.name, '--json'], {
       cwd: empty,
-      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      env,
     });
     assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
     assert.deepEqual(JSON.parse(created.stdout), project);
-    const authHandler = readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8');
-    assert.match(
-      authHandler,
-      /from '@somewhere-tech\/sdk\/server'/,
-    );
-    assert.match(authHandler, /return somewhereAuth\(req, sw\)/);
-    assert.doesNotMatch(authHandler, /loginWithCookie|signupWithCookie|logoutWithCookie/);
-    assert.equal(
-      JSON.parse(readFileSync(join(empty, 'package.json'), 'utf8'))
-        .dependencies['@somewhere-tech/sdk'],
-      '^0.7.2',
-    );
+    assert.match(readFileSync(join(empty, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
+    assert.match(readFileSync(join(empty, 'db/schema.ts'), 'utf8'), /greetings: table/);
+    assert.equal(JSON.parse(readFileSync(join(empty, 'package.json'), 'utf8'))
+      .dependencies.react, '19.2.7');
+
+    const checked = await run(['deploy-check', '.', '--json'], { cwd: empty, env });
+    assert.equal(checked.status, 0, `stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`);
+    assert.deepEqual(JSON.parse(checked.stdout), { ok: true, errors: [] });
+    assert.ok(deployCheckBody.files['db/schema.ts']);
+    assert.ok(deployCheckBody.files['src/main.tsx']);
+    assert.ok(deployCheckBody.functions['api/greeting.ts']);
+
+    const bare = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-bare-'));
+    const bareResult = await run(['init', '--name', project.name, '--bare', '--json'], {
+      cwd: bare,
+      env,
+    });
+    assert.equal(bareResult.status, 0, `stdout:\n${bareResult.stdout}\nstderr:\n${bareResult.stderr}`);
+    assert.deepEqual(JSON.parse(bareResult.stdout), project);
+    assert.throws(() => readFileSync(join(bare, 'package.json')), /ENOENT/);
 
     const existing = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-existing-'));
     writeFileSync(join(existing, 'app.ts'), 'export const mine = true;\n');
     const preserved = await run(['init', '--name', project.name, '--json'], {
       cwd: existing,
-      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+      env,
     });
     assert.equal(preserved.status, 0, `stdout:\n${preserved.stdout}\nstderr:\n${preserved.stderr}`);
     assert.equal(readFileSync(join(existing, 'app.ts'), 'utf8'), 'export const mine = true;\n');

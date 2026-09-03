@@ -10,14 +10,16 @@ import {
   saveMcpConfig,
   saveProjectConfig,
 } from '../lib/config.js';
+import { installInitDependencies } from '../lib/init-install.js';
 import { canWriteInitScaffold, writeInitScaffold } from '../lib/init-scaffold.js';
-import { createHappyPathTemplate } from '../lib/init-template.js';
-import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { createGreenTemplate } from '../lib/init-green-template.js';
+import { error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 interface InitOptions {
   name?: string;
   link?: boolean;
   project?: string;
+  bare?: boolean;
   json?: boolean;
 }
 
@@ -35,6 +37,7 @@ export function registerInit(program: Command) {
     .option('--name <name>', 'Project name (skip prompt)')
     .option('--link', 'Link to an existing project instead of creating one')
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
+    .option('--bare', 'Create and link the project without starter files or dependencies')
     .option('--json', 'Print the created or linked project as JSON')
     .action(async (opts: InitOptions) => {
       if (opts.project && !opts.link) {
@@ -53,7 +56,7 @@ export function registerInit(program: Command) {
       const token = getToken();
       const client = new ApiClient(token);
       const dir = process.cwd();
-      const shouldScaffold = canWriteInitScaffold(dir);
+      const shouldScaffold = !opts.bare && canWriteInitScaffold(dir);
 
       const existing = loadProjectConfig(dir);
       if (existing && !opts.project) {
@@ -127,11 +130,14 @@ export function registerInit(program: Command) {
           });
           saveMcpConfig(dir);
           if (!hasGlobalMcpConfig()) saveGlobalMcpConfig();
-          if (shouldScaffold) writeInitScaffold(dir, createHappyPathTemplate());
+          if (shouldScaffold) {
+            writeInitScaffold(dir, createGreenTemplate());
+            await installInitDependencies({ cwd: dir, quiet: true });
+          }
           printJson(project);
           return;
         }
-        success(`Project created: ${teal(project.name)} (preview)`);
+        success(`Project created: ${teal(project.name)}`);
 
         saveProjectConfig(dir, {
           project_id: project.id,
@@ -143,10 +149,17 @@ export function registerInit(program: Command) {
         saveMcpConfig(dir);
 
         if (shouldScaffold) {
-          const scaffold = writeInitScaffold(dir, createHappyPathTemplate());
-          success(`Happy-path starter written (${scaffold.created.length} files)`);
+          const scaffold = writeInitScaffold(dir, createGreenTemplate());
+          success(`Full-stack starter written (${scaffold.created.length} files)`);
+          info('Installing pinned dependencies with `somewhere npm install`…');
+          await installInitDependencies({ cwd: dir, quiet: false });
+          success('Dependencies installed');
         } else {
-          info('Existing source preserved; starter files were not added.');
+          info(
+            opts.bare
+              ? 'Bare project requested; starter files were not added.'
+              : 'Existing source preserved; starter files were not added.',
+          );
         }
 
         if (!hasGlobalMcpConfig()) {
@@ -157,11 +170,8 @@ export function registerInit(program: Command) {
         console.log('');
         info(
           shouldScaffold
-            ? 'Next: npm install → npm run typecheck → somewhere deploy-check → somewhere deploy'
-            // Whichever coding agent the developer uses drives this CLI, so the
-            // closing line names the PLATFORM's next commands and no vendor's
-            // (pfb_aaff8e9d14fb).
-            : 'Next: somewhere dev to run it here, somewhere deploy to publish it. Any coding agent can drive this CLI.',
+            ? 'Next: somewhere dev → somewhere deploy → open the live URL'
+            : 'Project created. Run somewhere dev to build locally, then somewhere deploy to put it live.',
         );
       } catch (err) {
         spinner?.fail('Failed to create project');
