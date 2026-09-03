@@ -21,6 +21,7 @@ import {
 const BROWSER_TIMEOUT_MS = 90_000;
 
 interface BrowserStepResult {
+  step?: number;
   action?: string;
   ok?: boolean;
   passed?: boolean;
@@ -34,6 +35,7 @@ interface BrowserStepResult {
    *  thing under this name. Both are read; neither may be dropped. */
   result?: unknown;
   error?: string;
+  duration_ms?: number;
 }
 
 /** Step actions whose whole purpose is to hand back a value. When one of these

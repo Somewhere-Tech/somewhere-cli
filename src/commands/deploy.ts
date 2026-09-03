@@ -26,6 +26,12 @@ import { dim, error, green, info, printJson, printJsonError, red, success, teal,
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
+import {
+  formatVerifyReport,
+  loadVerifyFlow,
+  runVerification,
+  type VerifyReport,
+} from './verify.js';
 
 // Resolve the deploy target directory. `resolve` (not `join`) so an absolute
 // `dir` is honored as-is — `join(cwd, '/abs/path')` produced `/cwd/abs/path`
@@ -377,6 +383,10 @@ export function registerDeploy(program: Command) {
         previous.concat(value.split(',').map((v) => v.trim()).filter(Boolean)),
     )
     .option('--yes', 'Skip confirmation prompts (for --force)')
+    .option(
+      '--verify [flow.json]',
+      'After the deploy is live, run one browser verification flow at desktop and phone size. Omit the file for the default health check.',
+    )
     .option('--json', 'Print the raw deploy response as JSON')
     .action(async (dir: string | undefined, opts) => {
       const targetDir = resolveTargetDir(dir);
@@ -725,17 +735,24 @@ export function registerDeploy(program: Command) {
           totalBytes,
           linkedProject: targetProjectConfig,
         });
+        let verification: VerifyReport | undefined;
+        if (opts.verify && !hasFunctionErrors) {
+          const flow = loadVerifyFlow(typeof opts.verify === 'string' ? opts.verify : undefined, targetDir);
+          verification = await runVerification({
+            project_id: projectId,
+            ...(formatted.liveUrl ? { url: formatted.liveUrl } : {}),
+          }, flow, client);
+        }
         if (opts.json) {
-          if (tempSession) {
-            printJson({
-              url: formatted.liveUrl,
-              claim_url: tempSession.claimUrl,
-              expires_at: tempSession.expiresAt ?? null,
-            });
-          } else {
-            printJson(result);
-          }
-          if (hasFunctionErrors) {
+          const output = tempSession
+            ? {
+                url: formatted.liveUrl,
+                claim_url: tempSession.claimUrl,
+                expires_at: tempSession.expiresAt ?? null,
+              }
+            : result;
+          printJson(verification ? { ...output, verification } : output);
+          if (hasFunctionErrors || verification?.passed === false) {
             process.exit(1);
           }
           if (!tempSession && typeof result.version === 'number' && deployStateEntry) {
@@ -835,6 +852,11 @@ export function registerDeploy(program: Command) {
           );
         }
 
+        if (verification) {
+          console.log('');
+          for (const line of formatVerifyReport(verification)) console.log(line);
+        }
+
         // Exit non-zero if any function failed to deploy — a CI step that
         // shells out to `somewhere deploy` should fail, not pass green.
         if (hasFunctionErrors) {
@@ -848,6 +870,7 @@ export function registerDeploy(program: Command) {
             result.active_release_id ?? result.release_id,
           );
         }
+        if (verification?.passed === false) process.exit(1);
       } catch (err) {
         if (
           err instanceof CliApiError &&
