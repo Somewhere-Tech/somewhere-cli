@@ -3,7 +3,7 @@ export type BrowserSequenceAction =
   | { fill: string; value: string }
   | { select: string; value: string }
   | { wait: string | number }
-  | { expect: { selector: string; text?: string; visible?: boolean; count?: number } }
+  | { expect: { selector: string; text?: string; value?: string; visible?: boolean; count?: number } }
   | { eval: string };
 
 export interface ExpectedBrowserRequest {
@@ -67,20 +67,23 @@ export function normalizeBrowserActions(raw: unknown):
       return { ok: false, error: `${at}: expect needs a non-empty selector.` };
     }
     const hasText = typeof expectation.text === 'string';
+    const hasValue = typeof expectation.value === 'string';
     const hasVisible = typeof expectation.visible === 'boolean';
     const hasCount = typeof expectation.count === 'number'
       && Number.isInteger(expectation.count)
       && expectation.count >= 0;
-    if (!hasText && !hasVisible && !hasCount) {
-      return { ok: false, error: `${at}: expect needs text, visible, or count.` };
+    if (!hasText && !hasValue && !hasVisible && !hasCount) {
+      return { ok: false, error: `${at}: expect needs text, value, visible, or count.` };
     }
     if (expectation.text !== undefined && !hasText) return { ok: false, error: `${at}: expect.text must be a string.` };
+    if (expectation.value !== undefined && !hasValue) return { ok: false, error: `${at}: expect.value must be a string.` };
     if (expectation.visible !== undefined && !hasVisible) return { ok: false, error: `${at}: expect.visible must be boolean.` };
     if (expectation.count !== undefined && !hasCount) return { ok: false, error: `${at}: expect.count must be a non-negative integer.` };
     actions.push({
       expect: {
         selector: expectation.selector,
         ...(hasText ? { text: expectation.text as string } : {}),
+        ...(hasValue ? { value: expectation.value as string } : {}),
         ...(hasVisible ? { visible: expectation.visible as boolean } : {}),
         ...(hasCount ? { count: expectation.count as number } : {}),
       },

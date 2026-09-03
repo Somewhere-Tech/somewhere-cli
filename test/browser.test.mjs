@@ -47,6 +47,7 @@ const { ApiClient } = await import('../dist/lib/client.js');
 const { buildBrowserBody, formatBrowserReport, browserExitCode, normalizeBrowserVerdict, localBrowserUnsupportedMessage } = await import(
   '../dist/commands/browser.js'
 );
+const { normalizeBrowserActions } = await import('../dist/lib/browser-actions.js');
 
 function runCli(args, home) {
   return new Promise((resolve) => {
@@ -125,6 +126,20 @@ test('buildBrowserBody: concise actions, expected requests, and visible-only use
   assert.deepEqual(body.expect_requests, [{ path: '/api/tasks', status: 401 }]);
   assert.equal(body.visible_only, true);
   assert.equal('steps' in body, false);
+});
+
+test('--actions uses the shared shorthand and rejects the expanded step spelling', () => {
+  const canonical = normalizeBrowserActions([
+    { fill: '#email', value: 'a@b.co' },
+    { click: '#save' },
+    { expect: { selector: '#status', text: 'Saved', value: 'ready' } },
+  ]);
+  assert.equal(canonical.ok, true);
+  const expanded = normalizeBrowserActions([
+    { action: 'fill', selector: '#email', value: 'a@b.co' },
+  ]);
+  assert.equal(expanded.ok, false);
+  assert.match(expanded.error, /exactly one of click, fill, select, wait, expect, eval/);
 });
 
 test('buildBrowserBody: --snapshot is not a step', () => {
