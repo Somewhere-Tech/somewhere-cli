@@ -5,12 +5,17 @@ import {
   getVerdictBatch,
   pollVerdictSummary,
   VerdictUnavailable,
+  verdictTimeoutMs,
 } from '../dist/swpx/verdict-client.js';
 
 const resp = (body, ok = true, status = 200) => async () => ({
   ok,
   status,
   json: async () => body,
+});
+
+test('verdict lookups allow a sane cold-service budget', () => {
+  assert.equal(verdictTimeoutMs, 15_000);
 });
 
 test('getVerdict — unwraps a bare verdict and pins coordinates', async () => {
@@ -46,6 +51,15 @@ test('getVerdict — network throw becomes VerdictUnavailable', async () => {
     throw new Error('ENOTFOUND npm.somewhere.tech');
   };
   await assert.rejects(() => getVerdict('foo', '1.0.0', boom), VerdictUnavailable);
+});
+
+test('getVerdictBatch — classifies a client deadline separately from an outage', async () => {
+  const timeout = new Error('The operation was aborted due to timeout');
+  timeout.name = 'TimeoutError';
+  await assert.rejects(
+    () => getVerdictBatch([{ package: 'foo', version: '1.0.0' }], async () => { throw timeout; }),
+    (err) => err instanceof VerdictUnavailable && err.timedOut === true && err.rateLimited === false,
+  );
 });
 
 test('getVerdict — unexpected shape becomes VerdictUnavailable', async () => {

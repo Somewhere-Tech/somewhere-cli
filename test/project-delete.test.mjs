@@ -61,7 +61,7 @@ function parseBody(body) {
   return body ? JSON.parse(body) : null;
 }
 
-test('project delete resolves names, submits the returned confirmation code, and deletes by canonical id', async () => {
+test('project delete prints and accepts the confirm command from a 200 needs_confirmation response', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-home-'));
   writeConfig(HOME);
 
@@ -91,6 +91,10 @@ test('project delete resolves names, submits the returned confirmation code, and
         sendJson(res, 404, { ok: false, error: 'PROJECT_NOT_FOUND', message: 'Project not found.' });
         return;
       }
+      if (req.method === 'GET' && url.pathname === `/v1/projects/${project.id}`) {
+        sendJson(res, 200, { ok: true, data: project });
+        return;
+      }
       if (req.method === 'GET' && url.pathname === '/v1/projects') {
         assert.equal(url.searchParams.get('q'), projectName);
         sendJson(res, 200, { ok: true, data: { projects: [project] } });
@@ -99,11 +103,12 @@ test('project delete resolves names, submits the returned confirmation code, and
       if (req.method === 'DELETE' && url.pathname === `/v1/projects/${project.id}`) {
         const parsed = parseBody(body);
         if (!parsed?.code) {
-          sendJson(res, 400, {
-            ok: false,
-            error: 'CONFIRMATION_REQUIRED',
+          sendJson(res, 200, {
+            ok: true,
+            status: 'needs_confirmation',
+            confirmation_code: '482917',
             code: '482917',
-            message: `To confirm deletion of "${project.name}", call project_delete_confirm with this code.`,
+            next_call: { tool: 'project_delete_confirm' },
           });
           return;
         }
@@ -114,13 +119,22 @@ test('project delete resolves names, submits the returned confirmation code, and
       sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
     });
   }, async (apiUrl) => {
-    const result = await run(['project', 'delete', projectName, '--json'], {
+    const first = await run(['project', 'delete', projectName, '--json'], {
       env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
-      input: `${projectName}\n`,
+    });
+    assert.equal(first.status, 0, `stdout:\n${first.stdout}\nstderr:\n${first.stderr}`);
+    assert.deepEqual(JSON.parse(first.stdout), {
+      status: 'needs_confirmation',
+      confirmation_code: '482917',
+      confirm_command: 'somewhere project delete proj_delete_123 --confirm-code 482917',
     });
 
-    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-    assert.deepEqual(JSON.parse(result.stdout), { deleted: true, note: 'offline' });
+    const second = await run(
+      ['project', 'delete', project.id, '--confirm-code', '482917', '--json'],
+      { env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl } },
+    );
+    assert.equal(second.status, 0, `stdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
+    assert.deepEqual(JSON.parse(second.stdout), { deleted: true, note: 'offline' });
   });
 
   assert.equal(
@@ -137,6 +151,45 @@ test('project delete resolves names, submits the returned confirmation code, and
       { pathname: `/v1/projects/${project.id}`, body: { code: '482917' } },
     ],
   );
+});
+
+test('project delete still accepts the legacy CONFIRMATION_REQUIRED error shape', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-legacy-home-'));
+  writeConfig(HOME);
+  let deleteCalls = 0;
+
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', (c) => (body += c));
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/projects/legacy') {
+        sendJson(res, 200, { ok: true, data: { id: 'proj_legacy', name: 'Legacy' } });
+        return;
+      }
+      if (req.method === 'DELETE' && url.pathname === '/v1/projects/proj_legacy') {
+        deleteCalls++;
+        sendJson(res, 400, {
+          ok: false,
+          error: 'CONFIRMATION_REQUIRED',
+          code: '591204',
+          message: 'Confirmation required.',
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['project', 'delete', 'legacy', '--json'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.equal(
+      JSON.parse(result.stdout).confirm_command,
+      'somewhere project delete proj_legacy --confirm-code 591204',
+    );
+  });
+  assert.equal(deleteCalls, 1);
 });
 
 test('project delete surfaces the server error message without adding owner-only copy', async () => {
@@ -173,7 +226,6 @@ test('project delete surfaces the server error message without adding owner-only
   }, async (apiUrl) => {
     const result = await run(['project', 'delete', 'shared', '--json'], {
       env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
-      input: 'Shared\n',
     });
 
     assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);

@@ -20,9 +20,9 @@ const VERDICT_BASE =
  *  fail to fallback rather than stall — but 4s was too tight for the COLD path
  *  (fresh DNS/TLS from the client + a cold worker + a first-time uncached compute),
  *  which spuriously tripped the fail-open banner on the very first call while every
- *  warm call after was instant. 8s comfortably covers a cold uncached lookup;
+ *  warm call after was instant. 15s comfortably covers a cold uncached lookup;
  *  override with SWPX_VERDICT_TIMEOUT_MS (e.g. lower it for strict fail-fast in CI). */
-const VERDICT_TIMEOUT_MS = Number(process.env.SWPX_VERDICT_TIMEOUT_MS) || 8000;
+export const verdictTimeoutMs = Number(process.env.SWPX_VERDICT_TIMEOUT_MS) || 15_000;
 
 /** Summary generation is best-effort, but a missing narrative must never leave
  *  the user staring at a blank decision screen forever. Keep one overall budget
@@ -39,10 +39,13 @@ const defaultFetch: FetchLike = (url, init) =>
 export class VerdictUnavailable extends Error {
   /** True when the service answered 429 — a throttle, not an outage/tampering. */
   readonly rateLimited: boolean;
-  constructor(message: string, rateLimited = false) {
+  /** True when the client deadline elapsed before the service answered. */
+  readonly timedOut: boolean;
+  constructor(message: string, rateLimited = false, timedOut = false) {
     super(message);
     this.name = 'VerdictUnavailable';
     this.rateLimited = rateLimited;
+    this.timedOut = timedOut;
   }
 }
 
@@ -56,7 +59,7 @@ function unwrap(body: unknown): unknown {
   return body;
 }
 
-function timeoutSignal(timeoutMs = VERDICT_TIMEOUT_MS): AbortSignal | undefined {
+function timeoutSignal(timeoutMs = verdictTimeoutMs): AbortSignal | undefined {
   try {
     return AbortSignal.timeout(timeoutMs);
   } catch {
@@ -69,7 +72,7 @@ async function requestVerdict(
   version: string,
   fetchImpl: FetchLike,
   enrich: boolean,
-  timeoutMs = VERDICT_TIMEOUT_MS,
+  timeoutMs = verdictTimeoutMs,
 ): Promise<Verdict> {
   const suffix = enrich ? '?enrich=1' : '';
   const url = `${VERDICT_BASE}/api/verdict/${encodeURIComponent(name)}/${encodeURIComponent(version)}${suffix}`;
@@ -83,7 +86,8 @@ async function requestVerdict(
       signal: timeoutSignal(timeoutMs),
     });
   } catch (err) {
-    throw new VerdictUnavailable(err instanceof Error ? err.message : String(err));
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    throw new VerdictUnavailable(err instanceof Error ? err.message : String(err), false, timedOut);
   }
   if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`, res.status === 429);
   let body: unknown;
@@ -140,7 +144,7 @@ export async function pollVerdictSummary(
         version,
         fetchImpl,
         true,
-        Math.min(VERDICT_TIMEOUT_MS, remaining),
+        Math.min(verdictTimeoutMs, remaining),
       );
       if (typeof verdict.summary === 'string' && verdict.summary.trim()) return verdict;
     } catch (err) {
@@ -174,7 +178,8 @@ export async function getVerdictBatch(
       signal: timeoutSignal(),
     });
   } catch (err) {
-    throw new VerdictUnavailable(err instanceof Error ? err.message : String(err));
+    const timedOut = err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError');
+    throw new VerdictUnavailable(err instanceof Error ? err.message : String(err), false, timedOut);
   }
   if (!res.ok) throw new VerdictUnavailable(`verdict API returned ${res.status}`, res.status === 429);
   let body: unknown;

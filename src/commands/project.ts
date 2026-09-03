@@ -206,8 +206,9 @@ export function registerProject(program: Command) {
   proj
     .command('delete <name-or-id>')
     .description('Permanently delete a project and all its data')
+    .option('--confirm-code <code>', 'Confirm deletion with the code returned by the first call')
     .option('--json', 'Print the raw delete response as JSON')
-    .action(async (nameOrId: string, opts) => {
+    .action(async (nameOrId: string, opts: { confirmCode?: string; json?: boolean }) => {
       const client = new ApiClient(getToken());
       const promptStdout = opts.json ? process.stderr : undefined;
       let project: ProjectDeleteTarget;
@@ -218,32 +219,56 @@ export function registerProject(program: Command) {
         process.exit(1);
       }
 
-      const projectName = project.name?.trim() || nameOrId;
-      const { confirm } = await prompts({
-        type: 'text',
-        name: 'confirm',
-        message: `This will permanently delete "${projectName}" and all its data.\n  Type the project name to confirm`,
-        stdout: promptStdout,
-      });
-
-      if (confirm !== projectName) {
-        if (opts.json) {
-          printJson({ error: 'ABORTED', message: 'Name did not match. Aborted.' });
-          process.exit(1);
-        }
-        error('Name did not match. Aborted.');
-        process.exit(1);
-      }
-
       const spinner = opts.json ? null : ora('Requesting deletion...').start();
       try {
+        if (opts.confirmCode) {
+          if (spinner) spinner.text = 'Deleting...';
+          const deleted = await confirmProjectDelete(client, project.id, opts.confirmCode);
+          spinner?.stop();
+          if (opts.json) {
+            printJson(deleted);
+            return;
+          }
+          success('Deleted.');
+          return;
+        }
+
         const code = await requestDeleteConfirmationCode(client, project.id);
+        const confirmCommand = `somewhere project delete ${project.id} --confirm-code ${code}`;
+        spinner?.stop();
+
+        if (!process.stdin.isTTY) {
+          if (opts.json) {
+            printJson({
+              status: 'needs_confirmation',
+              confirmation_code: code,
+              confirm_command: confirmCommand,
+            });
+          } else {
+            info(`Confirmation required. Run: ${confirmCommand}`);
+          }
+          return;
+        }
+
+        const projectName = project.name?.trim() || nameOrId;
+        const { confirm } = await prompts({
+          type: 'text',
+          name: 'confirm',
+          message: `This will permanently delete "${projectName}" and all its data.\n  Type the project name to confirm`,
+          stdout: promptStdout,
+        });
+
+        if (confirm !== projectName) {
+          if (opts.json) {
+            printJson({ error: 'ABORTED', message: 'Name did not match. Aborted.' });
+            process.exit(1);
+          }
+          error('Name did not match. Aborted.');
+          process.exit(1);
+        }
+
         if (spinner) spinner.text = 'Deleting...';
-        const deleted = await client.call(
-          'DELETE',
-          `/projects/${encodeURIComponent(project.id)}`,
-          { code },
-        );
+        const deleted = await confirmProjectDelete(client, project.id, code);
         spinner?.stop();
         if (opts.json) {
           printJson(deleted);
@@ -307,11 +332,24 @@ async function resolveDeleteTarget(client: ApiClient, ref: string): Promise<Proj
 
 async function requestDeleteConfirmationCode(client: ApiClient, projectId: string): Promise<string> {
   try {
-    await client.call(
+    const result = await client.call<{
+      status?: string;
+      confirmation_code?: string;
+      code?: string;
+    }>(
       'DELETE',
       `/projects/${encodeURIComponent(projectId)}`,
       {},
     );
+    if (result?.status === 'needs_confirmation') {
+      const code = result.confirmation_code ?? result.code;
+      if (typeof code === 'string' && code.trim()) return code.trim();
+      throw new CliApiError(
+        'CONFIRMATION_REQUIRED',
+        'The server requires confirmation but did not include a confirmation code.',
+        500,
+      );
+    }
   } catch (err) {
     if (err instanceof CliApiError && err.code === 'CONFIRMATION_REQUIRED') {
       const code = err.data?.code;
@@ -331,6 +369,14 @@ async function requestDeleteConfirmationCode(client: ApiClient, projectId: strin
     'DELETE_CONFIRMATION_MISSING',
     'The server did not require a delete confirmation code, so the CLI refused to continue.',
     500,
+  );
+}
+
+function confirmProjectDelete(client: ApiClient, projectId: string, code: string): Promise<unknown> {
+  return client.call(
+    'DELETE',
+    `/projects/${encodeURIComponent(projectId)}`,
+    { code },
   );
 }
 

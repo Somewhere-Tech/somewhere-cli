@@ -1,5 +1,27 @@
 # Changelog
 
+## 0.31.7
+
+### Added
+
+- **`somewhere init` now starts with a working full-stack TypeScript app.** In
+  an empty directory, the default starter includes a typed React page, a typed
+  server function, and a database schema, with exact dependency versions
+  installed before init reports success. Use `--bare` for the previous
+  metadata-only setup; existing source directories are still left untouched.
+
+### Fixed
+
+- **Project deletion now follows the platform's two-step confirmation flow.**
+  The CLI recognizes the successful `needs_confirmation` response as well as
+  the older error-shaped response. At a terminal it asks for the project name;
+  without a terminal it prints the exact `--confirm-code` command to run next.
+  Unrelated server errors continue to surface unchanged.
+- **A slow package verdict no longer turns into a failed install.** Verdict
+  lookups have a more realistic cold-start allowance. If that allowance is
+  exhausted, `somewhere npm install` says `verdict pending` and continues with
+  npm under the default fail-open policy.
+
 ## 0.31.6
 
 ### Added

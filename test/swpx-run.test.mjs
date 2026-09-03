@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { runSwpx } from '../dist/swpx/run-swpx.js';
 import { runSwpm } from '../dist/swpx/run-swpm.js';
 import { runCheck } from '../dist/swpx/check.js';
+import { VerdictUnavailable } from '../dist/swpx/verdict-client.js';
 
 const strip = (s) => s.replace(/\x1b\[[0-9;]*m/g, '');
 
@@ -339,6 +340,24 @@ test('swpm install — batch unavailable falls back to npm', async () => {
   });
   assert.equal(r.action, 'fallback');
   assert.equal(r.exitCode, 3);
+  assert.deepEqual(runReal.calls, [{ cmd: 'npm', args: ['install'] }]);
+});
+
+test('swpm install — a verdict timeout says verdict pending and proceeds', async () => {
+  const cap = capture();
+  const runReal = spyRun(0);
+  const r = await runSwpm(['install'], {
+    ...cap,
+    readTree: () => ({ directNames: ['x'], ranges: {}, locked: [{ package: 'x', version: '1' }] }),
+    getVerdictBatch: async () => {
+      throw new VerdictUnavailable('client deadline elapsed', false, true);
+    },
+    runReal,
+  });
+  assert.equal(r.action, 'fallback');
+  assert.equal(r.exitCode, 0);
+  assert.match(cap.errText(), /verdict pending/);
+  assert.match(cap.errText(), /proceeding with npm install/);
   assert.deepEqual(runReal.calls, [{ cmd: 'npm', args: ['install'] }]);
 });
 

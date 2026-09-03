@@ -343,7 +343,14 @@ export class ApiClient {
       );
     }
 
-    if (parsed.ok === true) return parsed.data;
+    if (parsed.ok === true) {
+      // Most routes use `{ ok: true, data: ... }`, but a few two-step action
+      // routes return their machine-readable status beside `ok`. Preserve that
+      // successful payload instead of turning it into `undefined`.
+      if ('data' in parsed) return parsed.data;
+      const { ok: _ok, ...payload } = parsed as ApiResponse<T> & Record<string, unknown>;
+      return payload as T;
+    }
 
     const errBody = parsed as {
       ok?: false;

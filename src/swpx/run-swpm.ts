@@ -12,7 +12,7 @@
 import { parseSpec } from './registry.js';
 import { renderTree } from './render.js';
 import { bindDeps, type RunDeps } from './run-common.js';
-import { dim } from '../lib/output.js';
+import { dim, yellow } from '../lib/output.js';
 import { resolveEnforce, stripEnforceFlags, loudUnavailable, refused } from './enforce.js';
 import { VerdictUnavailable } from './verdict-client.js';
 import type { Verdict } from './types.js';
@@ -61,8 +61,16 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   }
 
   // Couldn't verify the tree → LOUD, then fall back (default) or refuse (enforce).
-  const failOpen = async (rateLimited: boolean, cause?: string): Promise<SwpmOutcome> => {
-    loudUnavailable(d.errLog, 'this install', rateLimited, cause);
+  const failOpen = async (
+    rateLimited: boolean,
+    cause?: string,
+    timedOut = false,
+  ): Promise<SwpmOutcome> => {
+    if (timedOut) {
+      d.errLog(`${yellow('⚠')} verdict pending — the check timed out; proceeding with npm install.`);
+    } else {
+      loudUnavailable(d.errLog, 'this install', rateLimited, cause);
+    }
     if (enforce) {
       refused(d.errLog, 'this install', 'npm');
       return { exitCode: 1, action: 'blocked' };
@@ -128,7 +136,11 @@ export async function runSwpm(args: string[], deps: RunDeps = {}): Promise<SwpmO
   try {
     verdicts = await d.getVerdictBatch(toCheck);
   } catch (err) {
-    return failOpen(err instanceof VerdictUnavailable && err.rateLimited, causeOf(err));
+    return failOpen(
+      err instanceof VerdictUnavailable && err.rateLimited,
+      causeOf(err),
+      err instanceof VerdictUnavailable && err.timedOut,
+    );
   }
 
   const aligned = alignVerdicts(toCheck, verdicts);
