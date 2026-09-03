@@ -15,7 +15,7 @@ test('CLI never substitutes the current release into an unanchored request', () 
   assert.doesNotMatch(deploySource, /pinnedReleaseRetryBody|BASE_RELEASE_REQUIRED/);
   assert.match(deploySource, /client\.call<T>\('POST', '\/deploy', body/);
   assert.doesNotMatch(devSource, /callWithPinnedReleaseRetry|BASE_RELEASE_REQUIRED/);
-  assert.match(devSource, /callDraftCandidate<DeployResult>\(client, '\/deploy', body\)/);
+  assert.match(devSource, /callDraftCandidate<DeployResult>\(client, '\/deploy', body(?:,|\))/);
   assert.match(devSource, /callDraftCandidate<PatchResult>\(client, '\/deploy\/patch', body\)/);
   assert.match(devSource, /preview_operation_id: firstOperationId/);
   assert.match(devSource, /expected_preview_id: null/);

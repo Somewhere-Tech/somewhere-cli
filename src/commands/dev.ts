@@ -13,7 +13,7 @@ import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { buildErrorSummary, isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
-import { bold, dim, error, green, info, red, success, teal, warn, yellow } from '../lib/output.js';
+import { bold, dim, error, green, info, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import { assertNodeSupport, installLoader } from '../local/loader.js';
 import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
 import { startLocalServer } from '../local/server.js';
@@ -55,6 +55,19 @@ function previewFinishedReason(err: unknown): 'promoted' | 'closed' | null {
   return status === 'promoted' ? 'promoted' : 'closed';
 }
 
+function typedErrorCode(err: unknown): string | undefined {
+  if (err instanceof CliApiError) return err.code;
+  if (!(err instanceof Error)) return undefined;
+  const code = /^([A-Z][A-Z0-9_]{2,}):(?:\s|$)/.exec(err.message.trim())?.[1];
+  // Older MCP envelopes used TOOL_ERROR around the real project lookup
+  // refusal. Do not let that compatibility wrapper re-expose the account's
+  // project inventory while the typed platform fix rolls out.
+  if (code === 'TOOL_ERROR' && /\bProject\b[^\n]*\bnot found\b/i.test(err.message)) {
+    return 'PROJECT_NOT_FOUND';
+  }
+  return code;
+}
+
 interface DeployResult {
   files?: string[] | number;
   files_deployed?: number;
@@ -85,6 +98,7 @@ export interface PreviewCandidateHandoff {
   draftId: string;
   candidateReleaseId: string;
   capabilityUrl: string;
+  projectRef: string;
   /** Runnable in THIS shell — carries `--yes` when nobody can answer a prompt. */
   promoteCommand: string;
 }
@@ -107,9 +121,11 @@ export async function mintPreviewHandoff(
     draftId,
     candidateReleaseId,
     capabilityUrl: cap.preview_url,
+    projectRef: projectId,
     promoteCommand: promoteCommandForShell({
       previewSessionId: draftId,
       previewId: candidateReleaseId,
+      projectRef: projectId,
       interactive: process.stdin.isTTY === true,
     }),
   };
@@ -117,10 +133,10 @@ export async function mintPreviewHandoff(
 
 function printPreviewHandoff(handoff: PreviewCandidateHandoff): void {
   console.log(`${teal('🌐')} ${bold('Preview capability:')} ${teal(handoff.capabilityUrl)}`);
-  printPreviewIdentity(handoff.draftId, handoff.candidateReleaseId);
+  printPreviewIdentity(handoff.draftId, handoff.candidateReleaseId, handoff.projectRef);
 }
 
-function printPreviewIdentity(draftId: string, candidateReleaseId: string): void {
+function printPreviewIdentity(draftId: string, candidateReleaseId: string, projectRef: string): void {
   console.log(dim(`   preview_session_id: ${draftId}`));
   console.log(dim(`   preview_id: ${candidateReleaseId}`));
   // The printed command has to run in the shell that is reading it: an agent or
@@ -129,6 +145,7 @@ function printPreviewIdentity(draftId: string, candidateReleaseId: string): void
   for (const line of promoteCommandLines({
     previewSessionId: draftId,
     previewId: candidateReleaseId,
+    projectRef,
     interactive: process.stdin.isTTY === true,
   })) {
     console.log(dim(`   ${line}`));
@@ -139,6 +156,7 @@ export async function callDraftCandidate<T>(
   client: ApiClient,
   path: '/deploy' | '/deploy/patch',
   body: Record<string, unknown>,
+  onRetry?: (error: CliApiError) => void,
 ): Promise<T> {
   try {
     return await client.call<T>('POST', path, body, undefined, {
@@ -146,12 +164,124 @@ export async function callDraftCandidate<T>(
     });
   } catch (err) {
     if (!(err instanceof CliApiError) || !RETRYABLE_DRAFT_CODES.has(err.code)) throw err;
+    onRetry?.(err);
     // The exact same draft_operation_id makes this a read/replay of one
     // immutable build result, never a hidden rebase onto whatever is live now.
     return client.call<T>('POST', path, body, undefined, {
       timeoutMs: LONG_CALL_TIMEOUT_MS,
     });
   }
+}
+
+function elapsedLabel(ms: number): string {
+  const seconds = Math.max(0.1, Math.round(ms / 100) / 10);
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  return `${minutes}m ${(seconds - minutes * 60).toFixed(1)}s`;
+}
+
+function previewHeartbeatMs(): number {
+  const raw = process.env.SOMEWHERE_PREVIEW_HEARTBEAT_MS
+    ?? process.env.SOMEWHERE_DEPLOY_HEARTBEAT_MS;
+  if (!raw) return 30_000;
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 30_000;
+}
+
+/** Preserve the platform's typed state without replacing it with a generic
+ * "failed". This is deliberately compact enough for a progress line. */
+export function previewPlatformState(value: unknown): string | null {
+  if (value instanceof CliApiError) {
+    const data = isRecord(value.data) ? value.data : {};
+    const state = ['phase', 'state', 'status', 'terminal_status']
+      .map((key) => typeof data[key] === 'string' ? `${key}=${data[key]}` : null)
+      .filter((item): item is string => item !== null);
+    return [`code=${value.code}`, ...state].join(', ');
+  }
+  if (!isRecord(value)) return null;
+  const state: string[] = [];
+  if (typeof value.status === 'string') state.push(`status=${value.status}`);
+  if (typeof value.release_publish === 'boolean') {
+    state.push(`release_publish=${value.release_publish}`);
+  }
+  return state.length ? state.join(', ') : null;
+}
+
+/** A long preview bootstrap phase must never look frozen. */
+export async function runPreviewPhase<T>(
+  label: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const startedAt = Date.now();
+  info(`${label}... ${dim('(0.0s)')}`);
+  const heartbeat = setInterval(() => {
+    console.error(`${label} still running after ${elapsedLabel(Date.now() - startedAt)}...`);
+  }, previewHeartbeatMs());
+  try {
+    const result = await operation();
+    const state = previewPlatformState(result);
+    success(`${label} ${dim(`(${elapsedLabel(Date.now() - startedAt)})`)}${state ? ` — platform state: ${state}` : ''}`);
+    return result;
+  } catch (err) {
+    const state = previewPlatformState(err);
+    error(`${label} failed after ${elapsedLabel(Date.now() - startedAt)}${state ? ` — platform state: ${state}` : ''}`);
+    throw err;
+  } finally {
+    clearInterval(heartbeat);
+  }
+}
+
+export type PreviewSessionState = 'active' | 'promoted' | 'closed' | 'missing' | 'unknown';
+
+/** Read the preview lifecycle fields returned by deploy_status. A missing row
+ * is kept distinct so the monitor only treats it as terminal after it has
+ * observed this exact session active. */
+export function previewSessionStateFromDeployment(
+  value: unknown,
+  previewSessionId: string,
+  previewId: string,
+): PreviewSessionState {
+  const deployment = unwrapPlatformData(value);
+  if (!isRecord(deployment)) return 'unknown';
+  if (deployment.active_release_id === previewId
+      || deployment.promoted_from_candidate_id === previewId
+      || deployment.promoted_from_preview_id === previewId) return 'promoted';
+
+  const candidates = Array.isArray(deployment.preview_candidates)
+    ? deployment.preview_candidates.filter(isRecord)
+    : [];
+  const candidate = candidates.find((item) =>
+    item.preview_session_id === previewSessionId || item.draft_id === previewSessionId);
+  if (!candidate) return 'missing';
+  const typedState = typeof candidate.terminal_status === 'string'
+    ? candidate.terminal_status
+    : typeof candidate.status === 'string'
+      ? candidate.status
+      : 'active';
+  if (typedState === 'promoted') return 'promoted';
+  if (['closed', 'expired', 'cancelled', 'canceled', 'terminal'].includes(typedState)) return 'closed';
+  return 'active';
+}
+
+async function readPreviewSessionState(
+  projectId: string,
+  previewSessionId: string,
+  previewId: string,
+): Promise<PreviewSessionState> {
+  try {
+    return previewSessionStateFromDeployment(
+      await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+      previewSessionId,
+      previewId,
+    );
+  } catch {
+    return 'unknown';
+  }
+}
+
+function previewPollMs(): number {
+  const parsed = Number(process.env.SOMEWHERE_PREVIEW_POLL_MS);
+  return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 2_000;
 }
 
 export function registerPreview(program: Command) {
@@ -171,7 +301,8 @@ export function registerPreview(program: Command) {
       '--publish-first',
       'For a project that has never been published: publish this directory to production first, so the preview has a live version to build on. Without it you are asked, and a script that cannot be asked is refused.',
     )
-    .action(async (opts: { project?: string; publishFirst?: boolean }) => {
+    .option('--json', 'Print a typed JSON refusal when preview cannot start')
+    .action(async (opts: { project?: string; publishFirst?: boolean; json?: boolean }) => {
       await runHotDeploy(opts);
     });
 }
@@ -614,7 +745,7 @@ export class CloudDevUnavailableError extends Error {
  */
 export type BaseReleaseState =
   | { known: true; activeReleaseId: string | null }
-  | { known: false; reason: string };
+  | { known: false; reason: string; code?: string };
 
 /**
  * Read the project's live version, distinguishing "nothing is live" from
@@ -633,7 +764,12 @@ export async function readBaseReleaseState(
       await call('deploy_status', { project_id: projectId }, { allTools: true }),
     );
   } catch (err) {
-    return { known: false, reason: err instanceof Error ? err.message : String(err) };
+    const code = typedErrorCode(err);
+    return {
+      known: false,
+      reason: err instanceof Error ? err.message : String(err),
+      ...(code ? { code } : {}),
+    };
   }
   if (!isRecord(status)) {
     return { known: false, reason: 'the platform did not describe this project.' };
@@ -655,13 +791,14 @@ export async function readBaseReleaseState(
 
 /** The live version could not be read, so nothing may be published over it. */
 export class BaseReleaseUnknownError extends Error {
-  readonly code = 'BASE_RELEASE_UNKNOWN';
+  readonly code: string;
 
-  constructor(readonly reason: string) {
-    super(
-      'Could not tell whether this project already has a live version, so nothing was published. '
-      + `The platform said: ${reason}`,
-    );
+  constructor(readonly reason: string, platformCode?: string) {
+    super(platformCode === 'PROJECT_NOT_FOUND'
+      ? 'Project not found or you do not have access to it. Nothing was created or changed.'
+      : 'Could not tell whether this project already has a live version, so nothing was published. '
+        + `The platform said: ${reason}`);
+    this.code = platformCode === 'PROJECT_NOT_FOUND' ? platformCode : 'BASE_RELEASE_UNKNOWN';
     this.name = 'BaseReleaseUnknownError';
   }
 }
@@ -725,7 +862,7 @@ export async function resolveBaseRelease(args: {
   if ((await args.cloudDevAllowed()) === false) throw new CloudDevUnavailableError();
 
   const state = await args.readBaseReleaseState();
-  if (!state.known) throw new BaseReleaseUnknownError(state.reason);
+  if (!state.known) throw new BaseReleaseUnknownError(state.reason, state.code);
   if (state.activeReleaseId) return { baseReleaseId: state.activeReleaseId, published: false };
 
   args.announce?.(
@@ -772,7 +909,7 @@ export async function readPublishConsent(publishFirst: boolean): Promise<Publish
   return ok === true ? 'granted' : 'declined';
 }
 
-async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) {
+async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; json?: boolean }) {
   const token = getToken();
   const client = new ApiClient(token);
   const cwd = process.cwd();
@@ -793,6 +930,10 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
   const { files, binaryFiles, functions } = collectFiles(cwd);
   const draftId = `draft_${randomUUID()}`;
   const firstOperationId = `previewop_${randomUUID()}`;
+  const showPublishProgress = opts.publishFirst === true && opts.json !== true;
+  let baseReleaseReads = 0;
+  const phase = <T>(label: string, operation: () => Promise<T>): Promise<T> =>
+    showPublishProgress ? runPreviewPhase(label, operation) : operation();
 
   // The first preview snapshot must name the production release it was read
   // from (base_release_id) — the platform binds the preview to that exact
@@ -801,19 +942,27 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
   let baseReleaseId: string;
   try {
     const resolved = await resolveBaseRelease({
-      cloudDevAllowed: () => readCloudDevAllowed(projectId),
-      readBaseReleaseState: () => readBaseReleaseState(projectId),
+      cloudDevAllowed: () => phase('Checking preview access', () => readCloudDevAllowed(projectId)),
+      readBaseReleaseState: () => {
+        const label = baseReleaseReads++ === 0
+          ? 'Reading the production release'
+          : 'Confirming the production release';
+        return phase(label, () => readBaseReleaseState(projectId));
+      },
       confirmPublish: () => readPublishConsent(opts.publishFirst === true),
       announce: info,
       publish: async () => {
-        await callDraftCandidate<DeployResult>(client, '/deploy', {
-          project_id: projectId,
-          scope: 'all',
-          files,
-          binary_files: binaryFiles,
-          functions,
-          replace_functions: true,
-        });
+        await phase('Publishing the first production version', () =>
+          callDraftCandidate<DeployResult>(client, '/deploy', {
+            project_id: projectId,
+            scope: 'all',
+            files,
+            binary_files: binaryFiles,
+            functions,
+            replace_functions: true,
+          }, (retryError) => {
+            info(`Publish attempt ended with ${previewPlatformState(retryError)}; retrying the same operation once.`);
+          }));
       },
     });
     baseReleaseId = resolved.baseReleaseId;
@@ -829,6 +978,11 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
       process.exit(1);
     }
     if (err instanceof BaseReleaseUnknownError) {
+      if (err.code === 'PROJECT_NOT_FOUND') {
+        if (opts.json) printJsonError(err.code, err.message);
+        else error(`${err.code}: ${err.message}`);
+        process.exit(1);
+      }
       error(err.message);
       info('Nothing was created or changed — whatever is live stays live.');
       info('Try `somewhere preview` again. To publish this directory to production deliberately, run `somewhere deploy`.');
@@ -855,7 +1009,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
   // owner-gated dev slot — never prod, never a version bump or history entry.
   // /deploy/patch rejects projects with no prior deploy, so a full (preview)
   // deploy first establishes the sandbox AND returns the {slug}-dev URL.
-  const spinner = ora('Syncing to preview...').start();
+  const spinner = showPublishProgress ? null : ora('Syncing to preview...').start();
 
   let candidateReleaseId: string | null = null;
   let initialHandoff: PreviewCandidateHandoff;
@@ -877,7 +1031,10 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
       expected_preview_id: null,
       base_release_id: baseReleaseId,
     };
-    const res = await callDraftCandidate<DeployResult>(client, '/deploy', body);
+    const res = await phase('Syncing the first private preview', () =>
+      callDraftCandidate<DeployResult>(client, '/deploy', body, (retryError) => {
+        info(`Preview sync ended with ${previewPlatformState(retryError)}; retrying the same operation once.`);
+      }));
     const returnedPreviewSessionId = res.preview_session_id ?? res.draft_id;
     const returnedPreviewId = res.preview_id ?? res.candidate_release_id;
     if (returnedPreviewSessionId !== draftId
@@ -900,7 +1057,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
       candidateReleaseId,
     )).capabilityUrl;
     initialHandoff = await mintPreviewHandoff(client, projectId, draftId, candidateReleaseId);
-    spinner.stop();
+    spinner?.stop();
     // The same two numbers, in the same shape, that `somewhere deploy` and
     // `somewhere promote` print. "Synced 3 files" hid the function inside one
     // number and then a later line counted it separately, so one project
@@ -908,7 +1065,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
     success(`Synced ${formatPublishSurface(countPublishSurface({ files, binaryFiles, functions }))} to preview`);
     if (res.warnings?.length) for (const w of res.warnings) warn(w);
   } catch (err) {
-    spinner.fail('Initial sync failed');
+    spinner?.fail('Initial sync failed');
     if (!(isBuildError(err) && renderBuildError(err, cwd))) {
       error(err instanceof Error ? err.message : String(err));
     }
@@ -928,6 +1085,47 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
   const pendingDeleted = new Set<string>();
   let timer: ReturnType<typeof setTimeout> | null = null;
   let deploying = false;
+  let observedSessionActive = false;
+  let previewEnded = false;
+  let pollingSession = false;
+  let pollTimer: ReturnType<typeof setInterval> | null = null;
+
+  const watcher = chokidar.watch(cwd, {
+    ignoreInitial: true,
+    ignored: (p: string) => {
+      const rel = relative(cwd, p);
+      if (!rel || rel.startsWith('..')) return false;
+      return rel.split(/[\\/]/).some(
+        (seg) => IGNORE.has(seg) || (seg.startsWith('.') && seg !== '.' && seg !== ''),
+      );
+    },
+  });
+
+  const finishPreview = async (
+    reason: 'promoted' | 'closed',
+    savedChangeWaiting: boolean,
+  ): Promise<void> => {
+    if (previewEnded) return;
+    previewEnded = true;
+    console.log('');
+    if (reason === 'promoted') {
+      success('Promoted — this preview is now your live app, and the preview has finished.');
+    } else {
+      info('This preview has finished.');
+    }
+    if (savedChangeWaiting) {
+      info('This preview had already finished, so your save was not applied. It is still in your local files.');
+    }
+    if (savedChangeWaiting) {
+      info(`Run ${teal('somewhere preview')} again to preview that save.`);
+    } else {
+      info(`Run ${teal('somewhere preview')} to keep previewing.`);
+    }
+    if (timer) clearTimeout(timer);
+    if (pollTimer) clearInterval(pollTimer);
+    await watcher.close().catch(() => {});
+    process.exit(0);
+  };
 
   const schedule = () => {
     if (timer) clearTimeout(timer);
@@ -942,10 +1140,23 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
     const changed = [...pendingChanged];
     const deleted = [...pendingDeleted];
     if (!changed.length && !deleted.length) return;
-    pendingChanged.clear();
-    pendingDeleted.clear();
     deploying = true;
     try {
+      // Check before consuming the save. Promotion closes a preview; if that
+      // happened between polls, the local edit remains queued and untouched.
+      const state = await readPreviewSessionState(
+        projectId!,
+        draftId,
+        candidateReleaseId!,
+      );
+      if (state === 'active') observedSessionActive = true;
+      if (state === 'promoted' || state === 'closed'
+          || (state === 'missing' && observedSessionActive)) {
+        await finishPreview(state === 'promoted' ? 'promoted' : 'closed', true);
+        return;
+      }
+      pendingChanged.clear();
+      pendingDeleted.clear();
       const nextCandidate = await deployBatch(
         client,
         projectId!,
@@ -958,34 +1169,12 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
       if (nextCandidate) candidateReleaseId = nextCandidate;
     } catch (err) {
       if (!(err instanceof PreviewFinishedError)) throw err;
-      // One line, in the two words the product uses, naming the next command.
-      // Nothing about how a preview is built reaches this terminal.
-      console.log('');
-      if (err.reason === 'promoted') {
-        success('Promoted — this preview is now your live app, and the preview has finished.');
-      } else {
-        info('This preview has finished.');
-      }
-      info(`Run ${teal('somewhere preview')} to keep previewing.`);
-      if (timer) clearTimeout(timer);
-      await watcher.close().catch(() => {});
-      process.exit(0);
+      await finishPreview(err.reason, true);
     } finally {
       deploying = false;
-      if (pendingChanged.size || pendingDeleted.size) schedule();
+      if (!previewEnded && (pendingChanged.size || pendingDeleted.size)) schedule();
     }
   };
-
-  const watcher = chokidar.watch(cwd, {
-    ignoreInitial: true,
-    ignored: (p: string) => {
-      const rel = relative(cwd, p);
-      if (!rel || rel.startsWith('..')) return false;
-      return rel.split(/[\\/]/).some(
-        (seg) => IGNORE.has(seg) || (seg.startsWith('.') && seg !== '.' && seg !== ''),
-      );
-    },
-  });
 
   const onChange = (abs: string) => {
     const rel = relative(cwd, abs);
@@ -1004,8 +1193,29 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean }) 
 
   watcher.on('add', onChange).on('change', onChange).on('unlink', onUnlink);
 
+  const pollSession = async () => {
+    if (previewEnded || deploying || pollingSession) return;
+    pollingSession = true;
+    try {
+      const state = await readPreviewSessionState(projectId!, draftId, candidateReleaseId!);
+      if (state === 'active') {
+        observedSessionActive = true;
+        return;
+      }
+      if (state === 'promoted' || state === 'closed'
+          || (state === 'missing' && observedSessionActive)) {
+        await finishPreview(state === 'promoted' ? 'promoted' : 'closed', false);
+      }
+    } finally {
+      pollingSession = false;
+    }
+  };
+  void pollSession();
+  pollTimer = setInterval(() => void pollSession(), previewPollMs());
+
   process.on('SIGINT', () => {
     console.log(`\n${dim('Stopped watching.')}`);
+    if (pollTimer) clearInterval(pollTimer);
     watcher.close().finally(() => process.exit(0));
   });
 }
@@ -1095,7 +1305,7 @@ async function deployBatch(
       printPreviewHandoff(handoff);
     } catch (err) {
       error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`);
-      printPreviewIdentity(draftId, nextCandidate);
+      printPreviewIdentity(draftId, nextCandidate, projectId);
     }
     return nextCandidate;
   } catch (err) {

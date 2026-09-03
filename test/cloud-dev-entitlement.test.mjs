@@ -261,6 +261,26 @@ test('a refused status read is unknown, never "never published"', async () => {
   assert.match(state.reason, /Pro and Scale plans/);
 });
 
+test('a wrong-account refusal keeps only its typed code and safe product copy', async () => {
+  const leakedInventory = 'Project "other-app" not found. Your projects: private-one → proj_secret';
+  const state = await readBaseReleaseState('other-app', async () => {
+    throw new Error(`TOOL_ERROR: ${leakedInventory}`);
+  });
+  assert.equal(state.known, false);
+  assert.equal(state.code, 'PROJECT_NOT_FOUND');
+
+  await assert.rejects(
+    resolveBaseRelease(args({ readBaseReleaseState: async () => state })),
+    (err) => {
+      assert.ok(err instanceof BaseReleaseUnknownError);
+      assert.equal(err.code, 'PROJECT_NOT_FOUND');
+      assert.match(err.message, /not found or you do not have access/i);
+      assert.doesNotMatch(err.message, /private-one|proj_secret|Your projects/);
+      return true;
+    },
+  );
+});
+
 test('a dropped connection is unknown', async () => {
   const call = async () => {
     throw new Error('fetch failed');

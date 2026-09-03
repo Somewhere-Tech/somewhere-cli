@@ -11,47 +11,61 @@ import { promoteDataNotesFromResponse } from '../dist/commands/promote.js';
 
 const SESSION = 'draft_11111111-1111-4111-8111-111111111111';
 const PREVIEW = 'rel_candidate_1';
+const PROJECT = 'preview-project';
 
 // Parity finding #9 — the CLI printed a promote command that `somewhere
 // promote` then refused in the same shell.
 
 test('DIRECTION 1: a non-interactive shell is handed a command it can actually run', () => {
-  const commands = promoteCommands({ previewSessionId: SESSION, previewId: PREVIEW, interactive: false });
+  const commands = promoteCommands({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: false });
   assert.equal(commands.length, 1);
-  assert.equal(commands[0], `somewhere promote ${SESSION} ${PREVIEW} --yes`);
+  assert.equal(commands[0], `somewhere promote ${SESSION} ${PREVIEW} --project ${PROJECT} --yes`);
   // This is the exact thing the bug got wrong: the printed command lacked the
   // one flag promote requires when there is no terminal to confirm with.
   assert.match(commands[0], /--yes$/);
   assert.equal(
-    promoteCommandForShell({ previewSessionId: SESSION, previewId: PREVIEW, interactive: false }),
+    promoteCommandForShell({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: false }),
     commands[0],
   );
 });
 
 test('DIRECTION 2: a person at a terminal is not handed an unattended promote first', () => {
-  const commands = promoteCommands({ previewSessionId: SESSION, previewId: PREVIEW, interactive: true });
+  const commands = promoteCommands({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: true });
   assert.deepEqual(commands, [
-    `somewhere promote ${SESSION} ${PREVIEW}`,
-    `somewhere promote ${SESSION} ${PREVIEW} --yes`,
+    `somewhere promote ${SESSION} ${PREVIEW} --project ${PROJECT}`,
+    `somewhere promote ${SESSION} ${PREVIEW} --project ${PROJECT} --yes`,
   ]);
   // The plain form leads — the confirmation is the point of being at a keyboard.
   assert.doesNotMatch(commands[0], /--yes/);
   // But the script form is still there, named, for whoever scrolls back.
   assert.equal(
-    promoteCommandForShell({ previewSessionId: SESSION, previewId: PREVIEW, interactive: true }),
+    promoteCommandForShell({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: true }),
     commands[0],
   );
 });
 
 test('the printed lines label both variants so two lines are not two mysteries', () => {
-  const script = promoteCommandLines({ previewSessionId: SESSION, previewId: PREVIEW, interactive: false });
+  const script = promoteCommandLines({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: false });
   assert.equal(script.length, 1);
   assert.match(script[0], /promote command: `somewhere promote .+ --yes`/);
 
-  const human = promoteCommandLines({ previewSessionId: SESSION, previewId: PREVIEW, interactive: true });
+  const human = promoteCommandLines({ previewSessionId: SESSION, previewId: PREVIEW, projectRef: PROJECT, interactive: true });
   assert.equal(human.length, 2);
   assert.match(human[0], /promote command: `somewhere promote [^`]*[^ ]`/);
   assert.match(human[1], /scripts, agents.*--yes/);
+});
+
+test('project names are shell-quoted in the copyable command', () => {
+  const [command] = promoteCommands({
+    previewSessionId: SESSION,
+    previewId: PREVIEW,
+    projectRef: "Builder's Preview",
+    interactive: false,
+  });
+  assert.equal(
+    command,
+    `somewhere promote ${SESSION} ${PREVIEW} --project 'Builder'"'"'s Preview' --yes`,
+  );
 });
 
 // Parity finding #7 — promotion moved the app and said nothing about the data.
