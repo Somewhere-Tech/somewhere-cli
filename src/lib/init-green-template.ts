@@ -1,4 +1,5 @@
 import type { InitScaffoldFile } from './init-scaffold.js';
+import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from './init-agent-guide.js';
 
 const PACKAGE_JSON = `{
   "name": "somewhere-starter",
@@ -185,6 +186,8 @@ Deploy the raw source. The platform compiles it; do not create or deploy a
 export function createGreenTemplate(): InitScaffoldFile[] {
   return [
     { path: '.gitignore', content: 'node_modules\ndist\nbuild\n.env\n' },
+    { path: 'AGENTS.md', content: INIT_AGENTS_MD },
+    { path: 'CLAUDE.md', content: INIT_CLAUDE_MD },
     { path: 'README.md', content: README },
     { path: 'package.json', content: PACKAGE_JSON },
     { path: 'tsconfig.json', content: TSCONFIG },

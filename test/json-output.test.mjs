@@ -683,6 +683,11 @@ test('init creates the green starter, --bare stays minimal, and existing source 
     assert.deepEqual(JSON.parse(created.stdout), project);
     assert.match(readFileSync(join(empty, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
     assert.match(readFileSync(join(empty, 'db/schema.ts'), 'utf8'), /greetings: table/);
+    assert.match(readFileSync(join(empty, 'AGENTS.md'), 'utf8'), /somewhere verify --url <live> --flow flow\.json/);
+    assert.equal(
+      readFileSync(join(empty, 'CLAUDE.md'), 'utf8'),
+      'Read AGENTS.md for project instructions.\n',
+    );
     assert.equal(JSON.parse(readFileSync(join(empty, 'package.json'), 'utf8'))
       .dependencies.react, '19.2.7');
 
@@ -701,6 +706,8 @@ test('init creates the green starter, --bare stays minimal, and existing source 
     assert.equal(bareResult.status, 0, `stdout:\n${bareResult.stdout}\nstderr:\n${bareResult.stderr}`);
     assert.deepEqual(JSON.parse(bareResult.stdout), project);
     assert.throws(() => readFileSync(join(bare, 'package.json')), /ENOENT/);
+    assert.throws(() => readFileSync(join(bare, 'AGENTS.md')), /ENOENT/);
+    assert.throws(() => readFileSync(join(bare, 'CLAUDE.md')), /ENOENT/);
 
     const existing = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-existing-'));
     writeFileSync(join(existing, 'app.ts'), 'export const mine = true;\n');

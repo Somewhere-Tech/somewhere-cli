@@ -1,4 +1,5 @@
 import type { InitScaffoldFile } from './init-scaffold.js';
+import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from './init-agent-guide.js';
 
 const PACKAGE_JSON = `{
   "name": "somewhere-happy-path",
@@ -370,37 +371,6 @@ button, .upload { padding: 12px 16px; border: 0; border-radius: 999px; backgroun
 .message { margin-top: 20px; color: #385548; }
 `;
 
-const AGENT_GUIDE = `# somewhere.tech project contract
-
-This starter is intentionally the one happy path:
-
-## Auth
-
-Auth is handled by \`@somewhere-tech/sdk\` — use its client and hooks.
-
-## Data, files, and deploy
-
-- Browser data and file calls go to \`api/*\`. Only those server functions call
-  \`sw.db\` and \`sw.fs\`; do not move SQL or platform calls into \`src/\`.
-- Deploy raw source from this directory with \`somewhere deploy\`. Do not run a
-  build first and never deploy \`dist/\` or \`build/\`; the platform compiles
-  TypeScript, TSX, CSS, and imports.
-
-Safe loop:
-
-\`\`\`sh
-npm install
-npm run typecheck
-somewhere deploy-check
-somewhere deploy
-\`\`\`
-
-Runtime citations for the server data and files examples:
-
-- \`worker/src/runtime/db.ts:1653\` query
-- \`worker/src/runtime/fs.ts:207\` uploadFromRequest
-`;
-
 const README = `# somewhere.tech starter
 
 One narrow production architecture is already wired:
@@ -430,8 +400,8 @@ Deploy the raw source. There is intentionally no build script.
 export function createHappyPathTemplate(): InitScaffoldFile[] {
   return [
     { path: '.gitignore', content: 'node_modules\ndist\nbuild\n.env\n' },
-    { path: 'AGENTS.md', content: AGENT_GUIDE },
-    { path: 'CLAUDE.md', content: AGENT_GUIDE },
+    { path: 'AGENTS.md', content: INIT_AGENTS_MD },
+    { path: 'CLAUDE.md', content: INIT_CLAUDE_MD },
     { path: 'README.md', content: README },
     { path: 'package.json', content: PACKAGE_JSON },
     { path: 'tsconfig.json', content: TSCONFIG },

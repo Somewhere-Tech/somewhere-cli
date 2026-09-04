@@ -18,6 +18,8 @@ const { installInitDependencies } =
   await import(`${moduleRoot}/lib/init-install.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createGreenTemplate } =
   await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { AGENT_WORKFLOW } =
+  await import(`${moduleRoot}/lib/init-agent-guide.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createHappyPathTemplate } =
   await import(`${moduleRoot}/lib/init-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { collectFiles } =
@@ -79,6 +81,8 @@ test('default green starter is a small typed frontend, function, and schema', ()
   const { dir, result } = generateGreen();
   assert.deepEqual(result.created.sort(), [
     '.gitignore',
+    'AGENTS.md',
+    'CLAUDE.md',
     'README.md',
     'api/greeting.ts',
     'db/schema.ts',
@@ -119,6 +123,40 @@ test('default green starter is a small typed frontend, function, and schema', ()
   assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query<GreetingRow>/);
   assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /export default schema\(/);
   assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /scope: shared\(\)/);
+
+  const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+  const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
+  assert.equal(agents, `# somewhere.tech project contract\n\n${AGENT_WORKFLOW}\n`);
+  assert.ok(agents.trimEnd().split('\n').length <= 60, 'AGENTS.md must stay within 60 lines');
+  assert.equal(claude, 'Read AGENTS.md for project instructions.\n');
+  assert.equal(claude.trimEnd().split('\n').length, 1);
+
+  const workflowOrder = [
+    'db/schema.ts',
+    'somewhere dev',
+    'somewhere typecheck',
+    'somewhere deploy',
+    'somewhere verify --url <live> --flow flow.json',
+    'somewhere email test-inbox <addr>',
+    'somewhere cron run <id>',
+    'somewhere errors',
+    'Reads issued together travel together',
+    '`owner()` tables need no auth guard',
+    'somewhere docs <topic>',
+    'https://somewhere.tech/start.txt',
+  ];
+  let previous = -1;
+  for (const marker of workflowOrder) {
+    const next = agents.indexOf(marker);
+    assert.ok(next > previous, `${marker} must appear in workflow order`);
+    previous = next;
+  }
+  assert.match(agents, /Promise\.all\(\[/);
+  assert.match(agents, /sw\.db\.from\('posts'/);
+  assert.doesNotMatch(
+    agents.slice(agents.indexOf('export default async function')),
+    /sw\.auth\.fromRequest/,
+  );
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,
@@ -236,7 +274,7 @@ test('one generated template consumes the SDK auth adapter and server data/files
       nextHeading === -1 ? doc.length : nextHeading,
     ).trim();
   };
-  for (const docName of ['AGENTS.md', 'CLAUDE.md', 'README.md']) {
+  for (const docName of ['README.md']) {
     const doc = readFileSync(join(dir, docName), 'utf8');
     assert.equal(extractAuthSection(doc, docName), approvedAuthGuidance, docName);
     const reviewerMutation = doc.replace(
@@ -251,13 +289,15 @@ test('one generated template consumes the SDK auth adapter and server data/files
     });
   }
 
-  for (const guideName of ['AGENTS.md', 'CLAUDE.md']) {
-    const guide = readFileSync(join(dir, guideName), 'utf8');
-    assert.match(guide, /somewhere deploy-check/);
-    assert.match(guide, /somewhere deploy/);
-    assert.match(guide, /Do not run a\s+build first/);
-    assert.doesNotMatch(guide, /worker\/src\/runtime\/auth\.ts/);
-  }
+  const guide = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
+  assert.match(guide, /somewhere typecheck/);
+  assert.match(guide, /somewhere deploy/);
+  assert.match(guide, /do not build first/);
+  assert.doesNotMatch(guide, /worker\/src\/runtime\/auth\.ts/);
+  assert.equal(
+    readFileSync(join(dir, 'CLAUDE.md'), 'utf8'),
+    'Read AGENTS.md for project instructions.\n',
+  );
 });
 
 test('generated starter typechecks against the consolidated SDK contract fixture', async () => {
