@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.31.11
+
+### Added
+
+- **Test passwordless sign-in without sending mail to a real inbox.**
+  `somewhere email test-inbox` reads the stored auth messages for an address
+  owned by the project and shows the extracted magic-link URL alongside the
+  rendered message.
+- **Browser checks can attach files and name screenshots.** `somewhere browser`
+  accepts repeatable `--upload <selector=file>` actions, while
+  `--screenshot <name>` saves a capture under the requested label. The same
+  actions work in shared browser and verification flow files.
+- **Authenticated pages can be verified at desktop and phone sizes.**
+  `somewhere verify --session` seeds an existing app session, and repeatable
+  `--cookie <name=value>` options carry existing cookies into every viewport.
+- **The catalog now explains how to call each tool.**
+  `somewhere catalog <tool>` prints the tool description and complete input
+  schema, including nested constraints and fields such as cron timezones.
+
 ## 0.31.10
 
 ### Fixed
