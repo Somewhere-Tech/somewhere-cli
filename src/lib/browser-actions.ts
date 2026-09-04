@@ -1,9 +1,14 @@
+import { readFileSync, statSync } from 'node:fs';
+import { basename, extname, resolve } from 'node:path';
+
 export type BrowserSequenceAction =
   | { click: string }
   | { fill: string; value: string }
+  | { upload: string; file: string; name: string }
   | { select: string; value: string }
   | { wait: string | number }
   | { expect: { selector: string; text?: string; value?: string; visible?: boolean; count?: number } }
+  | { screenshot: string }
   | { eval: string };
 
 export interface ExpectedBrowserRequest {
@@ -16,9 +21,88 @@ export interface BrowserRequestExpectationResult extends ExpectedBrowserRequest 
   error?: string;
 }
 
-const ACTION_KEYS = ['click', 'fill', 'select', 'wait', 'expect', 'eval'] as const;
+const ACTION_KEYS = ['click', 'fill', 'upload', 'select', 'wait', 'expect', 'screenshot', 'eval'] as const;
+export const MAX_BROWSER_UPLOAD_BYTES = 10 * 1024 * 1024;
 
-export function normalizeBrowserActions(raw: unknown):
+const MIME_TYPES: Record<string, string> = {
+  '.avif': 'image/avif',
+  '.csv': 'text/csv',
+  '.gif': 'image/gif',
+  '.html': 'text/html',
+  '.jpeg': 'image/jpeg',
+  '.jpg': 'image/jpeg',
+  '.json': 'application/json',
+  '.pdf': 'application/pdf',
+  '.png': 'image/png',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain',
+  '.webp': 'image/webp',
+};
+
+interface BrowserUpload {
+  file: string;
+  name: string;
+}
+
+function decodedBase64Bytes(base64: string): number | null {
+  if (!base64 || base64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(base64)) return null;
+  const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0;
+  return (base64.length / 4) * 3 - padding;
+}
+
+function inlineBrowserUpload(raw: string): BrowserUpload | null {
+  const dataUrl = /^data:([^;,]+)?(?:;name=([^;,]+))?;base64,([A-Za-z0-9+/]*={0,2})$/.exec(raw);
+  const base64 = dataUrl ? dataUrl[3] : raw;
+  const bytes = decodedBase64Bytes(base64);
+  if (bytes === null) return null;
+  if (bytes > MAX_BROWSER_UPLOAD_BYTES) {
+    throw new Error(`BROWSER_UPLOAD_TOO_LARGE: Upload file is ${bytes} bytes; the browser upload limit is ${MAX_BROWSER_UPLOAD_BYTES} bytes (10 MB).`);
+  }
+  let name = 'upload.bin';
+  if (dataUrl?.[2]) {
+    try {
+      name = decodeURIComponent(dataUrl[2]);
+    } catch {
+      throw new Error('upload data URL has a malformed filename.');
+    }
+    if (!name.trim()) throw new Error('upload data URL has an empty filename.');
+  }
+  const contentType = dataUrl?.[1] || 'application/octet-stream';
+  return { file: dataUrl ? raw : `data:${contentType};base64,${base64}`, name };
+}
+
+/** Resolve the CLI-only local path form into the platform's byte-bearing form. */
+export function resolveBrowserUpload(raw: string, baseDir = process.cwd()): BrowserUpload {
+  if (!raw) throw new Error('upload needs a local file path, data URL, or base64 value.');
+  if (raw.startsWith('data:')) {
+    const inline = inlineBrowserUpload(raw);
+    if (!inline) throw new Error('upload data URL must contain valid base64 bytes.');
+    return inline;
+  }
+
+  const absolute = resolve(baseDir, raw);
+  let stat: ReturnType<typeof statSync> | undefined;
+  try {
+    stat = statSync(absolute);
+  } catch {
+    const inline = inlineBrowserUpload(raw);
+    if (inline) return inline;
+    throw new Error(`upload file is not readable: ${absolute}`);
+  }
+  if (!stat.isFile()) throw new Error(`upload path is not a regular file: ${absolute}`);
+  if (stat.size > MAX_BROWSER_UPLOAD_BYTES) {
+    throw new Error(`BROWSER_UPLOAD_TOO_LARGE: Upload file is ${stat.size} bytes; the browser upload limit is ${MAX_BROWSER_UPLOAD_BYTES} bytes (10 MB).`);
+  }
+  const name = basename(absolute);
+  const contentType = MIME_TYPES[extname(name).toLowerCase()] ?? 'application/octet-stream';
+  const bytes = readFileSync(absolute);
+  if (bytes.length > MAX_BROWSER_UPLOAD_BYTES) {
+    throw new Error(`BROWSER_UPLOAD_TOO_LARGE: Upload file is ${bytes.length} bytes; the browser upload limit is ${MAX_BROWSER_UPLOAD_BYTES} bytes (10 MB).`);
+  }
+  return { file: `data:${contentType};base64,${bytes.toString('base64')}`, name };
+}
+
+export function normalizeBrowserActions(raw: unknown, baseDir = process.cwd()):
   | { ok: true; actions: BrowserSequenceAction[] }
   | { ok: false; error: string } {
   if (!Array.isArray(raw)) return { ok: false, error: 'actions must be a JSON array.' };
@@ -48,6 +132,24 @@ export function normalizeBrowserActions(raw: unknown):
         : { select: actionValue, value: record.value });
       continue;
     }
+    if (key === 'upload') {
+      if (typeof actionValue !== 'string' || !actionValue) return { ok: false, error: `${at}: upload must be a non-empty CSS selector.` };
+      if (typeof record.file !== 'string' || !record.file) return { ok: false, error: `${at}: upload needs a local file path, data URL, or base64 value in "file".` };
+      try {
+        const upload = resolveBrowserUpload(record.file, baseDir);
+        if (record.name !== undefined && (typeof record.name !== 'string' || !record.name.trim())) {
+          return { ok: false, error: `${at}: upload.name must be a non-empty filename when provided.` };
+        }
+        actions.push({
+          upload: actionValue,
+          file: upload.file,
+          name: typeof record.name === 'string' ? record.name.trim() : upload.name,
+        });
+      } catch (err) {
+        return { ok: false, error: `${at}: ${err instanceof Error ? err.message : String(err)}` };
+      }
+      continue;
+    }
     if (key === 'wait') {
       if (typeof actionValue === 'string' && actionValue) actions.push({ wait: actionValue });
       else if (typeof actionValue === 'number' && Number.isFinite(actionValue) && actionValue >= 0) actions.push({ wait: actionValue });
@@ -57,6 +159,11 @@ export function normalizeBrowserActions(raw: unknown):
     if (key === 'eval') {
       if (typeof actionValue !== 'string' || !actionValue) return { ok: false, error: `${at}: eval must be a non-empty JavaScript string.` };
       actions.push({ eval: actionValue });
+      continue;
+    }
+    if (key === 'screenshot') {
+      if (typeof actionValue !== 'string' || !actionValue.trim()) return { ok: false, error: `${at}: screenshot must be a non-empty label.` };
+      actions.push({ screenshot: actionValue.trim() });
       continue;
     }
     if (!actionValue || typeof actionValue !== 'object' || Array.isArray(actionValue)) {
@@ -92,7 +199,7 @@ export function normalizeBrowserActions(raw: unknown):
   return { ok: true, actions };
 }
 
-function splitSelectorValue(raw: string, flag: '--fill' | '--select'): { selector: string; value: string } {
+function splitSelectorValue(raw: string, flag: '--fill' | '--upload' | '--select'): { selector: string; value: string } {
   const at = raw.indexOf('=');
   if (at <= 0) throw new Error(`${flag} expects <selector>=<value> (for example ${flag} '#email=a@b.co').`);
   return { selector: raw.slice(0, at), value: raw.slice(at + 1) };
@@ -106,6 +213,12 @@ export function parseFillFlag(raw: string): BrowserSequenceAction {
 export function parseSelectFlag(raw: string): BrowserSequenceAction {
   const parsed = splitSelectorValue(raw, '--select');
   return { select: parsed.selector, value: parsed.value };
+}
+
+export function parseUploadFlag(raw: string, baseDir = process.cwd()): BrowserSequenceAction {
+  const parsed = splitSelectorValue(raw, '--upload');
+  const upload = resolveBrowserUpload(parsed.value, baseDir);
+  return { upload: parsed.selector, file: upload.file, name: upload.name };
 }
 
 export function parseExpectFlag(raw: string): BrowserSequenceAction {
@@ -138,9 +251,11 @@ export function parseExpectedRequestFlag(raw: string): ExpectedBrowserRequest {
 export function actionLabel(action: BrowserSequenceAction): string {
   if ('click' in action) return 'click';
   if ('fill' in action) return 'fill';
+  if ('upload' in action) return 'upload';
   if ('select' in action) return 'select';
   if ('wait' in action) return 'wait';
   if ('expect' in action) return 'expect';
+  if ('screenshot' in action) return 'screenshot';
   return 'eval';
 }
 

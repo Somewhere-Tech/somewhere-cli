@@ -60,6 +60,21 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     total_tools: 5,
     next_step: 'Read docs before building.',
   };
+  const cronCreate = {
+    name: 'cron_create',
+    description: 'Create a scheduled trigger.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        project_id: { type: 'string', description: 'Project slug or ID.' },
+        schedule: { type: 'string', description: 'Five-field cron expression.' },
+        timezone: { type: 'string', description: 'Optional IANA timezone such as America/Los_Angeles.' },
+        handler: { oneOf: [{ type: 'string' }], description: 'Function path.' },
+      },
+      required: ['project_id', 'schedule', 'handler'],
+      additionalProperties: false,
+    },
+  };
 
   const server = createServer((req, res) => {
     let body = '';
@@ -89,11 +104,22 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
           authorization: req.headers.authorization,
           userAgent: req.headers['user-agent'],
         });
-        const text = rpc.params.name === 'advisor'
+        let text = rpc.params.name === 'advisor'
           ? 'Use `sw.db.query` for this.'
           : rpc.params.name === 'docs'
             ? '# sw.db\n\nDatabase reference.'
             : JSON.stringify(catalog, null, 2);
+        if (rpc.params.name === 'catalog' && rpc.params.arguments.load) {
+          text = JSON.stringify({ loaded: [rpc.params.arguments.load], count: 1, tools: [cronCreate] }, null, 2);
+        }
+        if (rpc.params.name === 'catalog' && rpc.params.arguments.search) {
+          text = JSON.stringify({
+            query: rpc.params.arguments.search,
+            matches: rpc.params.arguments.search === 'cron_create'
+              ? [{ kind: 'mcp_tool', tool: 'cron_create', group: 'cron' }]
+              : [{ kind: 'mcp_tool', tool: 'cron_create', group: 'cron' }],
+          }, null, 2);
+        }
         sendJson(res, {
           jsonrpc: '2.0',
           id: rpc.id,
@@ -131,7 +157,23 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
 
     const catalogJson = await run(['catalog', '--json'], env);
     assert.equal(catalogJson.status, 0, catalogJson.stderr);
-    assert.deepEqual(JSON.parse(catalogJson.stdout), catalog);
+    const catalogPayload = JSON.parse(catalogJson.stdout);
+    assert.deepEqual({ ...catalogPayload, definitions: undefined }, { ...catalog, definitions: undefined });
+    assert.deepEqual(catalogPayload.definitions, [cronCreate]);
+    assert.deepEqual(catalogPayload.definitions[0].inputSchema.required, ['project_id', 'schedule', 'handler']);
+    assert.equal(catalogPayload.definitions[0].inputSchema.properties.timezone.type, 'string');
+    assert.equal(catalogPayload.definitions[0].inputSchema.properties.handler.oneOf[0].type, 'string');
+
+    const catalogTool = await run(['catalog', 'cron_create'], env);
+    assert.equal(catalogTool.status, 0, catalogTool.stderr);
+    assert.match(catalogTool.stdout, /Create a scheduled trigger/);
+    assert.match(catalogTool.stdout, /"required": \[/);
+    assert.match(catalogTool.stdout, /"project_id"/);
+
+    const missingTool = await run(['catalog', 'cron_missing'], env);
+    assert.equal(missingTool.status, 1);
+    assert.match(missingTool.stderr, /UNKNOWN_TOOL/);
+    assert.match(missingTool.stderr, /Matches: cron_create/);
 
     const catalogHuman = await run(['catalog'], env);
     assert.equal(catalogHuman.status, 0, catalogHuman.stderr);
@@ -142,6 +184,10 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
       ['advisor', { question: 'How should I store notes?' }],
       ['docs', { topic: 'sw.db' }],
       ['catalog', {}],
+      ['catalog', { load: 'all' }],
+      ['catalog', { search: 'cron_create' }],
+      ['catalog', { load: 'cron' }],
+      ['catalog', { search: 'cron_missing' }],
       ['catalog', {}],
     ]);
     assert.ok(calls.every((call) => call.authorization === 'Bearer smt_platform_help_test'));

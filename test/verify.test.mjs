@@ -72,6 +72,125 @@ test('passing flow returns one report with every step, expected 401 excluded, an
   assert.ok(bodies.every((body) => !('session_id' in body)), 'verification never leaves a reconnectable browser session');
 });
 
+test('authenticated flow fields reach every hosted viewport without changing anonymous requests', async () => {
+  const authenticated = normalizeVerifyFlow({
+    actions: [
+      { upload: '#avatar', file: 'data:image/png;base64,cG5n', name: 'shot.png' },
+      { screenshot: 'signed-in' },
+    ],
+    auth: { user_id: 'usr_fixture' },
+    local_storage: { sw_auth: 'session_fixture' },
+    cookies: [{ name: '__Host-token', value: 'cookie_fixture' }],
+    headers: { Authorization: 'Bearer user_fixture' },
+    viewports: ['desktop', 'mobile'],
+  });
+  const bodies = [];
+  await runVerification(
+    { project_id: 'fixture', url: 'https://fixture.somewhere.site/account' },
+    authenticated,
+    fixtureClient([browserReport(), browserReport()], bodies),
+  );
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies.every((body) => body.auth.user_id === 'usr_fixture'));
+  assert.ok(bodies.every((body) => body.local_storage.sw_auth === 'session_fixture'));
+  assert.ok(bodies.every((body) => body.cookies[0].name === '__Host-token'));
+  assert.ok(bodies.every((body) => body.headers.Authorization === 'Bearer user_fixture'));
+  assert.ok(bodies.every((body) => body.actions[0].upload === '#avatar' && body.actions[1].screenshot === 'signed-in'));
+
+  const anonymousBodies = [];
+  await runVerification(
+    { project_id: 'fixture' },
+    normalizeVerifyFlow({ viewports: ['desktop'] }),
+    fixtureClient([browserReport()], anonymousBodies),
+  );
+  for (const field of ['auth', 'local_storage', 'cookies', 'headers']) {
+    assert.equal(field in anonymousBodies[0], false, `anonymous verification must omit ${field}`);
+  }
+});
+
+test('verification refuses session data without project scope and local impersonation before opening a browser', async () => {
+  await assert.rejects(
+    () => runVerification(
+      { url: 'https://third-party.test' },
+      normalizeVerifyFlow({ cookies: [{ name: 'session', value: 'secret' }] }),
+      fixtureClient([browserReport()]),
+    ),
+    /needs --project/,
+  );
+  await assert.rejects(
+    () => runVerification(
+      { url: 'http://127.0.0.1:65534' },
+      normalizeVerifyFlow({ auth: { user_id: 'usr_fixture' } }),
+    ),
+    /impersonation is not available against a local address/,
+  );
+});
+
+test('verification rejects malformed and oversized session seed fields', () => {
+  assert.throws(() => normalizeVerifyFlow({ auth: { user_id: '' } }), /auth must be/);
+  assert.throws(() => normalizeVerifyFlow({ cookies: [{ name: '', value: 'x' }] }), /cookies\[0\]/);
+  assert.throws(() => normalizeVerifyFlow({ headers: { Authorization: 42 } }), /only string values/);
+  assert.throws(
+    () => normalizeVerifyFlow({ local_storage: { sw_auth: 'x'.repeat(9 * 1024) } }),
+    /8 KB/,
+  );
+});
+
+test('verify --session and repeatable --cookie seed both hosted viewports', async () => {
+  const bodies = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'POST' && req.url === '/v1/browser/test') {
+        bodies.push(JSON.parse(body));
+        res.end(JSON.stringify({ ok: true, data: browserReport({ steps: [] }) }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND', message: req.url }));
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  const home = mkdtempSync(join(tmpdir(), 'sw-verify-session-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_fixture' }));
+
+  const result = await new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [
+      join(process.cwd(), 'dist/index.js'),
+      'verify', '--project', 'fixture', '--url', 'https://fixture.somewhere.site/account',
+      '--session', 'session_fixture',
+      '--cookie', 'session=cookie_fixture',
+      '--cookie', 'theme=dark',
+      '--json',
+    ], {
+      env: {
+        ...process.env,
+        HOME: home,
+        USERPROFILE: home,
+        SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1`,
+        CI: '1',
+        SOMEWHERE_NO_NOTIFICATIONS: '1',
+      },
+    });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (chunk) => { stdout += chunk; });
+    child.stderr.on('data', (chunk) => { stderr += chunk; });
+    child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
+  });
+  await new Promise((resolvePromise) => server.close(resolvePromise));
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(JSON.parse(result.stdout).passed, true);
+  assert.equal(bodies.length, 2);
+  assert.ok(bodies.every((body) => body.local_storage.sw_auth === 'session_fixture'));
+  assert.ok(bodies.every((body) => body.cookies.length === 2));
+  assert.deepEqual(bodies.map((body) => body.viewport).sort(), ['desktop', 'mobile']);
+});
+
 test('a third action failure names step 3 and its viewport', async () => {
   const failed = browserReport({
     passed: false,

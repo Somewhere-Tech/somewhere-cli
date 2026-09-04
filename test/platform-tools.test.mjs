@@ -63,6 +63,7 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
     { name: 'cron_update', description: 'Update a scheduled trigger', inputSchema: { type: 'object' } },
     { name: 'cron_delete', description: 'Delete a scheduled trigger', inputSchema: { type: 'object' } },
     { name: 'email_send', description: 'Send transactional email', inputSchema: { type: 'object' } },
+    { name: 'email_test_inbox', description: 'Read test inbox', inputSchema: { type: 'object' } },
   ];
 
   const server = createServer((req, res) => {
@@ -93,6 +94,31 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       }
       if (rpc.method === 'tools/call') {
         calls.push({ name: rpc.params.name, arguments: rpc.params.arguments });
+        if (rpc.params.name === 'email_test_inbox' && rpc.params.arguments.address === 'old@platform.test.somewhere.site') {
+          sendJson(res, {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              isError: true,
+              content: [{ type: 'text', text: 'Unknown tool: email_test_inbox' }],
+            },
+          });
+          return;
+        }
+        if (rpc.params.name === 'email_test_inbox' && rpc.params.arguments.address === 'real@example.com') {
+          sendJson(res, {
+            jsonrpc: '2.0',
+            id: rpc.id,
+            result: {
+              isError: true,
+              content: [{ type: 'text', text: JSON.stringify({
+                error: 'VALIDATION_ERROR',
+                message: "address must belong to this project's test inbox: <anything>@platform.test.somewhere.site.",
+              }) }],
+            },
+          });
+          return;
+        }
         const data = rpc.params.name === 'tasks_list'
           ? []
           : rpc.params.name === 'feedback'
@@ -107,6 +133,20 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
                     ? { id: 'cron_1' }
                     : rpc.params.name === 'email_send'
                       ? { id: 'email_1' }
+                    : rpc.params.name === 'email_test_inbox'
+                      ? {
+                          address: 'robot@platform.test.somewhere.site',
+                          messages: [{
+                            id: 'testmail_1',
+                            to: 'robot@platform.test.somewhere.site',
+                            subject: 'Sign in',
+                            html: '<a href="https://platform.somewhere.site/auth?token=magic">Sign in</a>',
+                            text: 'Sign in',
+                            magic_link: 'https://platform.somewhere.site/auth?token=magic',
+                            created_at: '2026-09-03T20:00:00.000Z',
+                          }],
+                          limit: 20,
+                        }
                 : { id: 'tsk_1', title: 'Test task' };
         sendJson(res, {
           jsonrpc: '2.0',
@@ -144,6 +184,7 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       ['cron', 'update', 'cron_1', '--disable', '--json'],
       ['cron', 'delete', 'cron_1', '--json'],
       ['email', 'send', 'alice@example.com', '--project', 'platform', '--from', 'hello@example.com', '--subject', 'Welcome', '--text', 'You are in.', '--json'],
+      ['email', 'test-inbox', 'robot@platform.test.somewhere.site', '--project', 'platform', '--json'],
     ];
     for (const command of commands) {
       const result = await run(command, env);
@@ -162,7 +203,35 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       { name: 'cron_update', arguments: { cron_id: 'cron_1', enabled: false } },
       { name: 'cron_delete', arguments: { cron_id: 'cron_1' } },
       { name: 'email_send', arguments: { project_id: 'platform', to: 'alice@example.com', from: 'hello@example.com', subject: 'Welcome', text: 'You are in.' } },
+      { name: 'email_test_inbox', arguments: { project_id: 'platform', address: 'robot@platform.test.somewhere.site' } },
     ]);
+
+    const inboxHuman = await run([
+      'email', 'test-inbox', 'robot@platform.test.somewhere.site', '--project', 'platform',
+    ], env);
+    assert.equal(inboxHuman.status, 0, inboxHuman.stderr);
+    assert.match(inboxHuman.stdout, /Test inbox robot@platform\.test\.somewhere\.site — 1 message/);
+    assert.match(inboxHuman.stdout, /magic_link: https:\/\/platform\.somewhere\.site\/auth\?token=magic/);
+
+    const wrongInbox = await run([
+      'email', 'test-inbox', 'real@example.com', '--project', 'platform', '--json',
+    ], env);
+    assert.equal(wrongInbox.status, 1);
+    assert.deepEqual(JSON.parse(wrongInbox.stdout), {
+      ok: false,
+      error: 'VALIDATION_ERROR',
+      message: "address must belong to this project's test inbox: <anything>@platform.test.somewhere.site.",
+    });
+
+    const oldPlatformInbox = await run([
+      'email', 'test-inbox', 'old@platform.test.somewhere.site', '--project', 'platform', '--json',
+    ], env);
+    assert.equal(oldPlatformInbox.status, 1);
+    assert.deepEqual(JSON.parse(oldPlatformInbox.stdout), {
+      ok: false,
+      error: 'EMAIL_TEST_INBOX_NOT_AVAILABLE',
+      message: 'Test inbox is not available on this platform version yet.',
+    });
 
     const callCount = calls.length;
     const badCron = await run([

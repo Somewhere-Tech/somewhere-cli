@@ -1,5 +1,5 @@
 import { existsSync, readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
@@ -23,6 +23,10 @@ export type VerifyViewportInput =
 
 export interface VerifyFlow {
   actions: BrowserSequenceAction[];
+  auth?: { user_id: string };
+  local_storage?: Record<string, string>;
+  cookies?: Array<{ name: string; value: string }>;
+  headers?: Record<string, string>;
   expect_requests: ExpectedBrowserRequest[];
   visible_only: boolean;
   viewports: VerifyViewportInput[];
@@ -104,6 +108,44 @@ function normalizeExpectedRequests(raw: unknown): ExpectedBrowserRequest[] {
   });
 }
 
+function normalizeStringRecord(raw: unknown, field: string): Record<string, string> | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw)) throw new Error(`${field} must be a JSON object with string values.`);
+  const entries = Object.entries(raw);
+  if (entries.some(([, value]) => typeof value !== 'string')) {
+    throw new Error(`${field} must contain only string values.`);
+  }
+  return Object.fromEntries(entries) as Record<string, string>;
+}
+
+function normalizeCookies(raw: unknown): Array<{ name: string; value: string }> | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new Error('cookies must be a JSON array of { name, value } objects.');
+  return raw.map((value, index) => {
+    if (!isRecord(value) || typeof value.name !== 'string' || !value.name.trim() || typeof value.value !== 'string') {
+      throw new Error(`cookies[${index}] must have a non-empty string name and a string value.`);
+    }
+    return { name: value.name.trim(), value: value.value };
+  });
+}
+
+function normalizeAuth(raw: unknown): { user_id: string } | undefined {
+  if (raw === undefined) return undefined;
+  if (!isRecord(raw) || typeof raw.user_id !== 'string' || !raw.user_id.trim()) {
+    throw new Error('auth must be { "user_id": "<app-user-id>" }.');
+  }
+  return { user_id: raw.user_id.trim() };
+}
+
+function assertSessionSeedSize(flow: Pick<VerifyFlow, 'local_storage' | 'cookies' | 'headers'>): void {
+  const bytes = Buffer.byteLength(JSON.stringify({
+    local_storage: flow.local_storage ?? {},
+    cookies: flow.cookies ?? [],
+    headers: flow.headers ?? {},
+  }));
+  if (bytes > 8 * 1024) throw new Error(`Verification session seed is ${bytes} bytes; the platform limit is 8192 bytes (8 KB).`);
+}
+
 function normalizeViewports(raw: unknown): VerifyViewportInput[] {
   if (raw === undefined) return [...DEFAULT_VIEWPORTS];
   if (!Array.isArray(raw) || raw.length === 0) throw new Error('viewports must be a non-empty JSON array.');
@@ -134,25 +176,35 @@ function normalizeViewports(raw: unknown): VerifyViewportInput[] {
   });
 }
 
-export function normalizeVerifyFlow(raw: unknown): VerifyFlow {
+export function normalizeVerifyFlow(raw: unknown, baseDir = process.cwd()): VerifyFlow {
   if (raw === undefined) {
     return { actions: [], expect_requests: [], visible_only: false, viewports: [...DEFAULT_VIEWPORTS] };
   }
   if (!isRecord(raw)) throw new Error('flow must be a JSON object.');
-  const supported = new Set(['actions', 'expect_requests', 'visible_only', 'viewports']);
+  const supported = new Set(['actions', 'auth', 'local_storage', 'cookies', 'headers', 'expect_requests', 'visible_only', 'viewports']);
   const unknown = Object.keys(raw).filter((key) => !supported.has(key));
   if (unknown.length) throw new Error(`flow has unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`);
-  const actions = normalizeBrowserActions(raw.actions ?? []);
+  const actions = normalizeBrowserActions(raw.actions ?? [], baseDir);
   if (!actions.ok) throw new Error(actions.error);
   if (raw.visible_only !== undefined && typeof raw.visible_only !== 'boolean') {
     throw new Error('visible_only must be boolean.');
   }
-  return {
+  const auth = normalizeAuth(raw.auth);
+  const localStorage = normalizeStringRecord(raw.local_storage, 'local_storage');
+  const cookies = normalizeCookies(raw.cookies);
+  const headers = normalizeStringRecord(raw.headers, 'headers');
+  const flow: VerifyFlow = {
     actions: actions.actions,
+    ...(auth ? { auth } : {}),
+    ...(localStorage ? { local_storage: localStorage } : {}),
+    ...(cookies ? { cookies } : {}),
+    ...(headers ? { headers } : {}),
     expect_requests: normalizeExpectedRequests(raw.expect_requests),
     visible_only: raw.visible_only === true,
     viewports: normalizeViewports(raw.viewports),
   };
+  assertSessionSeedSize(flow);
+  return flow;
 }
 
 export function loadVerifyFlow(path?: string, cwd = process.cwd()): VerifyFlow {
@@ -165,7 +217,7 @@ export function loadVerifyFlow(path?: string, cwd = process.cwd()): VerifyFlow {
   } catch (cause) {
     throw new Error(`Flow file is not valid JSON: ${absolute} — ${cause instanceof Error ? cause.message : String(cause)}`);
   }
-  return normalizeVerifyFlow(parsed);
+  return normalizeVerifyFlow(parsed, dirname(absolute));
 }
 
 function resolveViewport(input: VerifyViewportInput): ResolvedViewport {
@@ -178,9 +230,11 @@ function actionName(action: BrowserSequenceAction | undefined, fallback: string)
   if (!action) return fallback;
   if ('click' in action) return `click ${action.click}`;
   if ('fill' in action) return `fill ${action.fill}`;
+  if ('upload' in action) return `upload ${action.upload}`;
   if ('select' in action) return `select ${action.select}`;
   if ('wait' in action) return `wait ${String(action.wait)}`;
   if ('expect' in action) return `expect ${action.expect.selector}`;
+  if ('screenshot' in action) return `screenshot ${action.screenshot}`;
   return `eval ${action.eval}`;
 }
 
@@ -297,16 +351,28 @@ export async function runVerification(
   client?: ApiClient,
 ): Promise<VerifyReport> {
   if (!target.url && !target.project_id) throw new Error('Verification needs a URL or project.');
+  const hasSessionSeed = flow.auth !== undefined || flow.local_storage !== undefined
+    || flow.cookies !== undefined || flow.headers !== undefined;
+  if (hasSessionSeed && !target.project_id && !(target.url && isLoopbackUrl(target.url))) {
+    throw new Error('Authenticated verification needs --project so session data stays locked to that project origin.');
+  }
   const resolved = flow.viewports.map(resolveViewport);
   const targetLabel = target.url ?? target.project_id ?? '(unknown target)';
   if (target.url && isLoopbackUrl(target.url)) {
+    if (flow.auth) {
+      throw new Error('auth user impersonation is not available against a local address; use local_storage, cookies, or headers for a session you already hold.');
+    }
     const localUrl = target.url;
     const runs = await Promise.all(resolved.map(async (viewport) => {
       const report = await runLocalBrowser({
         url: localUrl,
         actions: flow.actions,
+        actionScreenshotPrefix: `somewhere-verify-${viewport.label}`,
         expectedRequests: flow.expect_requests,
         visibleOnly: flow.visible_only,
+        localStorage: flow.local_storage,
+        cookies: flow.cookies,
+        headers: flow.headers,
         screenshotPath: resolve(`somewhere-verify-${viewport.label}.jpg`),
         viewport: { width: viewport.width, height: viewport.height },
         timeoutMs: VERIFY_TIMEOUT_MS,
@@ -321,6 +387,10 @@ export async function runVerification(
     const report = await client.call<BrowserResult>('POST', '/browser/test', {
       ...target,
       actions: flow.actions,
+      ...(flow.auth ? { auth: flow.auth } : {}),
+      ...(flow.local_storage ? { local_storage: flow.local_storage } : {}),
+      ...(flow.cookies ? { cookies: flow.cookies } : {}),
+      ...(flow.headers ? { headers: flow.headers } : {}),
       expect_requests: flow.expect_requests,
       visible_only: flow.visible_only,
       viewport: viewport.wire,
@@ -350,19 +420,34 @@ export function formatVerifyReport(report: VerifyReport): string[] {
 }
 
 export function registerVerify(program: Command): void {
+  const cliCookies: Array<{ name: string; value: string }> = [];
+  const collectCookie = (value: string): string => {
+    const at = value.indexOf('=');
+    if (at <= 0) throw new Error('--cookie expects <name>=<value>.');
+    cliCookies.push({ name: value.slice(0, at), value: value.slice(at + 1) });
+    return value;
+  };
   program
     .command('verify [target]')
     .description('Run one browser flow at desktop and phone size, report every step and health signal, and capture both screenshots.')
     .option('--project <ref>', 'Project to verify. Defaults to the linked project when --url is omitted.')
     .option('--url <url>', 'Live or local URL to verify.')
-    .option('--flow <file.json>', 'Flow JSON with actions, expect_requests, visible_only, and viewports. Omit for the default health check.')
+    .option('--flow <file.json>', 'Flow JSON with actions, session seeds, expect_requests, visible_only, and viewports. Omit for the default health check.')
+    .option('--session <session-id>', 'Existing app session value to seed as localStorage sw_auth in every viewport.')
+    .option('--cookie <name=value>', 'Existing app cookie to seed in every viewport. Repeatable.', collectCookie)
     .option('--json', 'Print the structured verification report as JSON.')
-    .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; json?: boolean }) => {
+    .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean }) => {
       try {
         const url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);
         const project = opts.project ?? (url ? undefined : target ?? loadProjectConfig()?.project_id);
         if (!url && !project) throw new Error('Nothing to verify. Pass --url, --project, or run from a linked project directory.');
-        const flow = loadVerifyFlow(opts.flow);
+        const loadedFlow = loadVerifyFlow(opts.flow);
+        const flow: VerifyFlow = {
+          ...loadedFlow,
+          ...(opts.session ? { local_storage: { ...loadedFlow.local_storage, sw_auth: opts.session } } : {}),
+          ...(cliCookies.length ? { cookies: [...(loadedFlow.cookies ?? []), ...cliCookies] } : {}),
+        };
+        assertSessionSeedSize(flow);
         const local = !!url && isLoopbackUrl(url);
         const report = await runVerification(
           { ...(project ? { project_id: project } : {}), ...(url ? { url } : {}) },
@@ -373,6 +458,11 @@ export function registerVerify(program: Command): void {
         else for (const line of formatVerifyReport(report)) console.log(line);
         process.exit(report.passed ? 0 : 1);
       } catch (cause) {
+        if (cause instanceof CliApiError && cause.code === 'VALIDATION_ERROR'
+            && /provide exactly one of|unknown action|unsupported action|upload is not supported|screenshot is not supported/i.test(cause.message)) {
+          error('VERIFY_ACTION_NOT_AVAILABLE: Browser upload and named screenshot actions are not available on this platform version yet.');
+          process.exit(1);
+        }
         if (cause instanceof CliApiError) {
           error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)}`);
         } else {

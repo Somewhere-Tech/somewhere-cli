@@ -1,4 +1,4 @@
-import { resolve } from 'node:path';
+import { dirname, resolve } from 'node:path';
 import { readFileSync } from 'node:fs';
 import { Command, InvalidArgumentError } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
@@ -11,6 +11,7 @@ import {
   parseExpectedRequestFlag,
   parseFillFlag,
   parseSelectFlag,
+  parseUploadFlag,
   type BrowserRequestExpectationResult,
   type BrowserSequenceAction,
   type ExpectedBrowserRequest,
@@ -101,7 +102,7 @@ export interface BrowserOptions {
   path?: string;
   wait?: string;
   eval?: string;
-  screenshot?: boolean;
+  screenshot?: boolean | string;
   snapshot?: boolean;
   viewport?: string;
   store?: boolean;
@@ -146,9 +147,11 @@ export function buildBrowserBody(
   if (opts.path) steps.push({ action: 'goto', path: opts.path });
   if (!opts.actionSequence?.length && opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
   if (!opts.actionSequence?.length && opts.eval) steps.push({ action: 'eval', script: opts.eval });
-  if (opts.screenshot) steps.push({ action: 'screenshot' });
+  if (opts.screenshot === true) steps.push({ action: 'screenshot' });
   if (steps.length) body.steps = steps;
-  if (opts.actionSequence?.length) body.actions = opts.actionSequence;
+  const actions = [...(opts.actionSequence ?? [])];
+  if (typeof opts.screenshot === 'string') actions.push({ screenshot: opts.screenshot });
+  if (actions.length) body.actions = actions;
   if (opts.expectedRequests?.length) body.expect_requests = opts.expectedRequests;
   if (opts.visibleOnly) body.visible_only = true;
 
@@ -420,7 +423,8 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
       visibleOnly: opts.visibleOnly,
       // No project is involved, so there is nowhere on the platform to store
       // the image; write it beside the developer instead.
-      screenshotPath: opts.screenshot ? resolve('somewhere-browser.jpg') : undefined,
+      actionScreenshotPrefix: 'somewhere-browser',
+      screenshotPath: opts.screenshot === true ? resolve('somewhere-browser.jpg') : undefined,
       viewport,
       timeoutMs: BROWSER_TIMEOUT_MS,
     });
@@ -459,14 +463,19 @@ export function registerBrowser(program: Command) {
     try { actionSequence.push(parseSelectFlag(value)); } catch (err) { invalid(err); }
     return value;
   };
+  const collectUpload = (value: string): string => {
+    try { actionSequence.push(parseUploadFlag(value)); } catch (err) { invalid(err); }
+    return value;
+  };
   const collectExpect = (value: string): string => {
     try { actionSequence.push(parseExpectFlag(value)); } catch (err) { invalid(err); }
     return value;
   };
   const collectActionsFile = (file: string): string => {
     try {
-      const raw = JSON.parse(readFileSync(resolve(file), 'utf8')) as unknown;
-      const normalized = normalizeBrowserActions(raw);
+      const absolute = resolve(file);
+      const raw = JSON.parse(readFileSync(absolute, 'utf8')) as unknown;
+      const normalized = normalizeBrowserActions(raw, dirname(absolute));
       if (!normalized.ok) throw new InvalidArgumentError(normalized.error);
       actionSequence.push(...normalized.actions);
     } catch (err) {
@@ -505,11 +514,12 @@ export function registerBrowser(program: Command) {
     .option('--eval <js>', 'Evaluate JavaScript in the page and print its result (legacy single-step flag).')
     .option('--click <selector>', 'Click a visible CSS selector. Repeat to build an ordered action sequence.', collectClick)
     .option('--fill <selector=value>', "Fill an input, e.g. --fill '#email=a@b.co'. Repeatable.", collectFill)
+    .option('--upload <selector=file>', "Attach a local file, e.g. --upload '#avatar=./photo.png'. Repeatable.", collectUpload)
     .option('--select <selector=value>', "Select an option value, e.g. --select '#plan=pro'. Repeatable.", collectSelect)
     .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
     .option('--actions <file.json>', 'Append the shared JSON action array, e.g. [{"fill":"#email","value":"a@b.co"},{"click":"#save"}], at this point in the command.', collectActionsFile)
     .option('--expect-request <path:status>', "Treat an observed request status as expected, e.g. --expect-request '/api/tasks:401'. Repeatable.", collectExpectedRequest)
-    .option('--screenshot', 'Capture a screenshot and print its stored path (requires a project).')
+    .option('--screenshot [name]', 'Capture a screenshot and print its stored path. A name adds the shared {screenshot:name} action shorthand.')
     .option('--snapshot', 'Print the full interactive-element / DOM map, not just the count.')
     .option('--visible-only', 'Return only visible controls in the DOM outline; annotations remain on every returned node.')
     .option('--viewport <size>', 'desktop (default) or mobile.')
@@ -533,8 +543,8 @@ export function registerBrowser(program: Command) {
     .action(async (target: string | undefined, opts: BrowserOptions) => {
       opts.actionSequence = [...actionSequence];
       opts.expectedRequests = [...expectedRequests];
-      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval || opts.screenshot)) {
-        error('--path, --wait, --eval, and --screenshot cannot be mixed with --click/--fill/--select/--expect/--actions; put wait/eval in the actions file, and navigate or capture in a separate call.');
+      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval || opts.screenshot === true)) {
+        error('--path, --wait, --eval, and an unnamed --screenshot cannot be mixed with --click/--fill/--upload/--select/--expect/--actions; put wait/eval in the actions file, or use --screenshot <name>.');
         process.exit(1);
       }
       if (opts.viewport && opts.viewport !== 'desktop' && opts.viewport !== 'mobile') {
@@ -573,7 +583,7 @@ export function registerBrowser(program: Command) {
 
       const client = new ApiClient(getToken());
       // The endpoint can only store a screenshot on a project you own.
-      if (opts.screenshot && !body.project_id) {
+      if (opts.screenshot && !body.project_id && !(typeof body.url === 'string' && isLoopbackUrl(body.url))) {
         error('--screenshot needs a project to store the image — pass --project (or a project URL you own).');
         process.exit(1);
       }
@@ -584,6 +594,13 @@ export function registerBrowser(program: Command) {
           timeoutMs: BROWSER_TIMEOUT_MS,
         });
       } catch (err) {
+        const needsNewActions = (opts.actionSequence ?? []).some((action) => 'upload' in action || 'screenshot' in action)
+          || typeof opts.screenshot === 'string';
+        if (needsNewActions && err instanceof CliApiError && err.code === 'VALIDATION_ERROR'
+            && /provide exactly one of|unknown action|unsupported action|upload is not supported|screenshot is not supported/i.test(err.message)) {
+          error('BROWSER_ACTION_NOT_AVAILABLE: Browser upload and named screenshot actions are not available on this platform version yet.');
+          process.exit(1);
+        }
         if (err instanceof CliApiError) {
           error(
             `${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`,

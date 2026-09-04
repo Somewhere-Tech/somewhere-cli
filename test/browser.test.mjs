@@ -114,6 +114,7 @@ test('buildBrowserBody: action flags compile to an ordered steps array', () => {
 test('buildBrowserBody: concise actions, expected requests, and visible-only use the shared wire contract', () => {
   const actions = [
     { fill: '#email', value: 'a@b.co' },
+    { upload: '#avatar', file: 'data:image/png;base64,cG5n', name: 'shot.png' },
     { click: '#save' },
     { expect: { selector: '.saved', text: 'Saved', visible: true, count: 1 } },
   ];
@@ -128,6 +129,12 @@ test('buildBrowserBody: concise actions, expected requests, and visible-only use
   assert.equal('steps' in body, false);
 });
 
+test('buildBrowserBody: named --screenshot uses the shared concise shorthand', () => {
+  const body = buildBrowserBody('my-app', { screenshot: 'after-save' });
+  assert.deepEqual(body.actions, [{ screenshot: 'after-save' }]);
+  assert.equal('steps' in body, false);
+});
+
 test('--actions uses the shared shorthand and rejects the expanded step spelling', () => {
   const canonical = normalizeBrowserActions([
     { fill: '#email', value: 'a@b.co' },
@@ -139,7 +146,7 @@ test('--actions uses the shared shorthand and rejects the expanded step spelling
     { action: 'fill', selector: '#email', value: 'a@b.co' },
   ]);
   assert.equal(expanded.ok, false);
-  assert.match(expanded.error, /exactly one of click, fill, select, wait, expect, eval/);
+  assert.match(expanded.error, /exactly one of click, fill, upload, select, wait, expect, screenshot, eval/);
 });
 
 test('buildBrowserBody: --snapshot is not a step', () => {
@@ -280,13 +287,16 @@ test('repeatable action flags and --actions preserve command-line order on the w
   const home = mkdtempSync(join(tmpdir(), 'sw-browser-actions-home-'));
   mkdirSync(join(home, '.somewhere'), { recursive: true });
   writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  const uploadFile = join(home, 'shot.png');
+  writeFileSync(uploadFile, Buffer.from('png fixture'));
   const actionsFile = join(home, 'actions.json');
-  writeFileSync(actionsFile, JSON.stringify([{ wait: '#ready' }, { eval: 'document.title' }]));
+  writeFileSync(actionsFile, JSON.stringify([{ wait: '#ready' }, { upload: '#from-file', file: './shot.png' }, { eval: 'document.title' }]));
   lastRequest = null;
   const result = await runCli([
     'browser',
     'https://example.com',
     '--fill', '#email=a@b.co',
+    '--upload', `#avatar=${uploadFile}`,
     '--click', '#save',
     '--actions', actionsFile,
     '--select', '#plan=pro',
@@ -298,8 +308,10 @@ test('repeatable action flags and --actions preserve command-line order on the w
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(lastRequest.body.actions, [
     { fill: '#email', value: 'a@b.co' },
+    { upload: '#avatar', file: `data:image/png;base64,${Buffer.from('png fixture').toString('base64')}`, name: 'shot.png' },
     { click: '#save' },
     { wait: '#ready' },
+    { upload: '#from-file', file: `data:image/png;base64,${Buffer.from('png fixture').toString('base64')}`, name: 'shot.png' },
     { eval: 'document.title' },
     { select: '#plan', value: 'pro' },
     { expect: { selector: '.saved', text: 'Saved' } },

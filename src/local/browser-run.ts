@@ -8,7 +8,7 @@
  * preview of the hosted answer, not a second opinion.
  */
 import { writeFileSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import {
   DevToolsSession,
@@ -55,8 +55,13 @@ export interface LocalBrowserRequest {
   /** A JS expression to evaluate in the page. */
   eval?: string;
   actions?: BrowserSequenceAction[];
+  /** Prefix for named screenshot actions; the viewport is included by verify. */
+  actionScreenshotPrefix?: string;
   expectedRequests?: ExpectedBrowserRequest[];
   visibleOnly?: boolean;
+  localStorage?: Record<string, string>;
+  cookies?: Array<{ name: string; value: string }>;
+  headers?: Record<string, string>;
   /** Write a screenshot to this file. */
   screenshotPath?: string;
   viewport: { width: number; height: number };
@@ -187,6 +192,7 @@ export async function executeLocalAction(
   session: DevToolsSession,
   action: BrowserSequenceAction,
   deadline: number,
+  screenshotPrefix = 'somewhere-browser',
 ): Promise<LocalStepResult> {
   const label = actionLabel(action);
   const step: LocalStepResult = { action: label, ok: true };
@@ -218,6 +224,29 @@ export async function executeLocalAction(
         return '';
       })()`);
       if (errorText) throw new Error(`fill failed at "${action.fill}": ${String(errorText)}.`);
+      return step;
+    }
+    if ('upload' in action) {
+      step.selector = action.upload;
+      step.result = await evaluate(session, `(() => {
+        const input = document.querySelector(${JSON.stringify(action.upload)});
+        if (!(input instanceof HTMLInputElement) || input.type !== 'file') {
+          throw new Error('upload target must be an <input type="file">');
+        }
+        const dataUrl = ${JSON.stringify(action.file)};
+        const comma = dataUrl.indexOf(',');
+        const mime = (/^data:([^;,]+)/.exec(dataUrl.slice(0, comma)) || [])[1] || 'application/octet-stream';
+        const binary = atob(dataUrl.slice(comma + 1));
+        const bytes = new Uint8Array(binary.length);
+        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const file = new File([bytes], ${JSON.stringify(action.name)}, { type: mime });
+        const transfer = new DataTransfer();
+        transfer.items.add(file);
+        input.files = transfer.files;
+        input.dispatchEvent(new Event('input', { bubbles: true }));
+        input.dispatchEvent(new Event('change', { bubbles: true }));
+        return { name: file.name, type: file.type, size: file.size };
+      })()`);
       return step;
     }
     if ('select' in action) {
@@ -298,6 +327,14 @@ export async function executeLocalAction(
       }
       return step;
     }
+    if ('screenshot' in action) {
+      const safeLabel = action.screenshot.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'step';
+      const path = resolve(`${screenshotPrefix}-${safeLabel}.png`);
+      const shot = (await session.send('Page.captureScreenshot', { format: 'png' })) as { data?: string };
+      writeFileSync(path, Buffer.from(shot.data ?? '', 'base64'));
+      step.path = path;
+      return step;
+    }
     step.script = action.eval;
     step.result = await evaluate(session, action.eval);
     return step;
@@ -312,10 +349,11 @@ export async function executeLocalActions(
   session: DevToolsSession,
   actions: readonly BrowserSequenceAction[],
   deadline: number,
+  screenshotPrefix?: string,
 ): Promise<LocalStepResult[]> {
   const results: LocalStepResult[] = [];
   for (const action of actions) {
-    const result = await executeLocalAction(session, action, deadline);
+    const result = await executeLocalAction(session, action, deadline, screenshotPrefix);
     result.step = results.length;
     results.push(result);
     if (!result.ok) break;
@@ -408,6 +446,22 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     await session.send('Runtime.enable');
     await session.send('Network.enable');
     await session.send('Log.enable');
+    if (req.headers && Object.keys(req.headers).length) {
+      await session.send('Network.setExtraHTTPHeaders', { headers: req.headers });
+    }
+    for (const cookie of req.cookies ?? []) {
+      const result = (await session.send('Network.setCookie', {
+        name: cookie.name,
+        value: cookie.value,
+        url: startUrl,
+      })) as { success?: boolean };
+      if (result.success === false) throw new Error(`Could not seed cookie "${cookie.name}" for ${startUrl}.`);
+    }
+    if (req.localStorage && Object.keys(req.localStorage).length) {
+      await session.send('Page.addScriptToEvaluateOnNewDocument', {
+        source: `for (const [key, value] of Object.entries(${JSON.stringify(req.localStorage)})) localStorage.setItem(key, value);`,
+      });
+    }
     session.on('Log.entryAdded', (params) => {
       const entry = params['entry'] as { level?: string; text?: string; url?: string } | undefined;
       if (entry?.level !== 'error' || !entry.text) return;
@@ -457,7 +511,22 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
 
     if (req.path && loadFired) steps.push({ action: 'goto', ok: true, path: req.path });
 
-    steps.push(...await executeLocalActions(session, req.actions ?? [], deadline));
+    const actionSteps = await executeLocalActions(
+      session,
+      req.actions ?? [],
+      deadline,
+      req.actionScreenshotPrefix,
+    );
+    steps.push(...actionSteps);
+    for (const actionStep of actionSteps) {
+      if (actionStep.action === 'screenshot' && actionStep.ok && actionStep.path) {
+        const source = req.actions?.[actionStep.step ?? -1];
+        screenshots.push({
+          label: source && 'screenshot' in source ? source.screenshot : 'step',
+          path: actionStep.path,
+        });
+      }
+    }
 
     if (req.wait) {
       const selector = req.wait;
