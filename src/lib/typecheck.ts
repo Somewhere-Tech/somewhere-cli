@@ -8,8 +8,8 @@
  *   2. the CLI checkout's TypeScript during development/tests (a devDependency)
  *   3. `npx -y typescript` as a last resort
  */
-import { spawn } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -113,6 +113,95 @@ function resolveTsc(projectDir: string): TscInvocation {
 }
 
 /**
+ * A type package declared in package.json but absent from node_modules is not a
+ * mistake in the code — it is a tree that has not been installed yet. tsc has no
+ * way to tell those apart, so the first check on a fresh pull failed with
+ * TS2503 ("Cannot find namespace 'JSX'") and every agent lost a couple of
+ * minutes installing by hand before re-running. Resolving the DECLARED packages
+ * first makes the first check mean what it says.
+ *
+ * Deliberately narrow, so this can never mask a real bug:
+ *   - only `@types/*` entries, only ones the project itself declares, only ones
+ *     actually missing from node_modules. An UNDECLARED import still fails with
+ *     its real diagnostic — that is the bug the gate exists to catch.
+ *   - a warm tree plans nothing and spawns nothing.
+ * Mirrors the prerequisite the platform's deploy-check container already
+ * provides for the same tree.
+ */
+export interface DeclaredTypesPlan {
+  /** Install specs (`@types/react@^18.3.0`) for declared-but-missing packages. */
+  specs: string[];
+  /** Bare package names, for messaging. */
+  missing: string[];
+}
+
+export type TypePackageInstaller = (specs: string[], projectDir: string) => void;
+
+export function planDeclaredTypePackages(projectDir: string): DeclaredTypesPlan {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(readFileSync(join(projectDir, 'package.json'), 'utf8'));
+  } catch {
+    return { specs: [], missing: [] }; // no manifest, nothing declared
+  }
+  if (!manifest || typeof manifest !== 'object') return { specs: [], missing: [] };
+  const record = manifest as Record<string, unknown>;
+  const declared: Record<string, string> = {};
+  for (const field of ['dependencies', 'devDependencies']) {
+    const group = record[field];
+    if (!group || typeof group !== 'object') continue;
+    for (const [name, range] of Object.entries(group as Record<string, unknown>)) {
+      if (name.startsWith('@types/') && typeof range === 'string' && range) declared[name] = range;
+    }
+  }
+
+  const specs: string[] = [];
+  const missing: string[] = [];
+  for (const [name, range] of Object.entries(declared)) {
+    if (existsSync(join(projectDir, 'node_modules', ...name.split('/')))) continue;
+    missing.push(name);
+    // `name@range` is npm's spec form for a semver range, a file:/link: path,
+    // and a git/URL range alike, so one shape covers every declaration.
+    specs.push(`${name}@${range}`);
+  }
+  return { specs, missing };
+}
+
+function npmInstallTypePackages(specs: string[], projectDir: string): void {
+  const result = spawnSync(
+    process.platform === 'win32' ? 'npm.cmd' : 'npm',
+    ['install', '--no-save', '--no-audit', '--no-fund', '--loglevel', 'error', ...specs],
+    {
+      cwd: projectDir,
+      stdio: 'ignore',
+      shell: process.platform === 'win32',
+    },
+  );
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`npm install exited ${result.status}`);
+}
+
+/**
+ * Resolve declared-but-missing type packages. Fail-OPEN by contract: if the
+ * install cannot run (offline, no npm, a private registry) the typecheck still
+ * proceeds and reports whatever tsc finds. This step may never be the reason a
+ * check does not happen.
+ */
+export function ensureDeclaredTypePackages(
+  projectDir: string,
+  install: TypePackageInstaller = npmInstallTypePackages,
+): DeclaredTypesPlan & { installed: boolean } {
+  const plan = planDeclaredTypePackages(projectDir);
+  if (plan.specs.length === 0) return { ...plan, installed: false };
+  try {
+    install(plan.specs, projectDir);
+    return { ...plan, installed: true };
+  } catch {
+    return { ...plan, installed: false };
+  }
+}
+
+/**
  * Parse tsc's default (non-pretty) diagnostic lines:
  *   path/to/file.ts(12,5): error TS2304: Cannot find name 'sanitizeForSpeech'.
  */
@@ -137,7 +226,15 @@ export function parseTscOutput(output: string): TypeError[] {
  * Run a typecheck against `projectDir`. Assumes a tsconfig.json is present
  * (pull scaffolds one); without it, tsc errors loudly and we surface that.
  */
-export function runTypecheck(projectDir: string): Promise<TypecheckResult> {
+export function runTypecheck(
+  projectDir: string,
+  options: { installTypePackages?: TypePackageInstaller | false } = {},
+): Promise<TypecheckResult> {
+  // Declared type packages first, so the FIRST check is a real verdict rather
+  // than a report that the tree is not installed yet.
+  if (options.installTypePackages !== false) {
+    ensureDeclaredTypePackages(projectDir, options.installTypePackages);
+  }
   const { command, args, via } = resolveTsc(projectDir);
   // --pretty false → stable, parseable one-line diagnostics regardless of TTY.
   const fullArgs = typecheckArgs(args);

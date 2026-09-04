@@ -194,3 +194,62 @@ test('vendored outline probe carries the platform visibility annotations', () =>
   assert.match(DOM_OUTLINE_SCRIPT, /disabled/);
   assert.match(DOM_OUTLINE_SCRIPT, /aria-hidden/);
 });
+
+// tsk_eb818014 — a CSS attribute selector carries its own "=", so first-"="
+// splitting cut the selector in half and tried to open the remainder as a path.
+test('upload mappings take the file path from the last equals so attribute selectors survive', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-upload-split-'));
+  writeFileSync(join(fixtureDir, 'shot.png'), 'png');
+  writeFileSync(join(fixtureDir, 'a=b.png'), 'png');
+
+  // The reported break: this used to resolve the path "y]=./shot.png".
+  const attribute = parseUploadFlag('[data-testid=file]=./shot.png', fixtureDir);
+  assert.equal(attribute.upload, '[data-testid=file]');
+  assert.equal(attribute.name, 'shot.png');
+
+  // Multiple equals in the selector still leave the path whole.
+  const multi = parseUploadFlag('[data-x=y][data-z=w]=./shot.png', fixtureDir);
+  assert.equal(multi.upload, '[data-x=y][data-z=w]');
+  assert.equal(multi.name, 'shot.png');
+
+  // A pseudo-CLASS uses a single colon and is untouched by the "::" form.
+  const pseudoClass = parseUploadFlag('input:not([disabled])=./shot.png', fixtureDir);
+  assert.equal(pseudoClass.upload, 'input:not([disabled])');
+  assert.equal(pseudoClass.name, 'shot.png');
+
+  // The explicit form is there for a path that itself contains "=".
+  const explicit = parseUploadFlag('[data-testid=file]::./a=b.png', fixtureDir);
+  assert.equal(explicit.upload, '[data-testid=file]');
+  assert.equal(explicit.name, 'a=b.png');
+});
+
+test('the simple upload mapping and the fill/select splits are byte-for-byte unchanged', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-upload-compat-'));
+  writeFileSync(join(fixtureDir, 'photo.png'), 'png');
+
+  const simple = parseUploadFlag('#avatar=./photo.png', fixtureDir);
+  assert.deepEqual(
+    { upload: simple.upload, name: simple.name },
+    { upload: '#avatar', name: 'photo.png' },
+  );
+
+  // fill/select values routinely contain "=", so they keep first-"=" splitting.
+  assert.deepEqual(parseFillFlag('#q=a=b'), { fill: '#q', value: 'a=b' });
+  assert.deepEqual(parseSelectFlag('#plan=pro=1'), { select: '#plan', value: 'pro=1' });
+});
+
+test('an upload mapping missing either side fails locally with actionable copy', () => {
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-upload-invalid-'));
+  for (const raw of ['#avatar', '=./photo.png', '#avatar=', '#avatar::', '::./photo.png']) {
+    assert.throws(
+      () => parseUploadFlag(raw, fixtureDir),
+      (err) => {
+        assert.match(err.message, /--upload expects <selector>=<file>/);
+        assert.match(err.message, /LAST "="/);
+        assert.match(err.message, /<selector>::<file>/);
+        return true;
+      },
+      `expected ${raw} to be rejected`,
+    );
+  }
+});

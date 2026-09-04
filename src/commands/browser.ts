@@ -514,7 +514,7 @@ export function registerBrowser(program: Command) {
     .option('--eval <js>', 'Evaluate JavaScript in the page and print its result (legacy single-step flag).')
     .option('--click <selector>', 'Click a visible CSS selector. Repeat to build an ordered action sequence.', collectClick)
     .option('--fill <selector=value>', "Fill an input, e.g. --fill '#email=a@b.co'. Repeatable.", collectFill)
-    .option('--upload <selector=file>', "Attach a local file, e.g. --upload '#avatar=./photo.png'. Repeatable.", collectUpload)
+    .option('--upload <selector=file>', "Attach a local file, e.g. --upload '#avatar=./photo.png'. The path is taken from the last '=', so attribute selectors work: --upload '[data-testid=file]=./shot.png'. Use <selector>::<file> when the path itself contains '='. Repeatable.", collectUpload)
     .option('--select <selector=value>', "Select an option value, e.g. --select '#plan=pro'. Repeatable.", collectSelect)
     .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
     .option('--actions <file.json>', 'Append the shared JSON action array, e.g. [{"fill":"#email","value":"a@b.co"},{"click":"#save"}], at this point in the command.', collectActionsFile)

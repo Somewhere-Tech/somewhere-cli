@@ -40,6 +40,7 @@ import { registerGit } from './commands/git.js';
 import { registerCron } from './commands/cron.js';
 import { registerEmail } from './commands/email.js';
 import { collectNotices } from './lib/notify/index.js';
+import { startupNotice } from './lib/startup-notice.js';
 import { error, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 
 const pkg = JSON.parse(
@@ -54,6 +55,14 @@ const program = new Command()
 const passThroughCommand = process.argv[2] === 'npx' || process.argv[2] === 'npm';
 const jsonOutputRequested = !passThroughCommand && process.argv.includes('--json');
 setJsonOutputMode(jsonOutputRequested);
+
+// First output of every interactive command — see lib/startup-notice.ts.
+const notice = startupNotice(pkg.version, {
+  isTTY: Boolean(process.stdout.isTTY),
+  jsonOutput: jsonOutputRequested,
+  passThrough: passThroughCommand,
+});
+if (notice) process.stderr.write(notice + '\n');
 if (jsonOutputRequested) {
   program.exitOverride();
   program.configureOutput({ writeErr: () => {} });

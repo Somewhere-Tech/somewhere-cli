@@ -14,8 +14,14 @@ const scaffoldModule = process.env.SOMEWHERE_TEST_SOURCE
 const typecheckCommandModule = process.env.SOMEWHERE_TEST_SOURCE
   ? '../src/commands/typecheck.ts'
   : '../dist/commands/typecheck.js';
-const { npxTscInvocation, parseTscOutput, runTypecheck, typecheckArgs } =
-  await import(typecheckModule);
+const {
+  ensureDeclaredTypePackages,
+  npxTscInvocation,
+  parseTscOutput,
+  planDeclaredTypePackages,
+  runTypecheck,
+  typecheckArgs,
+} = await import(typecheckModule);
 const { buildScaffoldPackageJson, buildScaffoldTsconfig } = await import(scaffoldModule);
 const { reportTypecheck } = await import(typecheckCommandModule);
 
@@ -211,4 +217,123 @@ test('runTypecheck accepts a fresh Vite-shaped scaffold', async () => {
   });
   const r = await runTypecheck(dir);
   assert.equal(r.ok, true, r.raw);
+});
+
+// tsk_4e323e3b — a type package declared in package.json but not yet installed
+// is a missing tree, not a code error, and the first check on a fresh pull said
+// otherwise. These fixtures pin both directions: declared-but-missing resolves
+// and passes; genuinely undeclared still fails with the real diagnostic.
+function typesFixture(files) {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-declared-types-'));
+  for (const [name, body] of Object.entries(files)) {
+    const target = join(dir, name);
+    mkdirSync(join(target, '..'), { recursive: true });
+    writeFileSync(target, body);
+  }
+  return dir;
+}
+
+test('a declared but uninstalled type package is planned for resolution', () => {
+  const dir = typesFixture({
+    'package.json': JSON.stringify({
+      name: 'fixture',
+      devDependencies: { '@types/react': '^18.3.0', typescript: '5.9.2' },
+      dependencies: { '@types/node': '^22.0.0', react: '^18.3.1' },
+    }),
+  });
+  const plan = planDeclaredTypePackages(dir);
+  assert.deepEqual(plan.missing.sort(), ['@types/node', '@types/react']);
+  assert.deepEqual(plan.specs.sort(), ['@types/node@^22.0.0', '@types/react@^18.3.0']);
+  // Narrow by design: only @types/* the project declares. Runtime deps and the
+  // compiler itself are never dragged in by this step.
+  assert.ok(!plan.specs.some((spec) => spec.startsWith('react@') || spec.startsWith('typescript@')));
+});
+
+test('an already installed type package plans nothing, so a warm tree pays no cost', () => {
+  const dir = typesFixture({
+    'package.json': JSON.stringify({ devDependencies: { '@types/react': '^18.3.0' } }),
+    'node_modules/@types/react/index.d.ts': 'export {};',
+  });
+  assert.deepEqual(planDeclaredTypePackages(dir), { specs: [], missing: [] });
+
+  let invoked = false;
+  const result = ensureDeclaredTypePackages(dir, () => { invoked = true; });
+  assert.equal(invoked, false, 'no installer should be spawned for a warm tree');
+  assert.equal(result.installed, false);
+});
+
+test('a project that declares no type packages plans nothing', () => {
+  const bare = typesFixture({
+    'package.json': JSON.stringify({ dependencies: { react: '^18.3.1' } }),
+  });
+  assert.deepEqual(planDeclaredTypePackages(bare), { specs: [], missing: [] });
+  // No manifest at all is a no-op too, never a throw.
+  assert.deepEqual(planDeclaredTypePackages(typesFixture({})), { specs: [], missing: [] });
+});
+
+test('resolving declared types makes the FIRST check clean without a manual install', async () => {
+  const dir = typesFixture({
+    'package.json': JSON.stringify({ devDependencies: { '@types/fixture-globals': '^1.0.0' } }),
+    'tsconfig.json': buildScaffoldTsconfig(),
+    'index.ts': 'export const seats: FixtureSeatCount = 4;\n',
+  });
+
+  // Before resolution the declared package is simply absent from the tree.
+  assert.deepEqual(planDeclaredTypePackages(dir).missing, ['@types/fixture-globals']);
+  const cold = await runTypecheck(dir, { installTypePackages: false });
+  assert.equal(cold.ok, false, 'an unresolved declared type should not pass');
+  assert.ok(cold.errors.some((e) => e.code === 'TS2304'), JSON.stringify(cold.errors));
+
+  // Resolution stands in for npm here so the fixture stays offline; the specs it
+  // receives are the real ones the CLI would hand npm.
+  const seen = [];
+  const resolved = ensureDeclaredTypePackages(dir, (specs, cwd) => {
+    seen.push({ specs, cwd });
+    mkdirSync(join(dir, 'node_modules', '@types', 'fixture-globals'), { recursive: true });
+    writeFileSync(
+      join(dir, 'node_modules', '@types', 'fixture-globals', 'index.d.ts'),
+      'declare type FixtureSeatCount = number;\n',
+    );
+    writeFileSync(
+      join(dir, 'node_modules', '@types', 'fixture-globals', 'package.json'),
+      JSON.stringify({ name: '@types/fixture-globals', version: '1.0.0', types: 'index.d.ts' }),
+    );
+  });
+  assert.deepEqual(seen, [{ specs: ['@types/fixture-globals@^1.0.0'], cwd: dir }]);
+  assert.equal(resolved.installed, true);
+
+  const warm = await runTypecheck(dir, { installTypePackages: false });
+  assert.equal(warm.ok, true, `expected a clean first check, got ${warm.raw}`);
+});
+
+test('a genuinely undeclared symbol still fails with its real diagnostic', async () => {
+  const dir = typesFixture({
+    'package.json': JSON.stringify({ devDependencies: {} }),
+    'tsconfig.json': buildScaffoldTsconfig(),
+    'index.ts': 'export const value = sanitizeForSpeech("hi");\n',
+  });
+  // Nothing to resolve, and resolution must never invent a package to silence this.
+  assert.deepEqual(planDeclaredTypePackages(dir), { specs: [], missing: [] });
+  const result = await runTypecheck(dir);
+  assert.equal(result.ok, false);
+  assert.ok(
+    result.errors.some((e) => e.code === 'TS2304' && /sanitizeForSpeech/.test(e.message)),
+    JSON.stringify(result.errors),
+  );
+});
+
+test('resolution fails open: an installer that throws never blocks the check', async () => {
+  const dir = typesFixture({
+    'package.json': JSON.stringify({ devDependencies: { '@types/never-there': '^1.0.0' } }),
+    'tsconfig.json': buildScaffoldTsconfig(),
+    'index.ts': 'export const ok = 1;\n',
+  });
+  const outcome = ensureDeclaredTypePackages(dir, () => {
+    throw new Error('offline');
+  });
+  assert.equal(outcome.installed, false);
+  assert.deepEqual(outcome.missing, ['@types/never-there']);
+
+  const result = await runTypecheck(dir, { installTypePackages: false });
+  assert.equal(result.ok, true, `the check must still run and report: ${result.raw}`);
 });

@@ -18,6 +18,7 @@ interface CronCreateOptions extends ProjectOptions {
   name?: string;
   payload?: string;
   disabled?: boolean;
+  timezone?: string;
 }
 
 interface CronUpdateOptions {
@@ -154,7 +155,9 @@ export function registerCron(program: Command): void {
     .description('Manage scheduled triggers')
     .addHelpText(
       'after',
-      '\nExample:\n  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n',
+      '\nExamples:\n  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
+        + '  somewhere cron create "0 9 * * *" /api/daily-digest --project my-app --timezone America/Los_Angeles\n'
+        + '\nSchedules are read in UTC unless --timezone names an IANA zone.\n',
     );
 
   cron
@@ -210,8 +213,12 @@ export function registerCron(program: Command): void {
 
   cron
     .command('create <schedule> <handler>')
-    .description('Create a scheduled trigger (5-field UTC cron expression)')
+    .description('Create a scheduled trigger (5-field cron expression, read in UTC unless --timezone says otherwise)')
     .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .option(
+      '--timezone <iana>',
+      'IANA time zone the schedule is read in, e.g. America/Los_Angeles. Daylight saving is handled for you. Omit for UTC.',
+    )
     .option('--name <name>', 'Display name')
     .option('--payload <json>', 'JSON object sent to the handler')
     .option('--disabled', 'Create without firing on schedule')
@@ -225,6 +232,9 @@ export function registerCron(program: Command): void {
           ['name', opts.name],
           ['payload', parsePayload(opts.payload)],
           ['enabled', opts.disabled ? false : undefined],
+          // Forwarded verbatim: the platform owns time-zone validation and DST,
+          // so the CLI never converts an offset or second-guesses the name.
+          ['timezone', opts.timezone],
         ]);
         await runCronTool('cron_create', args, opts.json, (value) => printCronMutation('Scheduled trigger created', value));
       } catch (err) {

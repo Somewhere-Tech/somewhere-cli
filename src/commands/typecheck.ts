@@ -3,7 +3,7 @@ import { existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { bold, dim, error, info, printJson, red, success, teal, warn } from '../lib/output.js';
-import { runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
+import { ensureDeclaredTypePackages, runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
 
 export function registerTypecheck(program: Command) {
   program
@@ -38,8 +38,17 @@ export function registerTypecheck(program: Command) {
       }
 
       const spinner = opts.json ? null : ora('Typechecking (tsc --noEmit)...').start();
-      const result = await runTypecheck(dir);
+      // Type packages this project declares but has not installed yet are a
+      // missing tree, not a code error. Resolve them so the FIRST check is a
+      // real verdict; runTypecheck is then told not to repeat the step.
+      if (spinner) spinner.text = 'Checking declared type packages...';
+      const resolved = ensureDeclaredTypePackages(dir);
+      if (spinner) spinner.text = 'Typechecking (tsc --noEmit)...';
+      const result = await runTypecheck(dir, { installTypePackages: false });
       spinner?.stop();
+      if (!opts.json && resolved.installed) {
+        info(dim(`Resolved declared type packages: ${resolved.missing.join(', ')}`));
+      }
 
       if (opts.json) {
         printJson(result);

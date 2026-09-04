@@ -199,9 +199,47 @@ export function normalizeBrowserActions(raw: unknown, baseDir = process.cwd()):
   return { ok: true, actions };
 }
 
-function splitSelectorValue(raw: string, flag: '--fill' | '--upload' | '--select'): { selector: string; value: string } {
+function splitSelectorValue(raw: string, flag: '--fill' | '--select'): { selector: string; value: string } {
   const at = raw.indexOf('=');
   if (at <= 0) throw new Error(`${flag} expects <selector>=<value> (for example ${flag} '#email=a@b.co').`);
+  return { selector: raw.slice(0, at), value: raw.slice(at + 1) };
+}
+
+const UPLOAD_USAGE =
+  "--upload expects <selector>=<file> (for example --upload '#avatar=./photo.png'). " +
+  'The selector may contain "=", because the file path is taken from the LAST "=". ' +
+  "If the PATH itself contains \"=\", use the explicit form <selector>::<file> instead.";
+
+/**
+ * Upload mappings are split at the LAST `=`, not the first.
+ *
+ * A CSS attribute selector carries its own equals sign — `[data-testid=file]` —
+ * so first-`=` splitting cut real selectors in half and then tried to open the
+ * remainder as a path. The right-hand side of an upload mapping is always a
+ * file path, and paths rarely contain `=`, so the last `=` is the reliable
+ * boundary; `#avatar=./photo.png` is unaffected because its only `=` is also
+ * its last one.
+ *
+ * `<selector>::<file>` is the explicit form for the remaining ambiguity (a path
+ * that really does contain `=`). When `::` is present it wins and the split is
+ * at the FIRST `::`. The only selectors that lose are pseudo-ELEMENTS
+ * (`input::-webkit-file-upload-button`), which can never be an upload target —
+ * a file attaches to the `<input type="file">` itself. Pseudo-CLASSES use a
+ * single colon (`input:not([disabled])`) and are unaffected.
+ *
+ * --fill and --select keep first-`=` splitting: their values routinely contain
+ * `=` (query strings, base64, tokens), which is the opposite trade-off.
+ */
+export function splitUploadMapping(raw: string): { selector: string; value: string } {
+  const explicit = raw.indexOf('::');
+  if (explicit > 0) {
+    const selector = raw.slice(0, explicit);
+    const value = raw.slice(explicit + 2);
+    if (!selector || !value) throw new Error(UPLOAD_USAGE);
+    return { selector, value };
+  }
+  const at = raw.lastIndexOf('=');
+  if (at <= 0 || at === raw.length - 1) throw new Error(UPLOAD_USAGE);
   return { selector: raw.slice(0, at), value: raw.slice(at + 1) };
 }
 
@@ -216,7 +254,7 @@ export function parseSelectFlag(raw: string): BrowserSequenceAction {
 }
 
 export function parseUploadFlag(raw: string, baseDir = process.cwd()): BrowserSequenceAction {
-  const parsed = splitSelectorValue(raw, '--upload');
+  const parsed = splitUploadMapping(raw);
   const upload = resolveBrowserUpload(parsed.value, baseDir);
   return { upload: parsed.selector, file: upload.file, name: upload.name };
 }

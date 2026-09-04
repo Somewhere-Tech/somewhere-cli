@@ -1,5 +1,47 @@
 # Changelog
 
+## 0.31.12
+
+### Fixed
+
+- **File uploads work with attribute selectors.** `somewhere browser --upload`
+  read the file path from the FIRST `=` in the mapping, so a selector that
+  contains its own equals sign — `[data-testid=file]` — was cut in half and the
+  leftover text was treated as the path. The path is now read from the LAST `=`,
+  which leaves `#avatar=./photo.png` behaving exactly as before. For the rare
+  path that itself contains `=`, `--upload '<selector>::<file>'` states the split
+  explicitly. `--fill` and `--select` are unchanged: their values often contain
+  `=`, so they still split at the first one.
+- **`somewhere typecheck` no longer fails on a project you have not installed
+  yet.** A freshly created or freshly pulled project declares its type packages
+  in `package.json` but has nothing in place until dependencies are installed,
+  and the first check reported that absence as a dozen type errors in your own
+  code. The check now puts the type packages your project declares in place
+  before it runs, so the first answer is a real one. Only packages you already
+  declare are resolved, an import you never declared still fails with its real
+  error, and a project that is already installed does no extra work. If the
+  packages cannot be fetched, the check still runs and reports what it finds.
+
+### Added
+
+- **Scheduled triggers can be created in your own time zone.**
+  `somewhere cron create --timezone <IANA>` — for example
+  `--timezone America/Los_Angeles` — reads the cron expression in that zone and
+  handles daylight saving for you, so `0 9 * * *` means 9am locally all year.
+  The platform has accepted this since scheduling shipped; only the CLI was
+  missing the flag and its help text called every expression UTC. Omit the flag
+  and nothing changes: schedules are still read in UTC.
+- **Every command says it has started.** The CLI now prints
+  `starting somewhere CLI <version>` as its first line in an interactive
+  terminal, so a first run shows something immediately and names the version you
+  actually got. The line goes to the error stream and only ever appears on a
+  terminal, so piped output, `--json`, and scripts are byte-for-byte unchanged.
+  Note that a first `npx @somewhere-tech/cli …` on a cold cache can still sit
+  quiet for up to a minute BEFORE this line: npm downloads and installs the
+  package before running any of its code, and that download is silent by npm's
+  design — no code we ship can speak during it. Install once with
+  `npm i -g @somewhere-tech/cli` to skip that wait on every later run.
+
 ## 0.31.11
 
 ### Added
