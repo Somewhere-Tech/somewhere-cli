@@ -310,6 +310,7 @@ test('repeatable action flags and --actions preserve command-line order on the w
     '--expect', '#new-book-title:value=Kindred',
     '--expect-request', '/api/tasks:401',
     '--screenshot',
+    '--store',
     '--visible-only',
     '--json',
   ], home);
@@ -327,6 +328,7 @@ test('repeatable action flags and --actions preserve command-line order on the w
     { screenshot: 'page' },
   ]);
   assert.deepEqual(lastRequest.body.expect_requests, [{ path: '/api/tasks', status: 401 }]);
+  assert.equal(lastRequest.body.store, true);
   assert.equal(lastRequest.body.visible_only, true);
 });
 

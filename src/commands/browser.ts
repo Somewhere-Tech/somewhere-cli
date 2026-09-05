@@ -584,7 +584,7 @@ export function registerBrowser(program: Command) {
 
       const client = new ApiClient(getToken());
       // The endpoint can only store a screenshot on a project you own.
-      if (opts.screenshot && !body.project_id && !(typeof body.url === 'string' && isLoopbackUrl(body.url))) {
+      if (opts.screenshot && !opts.store && !body.project_id && !(typeof body.url === 'string' && isLoopbackUrl(body.url))) {
         error('--screenshot needs a project to store the image — pass --project (or a project URL you own).');
         process.exit(1);
       }
