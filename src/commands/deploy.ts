@@ -388,6 +388,7 @@ export function registerDeploy(program: Command) {
       'After the deploy is live, run one browser verification flow at desktop and phone size. Omit the file for the default health check.',
     )
     .option('--json', 'Print the raw deploy response as JSON')
+    .option('--timing', 'Print collection, upload, release, activation, and verification timings')
     .action(async (dir: string | undefined, opts) => {
       const targetDir = resolveTargetDir(dir);
       const storedConfig = loadConfig();
@@ -594,9 +595,11 @@ export function registerDeploy(program: Command) {
 
       const spinner = opts.json ? null : ora('Collecting files...').start();
 
+      const collectionStartedAt = Date.now();
       const { files, binaryFiles, functions, skipped, excluded } = collectFiles(targetDir, {
         include: (opts.include as string[] | undefined) ?? [],
       });
+      const collectionMs = Date.now() - collectionStartedAt;
 
       // Publish surface (tsk_c166924f): a deploy publishes the app, not the
       // folder it was built in. Name every held-back file — a silent exclusion
@@ -718,12 +721,14 @@ export function registerDeploy(program: Command) {
           return;
         }
 
+        const requestStartedAt = Date.now();
         const result = await callDeployWithRetry<DeployResult>(client, body, {
           spinner,
           json: Boolean(opts.json),
           dryRun: false,
           baseText: spinner?.text ?? 'Deploying...',
         });
+        const requestMs = Date.now() - requestStartedAt;
 
         spinner?.stop();
         const functionErrors = result.function_errors ?? [];
@@ -735,6 +740,9 @@ export function registerDeploy(program: Command) {
           totalBytes,
           linkedProject: targetProjectConfig,
         });
+        if (opts.timing && !opts.json) {
+          printDeployTiming({ collectionMs, requestMs, stageTimingMs: result.stage_timing_ms });
+        }
         let verification: VerifyReport | undefined;
         if (opts.verify && !hasFunctionErrors) {
           const flow = loadVerifyFlow(typeof opts.verify === 'string' ? opts.verify : undefined, targetDir);
@@ -939,6 +947,32 @@ export interface DeployResult {
   runtime_fixes?: Array<{ notice_id: string; title: string; message: string }>;
   status?: string;
   release_publish?: boolean;
+  compiled_artifact_digest?: string | null;
+  stage_timing_ms?: Record<string, number> | null;
+}
+
+export function formatDeployTiming(input: {
+  collectionMs: number;
+  requestMs: number;
+  stageTimingMs?: Record<string, number> | null;
+}): string[] {
+  const stage = input.stageTimingMs ?? {};
+  const rows: Array<[string, number]> = [
+    ['cli collection/packaging', input.collectionMs],
+    ['upload + server total', input.requestMs],
+    ...Object.entries(stage).sort(([a], [b]) => a.localeCompare(b)),
+  ];
+  return rows.map(([name, ms]) => `  ${name}: ${(Math.max(0, ms) / 1000).toFixed(2)}s`);
+}
+
+function printDeployTiming(input: {
+  collectionMs: number;
+  requestMs: number;
+  stageTimingMs?: Record<string, number> | null;
+}): void {
+  console.log(`\n${dim('Timing')}`);
+  for (const line of formatDeployTiming(input)) info(dim(line));
+  console.log('');
 }
 
 interface DeploySuccessFormatOptions {
