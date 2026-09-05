@@ -6,7 +6,7 @@ export type BrowserSequenceAction =
   | { fill: string; value: string }
   | { upload: string; file: string; name: string }
   | { select: string; value: string }
-  | { wait: string | number }
+  | { wait: string | number | { selector: string } }
   | { expect: { selector: string; text?: string; value?: string; visible?: boolean; count?: number } }
   | { screenshot: string }
   | { eval: string };
@@ -153,7 +153,11 @@ export function normalizeBrowserActions(raw: unknown, baseDir = process.cwd()):
     if (key === 'wait') {
       if (typeof actionValue === 'string' && actionValue) actions.push({ wait: actionValue });
       else if (typeof actionValue === 'number' && Number.isFinite(actionValue) && actionValue >= 0) actions.push({ wait: actionValue });
-      else return { ok: false, error: `${at}: wait must be a CSS selector string or non-negative milliseconds number.` };
+      else if (actionValue && typeof actionValue === 'object' && !Array.isArray(actionValue)
+        && typeof (actionValue as Record<string, unknown>).selector === 'string'
+        && (actionValue as Record<string, unknown>).selector) {
+        actions.push({ wait: { selector: (actionValue as Record<string, string>).selector } });
+      } else return { ok: false, error: `${at}: wait must be a CSS selector string, { "selector": "#ready" }, or non-negative milliseconds number.` };
       continue;
     }
     if (key === 'eval') {
@@ -260,12 +264,13 @@ export function parseUploadFlag(raw: string, baseDir = process.cwd()): BrowserSe
 }
 
 export function parseExpectFlag(raw: string): BrowserSequenceAction {
-  const match = raw.match(/^(.*):(text|visible|count)=(.*)$/s);
+  const match = raw.match(/^(.*):(text|value|visible|count)=(.*)$/s);
   if (!match || !match[1]) {
-    throw new Error("--expect expects <selector>:text=<substring>, :visible=true|false, or :count=<n>.");
+    throw new Error("--expect expects <selector>:text=<substring>, :value=<exact value>, :visible=true|false, or :count=<n>.");
   }
   const [, selector, kind, rawValue] = match;
   if (kind === 'text') return { expect: { selector, text: rawValue } };
+  if (kind === 'value') return { expect: { selector, value: rawValue } };
   if (kind === 'visible') {
     if (rawValue !== 'true' && rawValue !== 'false') throw new Error('--expect visible must be true or false.');
     return { expect: { selector, visible: rawValue === 'true' } };

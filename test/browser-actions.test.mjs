@@ -95,8 +95,16 @@ test('repeatable flag parsers map to the same JSON contract', () => {
   });
   assert.deepEqual(parseSelectFlag('#plan=pro'), { select: '#plan', value: 'pro' });
   assert.deepEqual(parseExpectFlag('.saved:text=Ready'), { expect: { selector: '.saved', text: 'Ready' } });
+  assert.deepEqual(parseExpectFlag('#new-book-title:value=Kindred'), { expect: { selector: '#new-book-title', value: 'Kindred' } });
   assert.deepEqual(parseExpectFlag('.dialog:visible=false'), { expect: { selector: '.dialog', visible: false } });
   assert.deepEqual(parseExpectFlag('.row:count=2'), { expect: { selector: '.row', count: 2 } });
+});
+
+test('wait accepts the documented object selector form and rejects an ambiguous object with the accepted shape', () => {
+  assert.deepEqual(normalizeBrowserActions([{ wait: { selector: '#ready' } }]), { ok: true, actions: [{ wait: { selector: '#ready' } }] });
+  const invalid = normalizeBrowserActions([{ wait: { text: 'Ready' } }]);
+  assert.equal(invalid.ok, false);
+  assert.match(invalid.error, /\{ "selector": "#ready" \}/);
 });
 
 test('local upload paths preserve bytes, filename, and MIME type while unsafe inputs fail before navigation', () => {

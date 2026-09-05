@@ -271,10 +271,11 @@ export async function executeLocalAction(
         if (action.wait > remaining) throw new Error(`wait exceeded the browser run budget after ${remaining}ms.`);
         return step;
       }
-      step.selector = action.wait;
+      const selector = typeof action.wait === 'object' ? action.wait.selector : action.wait;
+      step.selector = selector;
       while (Date.now() < deadline) {
         const visible = await evaluate(session, `(() => {
-          const el = document.querySelector(${JSON.stringify(action.wait)});
+          const el = document.querySelector(${JSON.stringify(selector)});
           if (!el) return false;
           const style = getComputedStyle(el);
           const rect = el.getBoundingClientRect();
@@ -285,7 +286,7 @@ export async function executeLocalAction(
         if (visible === true) return step;
         await sleep(POLL_MS);
       }
-      throw new Error(`wait timed out for "${action.wait}".`);
+      throw new Error(`wait timed out for "${selector}".`);
     }
     if ('expect' in action) {
       step.selector = action.expect.selector;

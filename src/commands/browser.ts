@@ -147,9 +147,10 @@ export function buildBrowserBody(
   if (opts.path) steps.push({ action: 'goto', path: opts.path });
   if (!opts.actionSequence?.length && opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
   if (!opts.actionSequence?.length && opts.eval) steps.push({ action: 'eval', script: opts.eval });
-  if (opts.screenshot === true) steps.push({ action: 'screenshot' });
+  if (opts.screenshot === true && !opts.actionSequence?.length) steps.push({ action: 'screenshot' });
   if (steps.length) body.steps = steps;
   const actions = [...(opts.actionSequence ?? [])];
+  if (opts.screenshot === true && actions.length) actions.push({ screenshot: 'page' });
   if (typeof opts.screenshot === 'string') actions.push({ screenshot: opts.screenshot });
   if (actions.length) body.actions = actions;
   if (opts.expectedRequests?.length) body.expect_requests = opts.expectedRequests;
@@ -516,7 +517,7 @@ export function registerBrowser(program: Command) {
     .option('--fill <selector=value>', "Fill an input, e.g. --fill '#email=a@b.co'. Repeatable.", collectFill)
     .option('--upload <selector=file>', "Attach a local file, e.g. --upload '#avatar=./photo.png'. The path is taken from the last '=', so attribute selectors work: --upload '[data-testid=file]=./shot.png'. Use <selector>::<file> when the path itself contains '='. Repeatable.", collectUpload)
     .option('--select <selector=value>', "Select an option value, e.g. --select '#plan=pro'. Repeatable.", collectSelect)
-    .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
+    .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#title:value=Kindred', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
     .option('--actions <file.json>', 'Append the shared JSON action array, e.g. [{"fill":"#email","value":"a@b.co"},{"click":"#save"}], at this point in the command.', collectActionsFile)
     .option('--expect-request <path:status>', "Treat an observed request status as expected, e.g. --expect-request '/api/tasks:401'. Repeatable.", collectExpectedRequest)
     .option('--screenshot [name]', 'Capture a screenshot and print its stored path. A name adds the shared {screenshot:name} action shorthand.')
@@ -543,8 +544,8 @@ export function registerBrowser(program: Command) {
     .action(async (target: string | undefined, opts: BrowserOptions) => {
       opts.actionSequence = [...actionSequence];
       opts.expectedRequests = [...expectedRequests];
-      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval || opts.screenshot === true)) {
-        error('--path, --wait, --eval, and an unnamed --screenshot cannot be mixed with --click/--fill/--upload/--select/--expect/--actions; put wait/eval in the actions file, or use --screenshot <name>.');
+      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval)) {
+        error('--path, --wait, and --eval cannot be mixed with --click/--fill/--upload/--select/--expect/--actions; put wait/eval in the actions file. --screenshot composes and captures after the action sequence.');
         process.exit(1);
       }
       if (opts.viewport && opts.viewport !== 'desktop' && opts.viewport !== 'mobile') {

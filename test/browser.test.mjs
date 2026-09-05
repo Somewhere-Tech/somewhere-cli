@@ -135,6 +135,12 @@ test('buildBrowserBody: named --screenshot uses the shared concise shorthand', (
   assert.equal('steps' in body, false);
 });
 
+test('buildBrowserBody: unnamed --screenshot composes after an action sequence', () => {
+  assert.deepEqual(buildBrowserBody('my-app', { actionSequence: [{ click: '#save' }], screenshot: true }).actions, [
+    { click: '#save' }, { screenshot: 'page' },
+  ]);
+});
+
 test('--actions uses the shared shorthand and rejects the expanded step spelling', () => {
   const canonical = normalizeBrowserActions([
     { fill: '#email', value: 'a@b.co' },
