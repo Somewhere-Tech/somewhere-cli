@@ -231,6 +231,26 @@ test('docs <topic> --json returns the public section in an envelope, unauthentic
   });
 });
 
+test('docs sw.db leads with every structured-write signature and one call example', async () => {
+  const home = emptyCredentialHome();
+  await withCorpus(async (base) => {
+    const result = await run(['docs', 'sw.db'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_DOCS_BASE: base,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      NO_COLOR: '1',
+      CI: '1',
+    });
+    assert.equal(result.status, 0, result.stderr);
+    const first120 = result.stdout.split('\n').slice(0, 120).join('\n');
+    assert.match(first120, /sw\.db\.insert\(table, values/);
+    assert.match(first120, /sw\.db\.update\(table, \{ set, where\? \}\)/);
+    assert.match(first120, /sw\.db\.remove\(table, \{ where\? \}\)/);
+    assert.match(first120, /await sw\.db\.update\('notes'/);
+  });
+});
+
 test('an unknown topic names the public topics instead of demanding a login', async () => {
   const home = emptyCredentialHome();
   await withCorpus(async (base) => {

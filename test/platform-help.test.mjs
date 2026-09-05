@@ -150,10 +150,11 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
 
     const docs = await run(['docs', 'sw.db', '--json'], env);
     assert.equal(docs.status, 0, docs.stderr);
-    assert.deepEqual(JSON.parse(docs.stdout), {
-      topic: 'sw.db',
-      content: '# sw.db\n\nDatabase reference.',
-    });
+    const docsPayload = JSON.parse(docs.stdout);
+    assert.equal(docsPayload.topic, 'sw.db');
+    assert.match(docsPayload.content, /^## Exact `sw\.db` structured-write signatures/);
+    assert.match(docsPayload.content, /sw\.db\.insert\(table, values/);
+    assert.match(docsPayload.content, /# sw\.db\n\nDatabase reference\.$/);
 
     const catalogJson = await run(['catalog', '--json'], env);
     assert.equal(catalogJson.status, 0, catalogJson.stderr);

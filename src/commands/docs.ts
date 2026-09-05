@@ -54,6 +54,26 @@ const ALIASES: Record<string, string> = {
  *  read is a real answer and not a downgraded one. */
 const PUBLIC_CORPUS_PATH = '/llms-full.txt';
 
+// Keep the structured-write shapes at the top of `somewhere docs sw.db` even
+// when the public corpus is long or an older server has not yet reordered its
+// topic. This is a CLI read-time lead, not a second docs corpus.
+const SW_DB_WRITE_SIGNATURES = `## Exact \`sw.db\` structured-write signatures
+
+\`\`\`ts
+sw.db.insert(table, values, options?: { onConflict?: 'ignore' | 'update' })
+sw.db.update(table, { set, where? })
+sw.db.remove(table, { where? }) // sw.db.delete is an alias
+\`\`\`
+
+One call example:
+
+\`\`\`ts
+await sw.db.update('notes', {
+  set: { done: true },
+  where: { id: 42 },
+})
+\`\`\``;
+
 /** A manual topic heading in the corpus ends with its key in parentheses:
  *  `## Setup — Install the CLI and connect MCP (setup)`. Method-call headings
  *  (`## sw.fs.versions(path)`) also end in parentheses, so a heading only counts
@@ -64,6 +84,13 @@ export interface PublicTopicSection {
   key: string;
   title: string;
   body: string;
+}
+
+export function leadManualTopic(topic: string, content: string): string {
+  if (topic.trim().toLowerCase() !== 'sw.db' || content.startsWith(SW_DB_WRITE_SIGNATURES)) {
+    return content;
+  }
+  return `${SW_DB_WRITE_SIGNATURES}\n\n${content}`;
 }
 
 function headingKey(line: string): string | null {
@@ -216,8 +243,9 @@ export function registerDocs(program: Command) {
         if (hasUsableCredential()) {
           try {
             const content = await callPlatformHelpTool('docs', { topic: requestedTopic });
-            if (opts.json) printJson({ topic: requestedTopic, content });
-            else process.stdout.write(content.endsWith('\n') ? content : `${content}\n`);
+            const ledContent = leadManualTopic(requestedTopic, content);
+            if (opts.json) printJson({ topic: requestedTopic, content: ledContent });
+            else process.stdout.write(ledContent.endsWith('\n') ? ledContent : `${ledContent}\n`);
             return;
           } catch (e) {
             authenticatedFailure = e instanceof Error ? e.message : String(e);
@@ -233,10 +261,10 @@ export function registerDocs(program: Command) {
                 topic: section.key,
                 url: DOCS_BASE + PUBLIC_CORPUS_PATH,
                 source: 'public',
-                content: `${section.body}\n`,
+                content: `${leadManualTopic(section.key, section.body)}\n`,
               });
             } else {
-              process.stdout.write(`${section.body}\n`);
+              process.stdout.write(`${leadManualTopic(section.key, section.body)}\n`);
             }
             return;
           }
