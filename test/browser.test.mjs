@@ -307,7 +307,9 @@ test('repeatable action flags and --actions preserve command-line order on the w
     '--actions', actionsFile,
     '--select', '#plan=pro',
     '--expect', '.saved:text=Saved',
+    '--expect', '#new-book-title:value=Kindred',
     '--expect-request', '/api/tasks:401',
+    '--screenshot',
     '--visible-only',
     '--json',
   ], home);
@@ -321,6 +323,8 @@ test('repeatable action flags and --actions preserve command-line order on the w
     { eval: 'document.title' },
     { select: '#plan', value: 'pro' },
     { expect: { selector: '.saved', text: 'Saved' } },
+    { expect: { selector: '#new-book-title', value: 'Kindred' } },
+    { screenshot: 'page' },
   ]);
   assert.deepEqual(lastRequest.body.expect_requests, [{ path: '/api/tasks', status: 401 }]);
   assert.equal(lastRequest.body.visible_only, true);
