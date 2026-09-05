@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 const deployModule = process.env.SOMEWHERE_TEST_SOURCE
   ? '../src/commands/deploy.ts'
   : '../dist/commands/deploy.js';
-const { formatDeploySuccess, POST_DEPLOY_HINT } = await import(deployModule);
+const { formatDeploySuccess, formatDeployTiming, POST_DEPLOY_HINT } = await import(deployModule);
 
 test('post-deploy copy keeps greenfield live and introduces preview after users or data', () => {
   assert.equal(
@@ -75,4 +75,20 @@ test('reports missing deploy fields honestly without rendering undefined', () =>
   assert.equal(formatted.liveUrl, null);
   assert.equal(formatted.liveMessage, 'Deployed — check the dashboard for the live URL.');
   assert.doesNotMatch(JSON.stringify(formatted), /undefined/);
+});
+
+test('formats the server release trace alongside CLI collection and upload time', () => {
+  assert.deepEqual(
+    formatDeployTiming({
+      collectionMs: 12,
+      requestMs: 7600,
+      stageTimingMs: { postverify_render: 5100, release_storage_write: 340 },
+    }),
+    [
+      '  cli collection/packaging: 0.01s',
+      '  upload + server total: 7.60s',
+      '  postverify_render: 5.10s',
+      '  release_storage_write: 0.34s',
+    ],
+  );
 });
