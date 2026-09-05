@@ -41,10 +41,10 @@ export default async function (_req, sw) {
 }
 \`\`\`
 
-Use \`somewhere docs <topic>\` for the full contract and
-\`https://somewhere.tech/start.txt\` for the complete quickstart. With no shell,
-use MCP \`docs({ topic })\`; \`catalog\` finds tools and \`advisor({ question })\`
-answers from the project state.
+Ask \`somewhere advisor "<question>"\` first for guidance. Then use
+\`somewhere docs <topic>\` for contracts or \`https://somewhere.tech/start.txt\`
+for quickstart. Without a shell: MCP \`advisor({ question })\`, then
+\`docs({ topic })\`; \`catalog\` finds tools.
 
 No account yet? \`npx @somewhere-tech/cli deploy\` publishes a temporary app and
 prints its live URL, claim URL, and expiry. On a hosted VM, after consent,
