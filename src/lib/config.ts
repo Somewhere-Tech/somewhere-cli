@@ -22,6 +22,10 @@ const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 const CLAUDE_CONFIG_PATH = join(homedir(), '.claude.json');
 const PROJECT_FILE = '.somewhere.json';
 
+export function cliConfigDir(): string {
+  return CONFIG_DIR;
+}
+
 function ensureDir() {
   if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   // mkdir/write modes are creation-only. Tighten an existing directory before

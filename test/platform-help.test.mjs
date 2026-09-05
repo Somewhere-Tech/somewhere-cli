@@ -141,12 +141,37 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
   };
 
   try {
-    const advisor = await run(['advisor', 'How should I store notes?', '--json'], env);
+    writeFileSync(join(home, '.somewhere', 'last-run.json'), JSON.stringify({
+      command: 'somewhere deploy',
+      args: ['--token', 'sk_live_stderr_fixture'],
+      exit_code: 1,
+      stdout_tail: '',
+      stderr_tail: 'deploy failed: Bearer smt_stderr_fixture',
+      timestamp: '2026-09-05T00:00:00.000Z',
+    }) + '\n');
+    const contextFile = join(home, '.env');
+    writeFileSync(contextFile, 'APP_SECRET=sk_live_file_fixture\nPUBLIC_NAME=demo\n');
+    const advisor = await run(['advisor', 'How should I store notes?', '--file', contextFile, '--json'], env);
     assert.equal(advisor.status, 0, advisor.stderr);
     assert.deepEqual(JSON.parse(advisor.stdout), {
       question: 'How should I store notes?',
       answer: 'Use `sw.db.query` for this.',
     });
+    assert.match(advisor.stderr, /Advisor context attached: last run, file/);
+    const advisorContext = calls[0].arguments.context;
+    assert.equal(advisorContext.last_run.stderr_tail, 'deploy failed: Bearer [REDACTED]');
+    assert.equal(advisorContext.last_run.args[1], '[REDACTED]');
+    assert.equal(advisorContext.file.content, 'APP_SECRET=[REDACTED]\nPUBLIC_NAME=[REDACTED]\n');
+    assert.doesNotMatch(JSON.stringify(advisorContext), /sk_live_file_fixture|smt_stderr_fixture/);
+
+    const noContext = await run(['advisor', 'No context please', '--no-context', '--json'], env);
+    assert.equal(noContext.status, 0, noContext.stderr);
+    assert.deepEqual(calls[1].arguments, { question: 'No context please' });
+    assert.match(noContext.stderr, /Advisor context not attached/);
+    const advisorRun = JSON.parse(readFileSync(join(home, '.somewhere', 'last-run.json'), 'utf8'));
+    assert.equal(advisorRun.command, 'advisor');
+    assert.equal(advisorRun.exit_code, 0);
+    assert.equal(typeof advisorRun.timestamp, 'string');
 
     const docs = await run(['docs', 'sw.db', '--json'], env);
     assert.equal(docs.status, 0, docs.stderr);
@@ -181,8 +206,7 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     assert.match(catalogHuman.stdout, /Platform tool catalog — 5 tools/);
     assert.match(catalogHuman.stdout, /db_query, db_migrate/);
 
-    assert.deepEqual(calls.map((call) => [call.name, call.arguments]), [
-      ['advisor', { question: 'How should I store notes?' }],
+    assert.deepEqual(calls.slice(2).map((call) => [call.name, call.arguments]), [
       ['docs', { topic: 'sw.db' }],
       ['catalog', {}],
       ['catalog', { load: 'all' }],

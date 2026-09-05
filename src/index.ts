@@ -42,6 +42,7 @@ import { registerEmail } from './commands/email.js';
 import { collectNotices } from './lib/notify/index.js';
 import { startupNotice } from './lib/startup-notice.js';
 import { error, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
+import { recordLastRun } from './lib/last-run.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -53,6 +54,7 @@ const program = new Command()
   .version(pkg.version);
 
 const passThroughCommand = process.argv[2] === 'npx' || process.argv[2] === 'npm';
+recordLastRun(process.argv.slice(2));
 const jsonOutputRequested = !passThroughCommand && process.argv.includes('--json');
 setJsonOutputMode(jsonOutputRequested);
 
