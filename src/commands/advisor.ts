@@ -2,6 +2,7 @@ import { Command } from 'commander';
 import { error, printJson } from '../lib/output.js';
 import { callPlatformHelpTool } from '../lib/platform-tools.js';
 import { buildAdvisorContext, contextNotice } from '../lib/advisor-context.js';
+import { advisorHealthLine, fetchAdvisorHealth } from '../lib/advisor-health.js';
 export { callPlatformHelpTool };
 
 export function registerAdvisor(program: Command): void {
@@ -13,6 +14,7 @@ export function registerAdvisor(program: Command): void {
     .option('--no-context', 'Do not attach the linked project, previous run, or file')
     .action(async (question: string, opts: { json?: boolean; file?: string; context?: boolean }) => {
       try {
+        process.stderr.write(`${advisorHealthLine(await fetchAdvisorHealth())}\n`);
         const context = opts.context === false ? undefined : buildAdvisorContext(opts.file);
         process.stderr.write(`${contextNotice(context)}\n`);
         const answer = await callPlatformHelpTool('advisor', {
