@@ -5,19 +5,20 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { fetchAdvisorHealth, advisorHealthLine } from '../src/lib/advisor-health.ts';
+import { fetchAdvisorHealth, advisorHealthLine } from '../dist/lib/advisor-health.js';
 
 // Real command handlers, fixture server, isolated HOME. No live credentials.
 test('cached health and CLI entrypoints reveal degradation without breaking account JSON or blocking questions', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cli-advisor-health-'));
   const requests = [];
   let status = 'healthy';
+  let checkedAt = Date.now();
   const server = createServer(async (req, res) => {
     requests.push({ path: req.url, auth: req.headers.authorization });
     res.setHeader('content-type', 'application/json');
     if (req.url === '/health?cached=1') {
       res.statusCode = status === 'degraded' ? 503 : 200;
-      res.end(JSON.stringify({ advisor: { status, checked_at: Date.now(), reason: status === 'healthy' ? null : 'Advisor is slow.', alternative: 'Use somewhere docs payments.' } }));
+      res.end(JSON.stringify({ advisor: { status, checked_at: checkedAt, reason: status === 'healthy' ? null : 'Advisor is slow.', alternative: 'Use somewhere docs payments.' } }));
     } else if (req.url === '/v1/auth/whoami') {
       res.end(JSON.stringify({ ok: true, data: { user: { email: 'fixture@example.test', effective_tier: 'free' }, stats: { projects: 0, api_keys: 1 } } }));
     } else if (req.url === '/mcp' && req.method === 'POST') {
@@ -38,14 +39,14 @@ test('cached health and CLI entrypoints reveal degradation without breaking acco
   async function command(args) {
     const script = `
       import { Command } from 'commander';
-      import { registerAuth } from './src/commands/auth.ts';
-      import { registerAdvisor } from './src/commands/advisor.ts';
-      import { saveConfig } from './src/lib/config.ts';
+      import { registerAuth } from './dist/commands/auth.js';
+      import { registerAdvisor } from './dist/commands/advisor.js';
+      import { saveConfig } from './dist/lib/config.js';
       saveConfig({ token: 'smt_fixture_only', user: { email: 'fixture@example.test' } });
       const p = new Command(); registerAuth(p); registerAdvisor(p);
       await p.parseAsync(['node', 'somewhere', ...JSON.parse(process.env.FIXTURE_ARGS)]);
     `;
-    const child = spawn(process.execPath, ['--import', 'tsx', '--input-type=module', '-e', script], {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
       cwd: new URL('..', import.meta.url),
       env: { ...process.env, HOME: home, SOMEWHERE_API_URL: `${base}/v1`, FIXTURE_ARGS: JSON.stringify(args) },
       stdio: ['ignore', 'pipe', 'pipe'],
@@ -73,6 +74,12 @@ test('cached health and CLI entrypoints reveal degradation without breaking acco
     assert.equal(JSON.parse(answer.out).answer, 'The actual answer.');
     assert.equal(requests[before].path, '/health?cached=1', 'health is visible before the advisor request');
     assert.ok(requests.filter((r) => r.path.startsWith('/health')).every((r) => !r.auth), 'public cached check never carries credentials');
+    status = 'healthy';
+    checkedAt = 1e100;
+    const invalidTime = await command(['whoami', '--json']);
+    assert.equal(JSON.parse(invalidTime.out).advisor_health.checked_at, null, 'invalid health time cannot break account output');
+    const invalidTimeHuman = await command(['auth', 'status']);
+    assert.match(invalidTimeHuman.out + invalidTimeHuman.err, /Advisor: healthy/);
     status = 'invalid';
     assert.equal((await fetchAdvisorHealth()).status, 'unknown');
     process.env.SOMEWHERE_MCP_URL = 'invalid';

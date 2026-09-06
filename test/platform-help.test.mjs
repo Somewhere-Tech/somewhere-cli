@@ -77,6 +77,11 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
   };
 
   const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health?cached=1') {
+      assert.equal(req.headers.authorization, undefined);
+      sendJson(res, { advisor: { status: 'unknown' } });
+      return;
+    }
     let body = '';
     req.on('data', (chunk) => (body += chunk));
     req.on('end', () => {
@@ -229,6 +234,11 @@ test('platform help refreshes an expired access key after an MCP 401 and retries
   const apiCalls = [];
 
   const mcpServer = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/health?cached=1') {
+      assert.equal(req.headers.authorization, undefined);
+      sendJson(res, { advisor: { status: 'unknown' } });
+      return;
+    }
     const authorization = req.headers.authorization;
     mcpAuth.push(authorization);
     if (authorization === 'Bearer smt_expired') {

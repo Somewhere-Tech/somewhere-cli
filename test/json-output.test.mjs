@@ -23,7 +23,7 @@ function run(args, { cwd = repoRoot, env }) {
     const invocation = cliInvocation(args);
     const child = spawn(invocation.command, invocation.args, {
       cwd,
-      env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
+      env: { ...process.env, SOMEWHERE_MCP_URL: 'http://127.0.0.1:1/mcp', ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
     let stderr = '';
@@ -371,7 +371,7 @@ test('rollback --json emits JSON errors for network failures', async () => {
   assert.doesNotMatch(result.stdout, /Rollback failed|✗/);
 });
 
-test('whoami --json emits the raw whoami response object', async () => {
+test('whoami --json preserves account data and adds independent advisor health', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-whoami-home-'));
   writeConfig(HOME);
 
@@ -397,7 +397,10 @@ test('whoami --json emits the raw whoami response object', async () => {
     });
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
-    assert.deepEqual(JSON.parse(result.stdout), whoamiData);
+    const output = JSON.parse(result.stdout);
+    const { advisor_health, ...account } = output;
+    assert.deepEqual(account, whoamiData);
+    assert.equal(advisor_health.status, 'unknown');
     assert.doesNotMatch(result.stdout, /json@example\.com\s+\(/);
   });
 });

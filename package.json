@@ -42,7 +42,7 @@
     "test": "npm run build && node --test \"test/*.test.mjs\"",
     "test:roundtrip": "node scripts/e2e-roundtrip.mjs",
     "test:e2e-local": "node scripts/e2e-local.mjs",
-    "check-advisor-health": "node --import tsx --test test/advisor-health.test.mjs"
+    "check-advisor-health": "npm run build && node --test test/advisor-health.test.mjs"
   },
   "engines": {
     "node": ">=22.19.0"
@@ -73,7 +73,6 @@
     "@types/node": "^22.19.21",
     "@types/prompts": "^2.4.0",
     "@types/semver": "^7.5.8",
-    "tsx": "4.23.1",
     "typescript": "^5.4.0"
   }
 }

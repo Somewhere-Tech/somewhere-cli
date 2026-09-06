@@ -21,7 +21,8 @@ export async function fetchAdvisorHealth(): Promise<AdvisorHealth> {
       || !['healthy', 'degraded', 'unknown'].includes(String(health.status))) return unknown();
     return {
       status: health.status as AdvisorHealth['status'],
-      checked_at: 'checked_at' in health && typeof health.checked_at === 'number' ? health.checked_at : null,
+      checked_at: 'checked_at' in health && typeof health.checked_at === 'number'
+        && Number.isFinite(new Date(health.checked_at).getTime()) ? health.checked_at : null,
       reason: 'reason' in health && typeof health.reason === 'string' ? health.reason : null,
       alternative: 'alternative' in health && typeof health.alternative === 'string' ? health.alternative : unknown().alternative,
     };
