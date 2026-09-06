@@ -106,8 +106,12 @@ test('project delete prints and accepts the confirm command from a 200 needs_con
           sendJson(res, 200, {
             ok: true,
             status: 'needs_confirmation',
-            confirmation_code: '482917',
             code: '482917',
+            data: {
+              code: '482917',
+              confirmation_code: '482917',
+              confirmation: { expires_in_seconds: 600 },
+            },
             next_call: { tool: 'project_delete_confirm' },
           });
           return;
@@ -151,6 +155,73 @@ test('project delete prints and accepts the confirm command from a 200 needs_con
       { pathname: `/v1/projects/${project.id}`, body: { code: '482917' } },
     ],
   );
+});
+
+test('project delete rejects a malformed confirmation code before sending delete', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-malformed-home-'));
+  writeConfig(HOME);
+  let deleteCalls = 0;
+
+  await withServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/projects/malformed') {
+        sendJson(res, 200, { ok: true, data: { id: 'proj_malformed', name: 'Malformed' } });
+        return;
+      }
+      if (req.method === 'DELETE') deleteCalls++;
+      sendJson(res, 500, { ok: false, error: 'UNEXPECTED_REQUEST', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(
+      ['project', 'delete', 'malformed', '--confirm-code', 'delete-now', '--json'],
+      { env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl } },
+    );
+    assert.equal(result.status, 1);
+    assert.deepEqual(JSON.parse(result.stdout), {
+      ok: false,
+      error: 'INVALID_CONFIRMATION_CODE',
+      message: 'A delete confirmation code must contain exactly 6 digits.',
+    });
+  });
+
+  assert.equal(deleteCalls, 0);
+});
+
+test('project delete refuses a confirmation response with no usable code', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-missing-code-home-'));
+  writeConfig(HOME);
+  let deleteCalls = 0;
+
+  await withServer((req, res) => {
+    req.on('data', () => {});
+    req.on('end', () => {
+      const url = new URL(req.url, 'http://127.0.0.1');
+      if (req.method === 'GET' && url.pathname === '/v1/projects/missing-code') {
+        sendJson(res, 200, { ok: true, data: { id: 'proj_missing', name: 'Missing Code' } });
+        return;
+      }
+      if (req.method === 'DELETE' && url.pathname === '/v1/projects/proj_missing') {
+        deleteCalls++;
+        sendJson(res, 200, {
+          ok: true,
+          status: 'needs_confirmation',
+          data: { confirmation: { expires_in_seconds: 600 } },
+        });
+        return;
+      }
+      sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async (apiUrl) => {
+    const result = await run(['project', 'delete', 'missing-code', '--json'], {
+      env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl },
+    });
+    assert.equal(result.status, 1);
+    assert.equal(JSON.parse(result.stdout).error, 'DELETE_CONFIRMATION_MISSING');
+  });
+
+  assert.equal(deleteCalls, 1);
 });
 
 test('project delete still accepts the legacy CONFIRMATION_REQUIRED error shape', async () => {
