@@ -6,14 +6,11 @@ import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { dim, error, info, printJson, success, table, teal, yellow } from '../lib/output.js';
 
+// Fields consumed by the human-readable adapter. --json preserves the complete
+// canonical response, including count/last_row_id and transport metadata.
 interface QueryResult {
-  rows: Array<Record<string, unknown>>;
-  // Rows affected by a write — the API sends `changes` (canonicalQueryShape);
-  // `rows_affected` never existed on the wire and is kept only as a legacy
-  // fallback (tsk_abea03ab: the dead-field check made every write/DDL print
-  // an ambiguous "No rows returned.").
-  changes?: number;
-  rows_affected?: number;
+  data: Array<Record<string, unknown>>;
+  changes: number;
   duration_ms?: number;
 }
 
@@ -70,8 +67,11 @@ export function registerDb(program: Command) {
           return;
         }
 
-        if (!r.rows || r.rows.length === 0) {
-          const affected = typeof r.changes === 'number' ? r.changes : r.rows_affected;
+        if (!r || !Array.isArray(r.data) || typeof r.changes !== 'number') {
+          throw new Error('Invalid database query response: expected canonical data and changes.');
+        }
+        if (r.data.length === 0) {
+          const affected = r.changes;
           if (typeof affected === 'number' && affected > 0) {
             success(`${affected} row${affected === 1 ? '' : 's'} affected${r.duration_ms != null ? dim(` (${r.duration_ms}ms)`) : ''}`);
           } else {
@@ -83,16 +83,16 @@ export function registerDb(program: Command) {
           return;
         }
 
-        const headers = Object.keys(r.rows[0]);
+        const headers = Object.keys(r.data[0]);
         const stringify = (v: unknown): string => {
           if (v === null || v === undefined) return dim('null');
           if (typeof v === 'object') return JSON.stringify(v);
           return String(v);
         };
-        const tableRows = r.rows.map((row) => headers.map((h) => stringify(row[h])));
+        const tableRows = r.data.map((row) => headers.map((h) => stringify(row[h])));
         table(headers, tableRows);
         console.log('');
-        info(dim(`${r.rows.length} row${r.rows.length === 1 ? '' : 's'}${r.duration_ms != null ? ` · ${r.duration_ms}ms` : ''}`));
+        info(dim(`${r.data.length} row${r.data.length === 1 ? '' : 's'}${r.duration_ms != null ? ` · ${r.duration_ms}ms` : ''}`));
       } catch (err) {
         spinner?.fail('Query failed');
         error(err instanceof Error ? err.message : String(err));
