@@ -157,36 +157,39 @@ test('project delete prints and accepts the confirm command from a 200 needs_con
   );
 });
 
-test('project delete rejects a malformed confirmation code before sending delete', async () => {
-  const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-malformed-home-'));
+test('project delete forwards a legitimate 32-character email confirmation token', async () => {
+  const HOME = mkdtempSync(join(tmpdir(), 'sw-project-delete-email-token-home-'));
   writeConfig(HOME);
+  const emailToken = '0123456789abcdef0123456789abcdef';
   let deleteCalls = 0;
 
   await withServer((req, res) => {
-    req.on('data', () => {});
+    let body = '';
+    req.on('data', (c) => (body += c));
     req.on('end', () => {
       const url = new URL(req.url, 'http://127.0.0.1');
-      if (req.method === 'GET' && url.pathname === '/v1/projects/malformed') {
-        sendJson(res, 200, { ok: true, data: { id: 'proj_malformed', name: 'Malformed' } });
+      if (req.method === 'GET' && url.pathname === '/v1/projects/email-token') {
+        sendJson(res, 200, { ok: true, data: { id: 'proj_email_token', name: 'Email Token' } });
         return;
       }
-      if (req.method === 'DELETE') deleteCalls++;
+      if (req.method === 'DELETE' && url.pathname === '/v1/projects/proj_email_token') {
+        deleteCalls++;
+        assert.deepEqual(parseBody(body), { code: emailToken });
+        sendJson(res, 200, { ok: true, data: { deleted: true, note: 'offline' } });
+        return;
+      }
       sendJson(res, 500, { ok: false, error: 'UNEXPECTED_REQUEST', message: req.url });
     });
   }, async (apiUrl) => {
     const result = await run(
-      ['project', 'delete', 'malformed', '--confirm-code', 'delete-now', '--json'],
+      ['project', 'delete', 'email-token', '--confirm-code', emailToken, '--json'],
       { env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl } },
     );
-    assert.equal(result.status, 1);
-    assert.deepEqual(JSON.parse(result.stdout), {
-      ok: false,
-      error: 'INVALID_CONFIRMATION_CODE',
-      message: 'A delete confirmation code must contain exactly 6 digits.',
-    });
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.deepEqual(JSON.parse(result.stdout), { deleted: true, note: 'offline' });
   });
 
-  assert.equal(deleteCalls, 0);
+  assert.equal(deleteCalls, 1);
 });
 
 test('project delete refuses a confirmation response with no usable code', async () => {

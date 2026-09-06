@@ -222,9 +222,8 @@ export function registerProject(program: Command) {
       const spinner = opts.json ? null : ora('Requesting deletion...').start();
       try {
         if (opts.confirmCode) {
-          const confirmationCode = parseDeleteConfirmationCode(opts.confirmCode);
           if (spinner) spinner.text = 'Deleting...';
-          const deleted = await confirmProjectDelete(client, project.id, confirmationCode);
+          const deleted = await confirmProjectDelete(client, project.id, opts.confirmCode);
           spinner?.stop();
           if (opts.json) {
             printJson(deleted);
@@ -344,7 +343,7 @@ async function requestDeleteConfirmationCode(client: ApiClient, projectId: strin
     );
     if (result?.status === 'needs_confirmation' || result?.confirmation_code !== undefined) {
       const code = result.confirmation_code ?? result.code;
-      if (typeof code === 'string') return parseDeleteConfirmationCode(code);
+      if (typeof code === 'string' && code.trim()) return code.trim();
       throw new CliApiError(
         'CONFIRMATION_REQUIRED',
         'The server requires confirmation but did not include a confirmation code.',
@@ -354,7 +353,7 @@ async function requestDeleteConfirmationCode(client: ApiClient, projectId: strin
   } catch (err) {
     if (err instanceof CliApiError && err.code === 'CONFIRMATION_REQUIRED') {
       const code = err.data?.code;
-      if (typeof code === 'string') return parseDeleteConfirmationCode(code);
+      if (typeof code === 'string' && code.trim()) return code.trim();
       throw new CliApiError(
         'CONFIRMATION_REQUIRED',
         `${err.message} The server did not include a confirmation code.`,
@@ -370,16 +369,6 @@ async function requestDeleteConfirmationCode(client: ApiClient, projectId: strin
     'DELETE_CONFIRMATION_MISSING',
     'The server did not require a delete confirmation code, so the CLI refused to continue.',
     500,
-  );
-}
-
-function parseDeleteConfirmationCode(code: string): string {
-  const normalized = code.trim();
-  if (/^\d{6}$/.test(normalized)) return normalized;
-  throw new CliApiError(
-    'INVALID_CONFIRMATION_CODE',
-    'A delete confirmation code must contain exactly 6 digits.',
-    400,
   );
 }
 
