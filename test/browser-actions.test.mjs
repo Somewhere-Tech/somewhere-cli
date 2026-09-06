@@ -15,7 +15,7 @@ import {
   matchesExpectedBrowserRequest,
   resolveBrowserRequestExpectations,
 } from '../dist/lib/browser-actions.js';
-import { executeLocalAction, executeLocalActions } from '../dist/local/browser-run.js';
+import { executeLocalAction, executeLocalActions } from '../dist/lib/browser-run.js';
 import { DOM_OUTLINE_SCRIPT } from '../runtime/browser-probes.mjs';
 
 function fakeSession(mode = 'success') {

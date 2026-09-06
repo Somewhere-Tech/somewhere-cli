@@ -33,3 +33,9 @@ test('buildEnvTemplate is a comment-only file when there are no keys', () => {
     assert.ok(line === '' || line.startsWith('#'), `unexpected non-comment line: ${line}`);
   }
 });
+
+test('env key inventory does not promise a local backend runtime', () => {
+  const out = buildEnvTemplate([{ key: 'SERVER_KEY' }]);
+  assert.doesNotMatch(out, /somewhere exec|somewhere dev|real bindings/);
+  assert.match(out, /Backend values stay on the/);
+});

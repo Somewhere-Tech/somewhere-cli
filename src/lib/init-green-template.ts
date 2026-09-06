@@ -7,7 +7,7 @@ const PACKAGE_JSON = `{
   "version": "0.1.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "dev": "somewhere dev",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

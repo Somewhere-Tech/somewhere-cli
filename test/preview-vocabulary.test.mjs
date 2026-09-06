@@ -23,26 +23,15 @@ test('CLI presents preview vocabulary and retains the load-bearing --draft alias
   assert.match(project, /option\('--draft', 'Deprecated alias for --preview'\)/);
 });
 
-test('`somewhere preview` is the command and `dev --cloud` is a quiet alias', () => {
+test('hosted preview remains separate from frontend dev; no local-runtime aliases survive', () => {
   const dev = read('src/commands/dev.ts');
   const index = read('src/index.ts');
-
-  // The hosted loop has its own command, and it runs the SAME function the
-  // alias runs — not a copy that can drift.
   assert.match(dev, /export function registerPreview\(program: Command\)/);
-  assert.match(dev, /\.command\('preview'\)/);
   assert.match(index, /registerPreview\(program\)/);
-  const previewBody = dev.slice(
-    dev.indexOf('export function registerPreview'),
-    dev.indexOf('export function registerDev'),
-  );
+  const previewBody = dev.slice(dev.indexOf('export function registerPreview'), dev.indexOf('export function registerDev'));
   assert.match(previewBody, /runHotDeploy\(opts\)/);
-
-  // The alias still works, and says the new name exactly once.
-  assert.match(dev, /\.option\('--cloud', 'Alias for `somewhere preview`'\)/);
-  assert.match(dev, /This is `somewhere preview`\./);
-  const aliasBranch = dev.slice(dev.indexOf('if (opts.cloud)'), dev.indexOf('return runLocalDev'));
-  assert.match(aliasBranch, /runHotDeploy\(opts\)/);
+  assert.doesNotMatch(dev, /\.option\('(?:--cloud|--local)/);
+  assert.doesNotMatch(index, /registerExec/);
 });
 
 test('customer-facing CLI copy uses exactly two words: dev and preview', () => {

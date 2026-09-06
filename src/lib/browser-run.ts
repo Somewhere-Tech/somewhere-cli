@@ -23,7 +23,7 @@ import {
   type BrowserRequestExpectationResult,
   type BrowserSequenceAction,
   type ExpectedBrowserRequest,
-} from '../lib/browser-actions.js';
+} from './browser-actions.js';
 
 /** Loopback and link-local hosts: the addresses only this machine can reach. */
 const LOOPBACK_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]', '::1', '0.0.0.0', '[::]']);

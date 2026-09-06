@@ -321,6 +321,10 @@ test('the release artifact bundles its complete authenticated dependency lock', 
       { cwd: new URL('..', import.meta.url), encoding: 'utf8' },
     ));
     const tarballPath = join(root, packed[0].filename);
+    const packedPaths = packed[0].files.map(file => file.path);
+    assert.equal(packedPaths.some(path => /^dist\/local\/|^dist\/commands\/exec\.|^runtime\/(?:compiler\/|sw-init\.|platform-context\.)/.test(path)), false, 'retired local runtime must not survive in the npm artifact');
+    assert.ok(packedPaths.includes('dist/lib/chrome.js'), 'independent browser tooling stays packaged');
+
     const productionNames = new Set(Object.entries(lock.packages)
       .filter(([path, entry]) => path !== '' && entry.dev !== true)
       .map(([path]) => path.match(/node_modules\/(?:@[^/]+\/[^/]+|[^/]+)$/)?.[0].slice('node_modules/'.length)));

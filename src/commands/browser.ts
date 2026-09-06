@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { Command, InvalidArgumentError } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { isLoopbackUrl, runLocalBrowser, type LocalBrowserReport } from '../local/browser-run.js';
+import { isLoopbackUrl, runLocalBrowser, type LocalBrowserReport } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
 import {
   normalizeBrowserActions,
@@ -32,7 +32,7 @@ interface BrowserStepResult {
   /** The hosted browser returns an evaluated value here (`steps[].value`) —
    *  an `eval` expression's result, a `snapshot`'s page outline. */
   value?: unknown;
-  /** The local loopback browser (`src/local/browser-run.ts`) returns the same
+  /** The local loopback browser (`src/lib/browser-run.ts`) returns the same
    *  thing under this name. Both are read; neither may be dropped. */
   result?: unknown;
   error?: string;

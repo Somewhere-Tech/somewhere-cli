@@ -9,7 +9,7 @@ import {
   type BrowserSequenceAction,
   type ExpectedBrowserRequest,
 } from '../lib/browser-actions.js';
-import { isLoopbackUrl, runLocalBrowser } from '../local/browser-run.js';
+import { isLoopbackUrl, runLocalBrowser } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
 import type { BrowserResult } from './browser.js';
 

@@ -1,8 +1,6 @@
 {
   "commit": "28d67b0a",
   "files": {
-    "sw-init.mjs": "61b4e2444ddb487d19cba76b25e03a249849e4e68177020c829ef09bf155eba7",
-    "platform-context.mjs": "766a9f0dfc0aab51f0a9da968d8352cd8d1184c35334b1fd9192670fa47be86e",
     "browser-probes.mjs": "24da8cb5ecdda5bb6d05795fbf6ca876e15b6fc89373922234aeef164e24b387"
   }
 }

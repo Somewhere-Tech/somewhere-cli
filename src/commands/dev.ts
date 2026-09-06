@@ -1,10 +1,8 @@
 import { Command } from 'commander';
-import { spawn } from 'node:child_process';
+import { startFrontendDev } from '../lib/frontend-dev.js';
 import { randomUUID } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { join, relative } from 'node:path';
-import { reportTypecheck } from './typecheck.js';
-import { runTypecheck } from '../lib/typecheck.js';
 import chokidar from 'chokidar';
 import prompts from 'prompts';
 import open from '../lib/open.js';
@@ -14,16 +12,8 @@ import { buildErrorSummary, isBuildError, renderBuildError } from '../lib/build-
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
 import { bold, dim, error, green, info, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
-import { assertNodeSupport, installLoader } from '../local/loader.js';
-import { loadVendoredRuntime, prepareLocalProject } from '../local/runtime.js';
-import { startLocalServer } from '../local/server.js';
-import { startDevServer } from '../local/dev-server.js';
-import { chooseDevPort } from '../local/loopback.js';
-import { ACCEPTED_ENTRY_FORMS, LocalCompiler, resolveDevEntry } from '../local/compiler.js';
-import { readCompileCore } from '../local/compiler-core.js';
-import { loadLocalEnv } from '../local/envfile.js';
 import { showProjectNotices } from '../lib/project-notices.js';
-import { getProjectServingUrl } from '../lib/project-urls.js';
+import { getDeployedProjectServingUrl } from '../lib/project-urls.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
 import { countPublishSurface, formatPublishSurface } from '../lib/surface-counts.js';
@@ -299,7 +289,7 @@ export function registerPreview(program: Command) {
         + 'rows. Nothing your users see changes — production keeps serving what you last promoted, until '
         + 'you run `somewhere promote`. Reach for this when you want the real hosted app in front of you, '
         + 'or when your agent reaches the platform over MCP and cannot serve on localhost. '
-        + 'Available on the Pro and Scale plans; `somewhere dev` runs the app on your machine on every plan.',
+        + 'Available on the Pro and Scale plans; `somewhere dev` provides frontend hot reload against the deployed backend.',
     )
     .option('--project <id>', 'Override project ID')
     .option(
@@ -313,377 +303,23 @@ export function registerPreview(program: Command) {
 }
 
 export function registerDev(program: Command) {
-  program
-    .command('dev [cmd...]')
-    .description(
-      'Your app on localhost, compiled by the platform\'s own compiler — so what you see is what deploy ' +
-        'produces, not a lookalike built by a second toolchain. Save a file and the page updates in ' +
-        'milliseconds; api/ functions run in local Node with sw.* calling your ' +
-        'real project. There is no dev version of your app: from the first file you are building the ' +
-        'production app, and this is a faster window onto it. Same app, same build. ' +
-        'Reaching the project DATABASE from the local loop is a plan feature and the command says so ' +
-        'once at startup when your plan does not include it; deploying is unaffected on every plan. ' +
-        'To see the same app running on the platform instead of your machine, use `somewhere preview`. ' +
-        'Pass a command (e.g. `somewhere dev npm run dev`) to run it locally with platform env vars.',
-    )
+  program.command('dev')
+    .description('Frontend hot reload with API requests proxied to your deployed project. Backend code runs only after deploy or preview.')
     .option('--project <id>', 'Override project ID')
-    .option('--cloud', 'Alias for `somewhere preview`')
-    .option('--publish-first', 'Only with `--cloud`: see `somewhere preview --help`')
-    .option('--port <port>', 'Port to serve on (default 8787)')
-    .option('--open', 'Open the app in your browser once it is serving')
-    .option(
-      '--check',
-      'Typecheck (tsc --noEmit) before starting and EXIT on type errors instead of warning. Needs `npm install` in this directory — tsc reads package types out of node_modules, which the CLI\'s own dependency cache does not stand in for.',
-    )
-    .option('--local', 'Accepted for compatibility — serving locally is what bare `somewhere dev` already does')
-    .action(
-      async (
-        cmdParts: string[] | undefined,
-        opts: {
-          project?: string;
-          cloud?: boolean;
-          publishFirst?: boolean;
-          local?: boolean;
-          port?: string;
-          check?: boolean;
-          open?: boolean;
-        },
-      ) => {
-        // A passed command keeps the legacy local-exec behavior: run YOUR
-        // server with platform context injected.
-        if (cmdParts && cmdParts.length > 0) {
-          return runLegacyExec(cmdParts);
-        }
-        if (opts.cloud) {
-          // Pre-launch alias. One line, then the identical loop — no ceremony,
-          // no grandfathering. `preview` is the name.
-          info('This is `somewhere preview`. Use that name — `--cloud` still works for now.');
-          return runHotDeploy(opts);
-        }
-        return runLocalDev(opts);
-      },
-    );
-}
-
-/**
- * The local loop. Compiles the project with the PLATFORM'S compiler (vendored,
- * drift-guarded — see src/local/compiler.ts), serves it on localhost, and runs
- * api/ functions in local Node against the real project.
- *
- * There is no dev version of your app. From the first file you are building
- * the production app; this is a faster window onto it.
- *
- * Reaching the project DATABASE from here is a plan entitlement the platform
- * reports on the project (`local_dev_db_allowed`). When it is refused, the loop
- * still runs — it just says so once, up front, instead of at the first request.
- */
-async function runLocalDev(opts: { project?: string; port?: string; check?: boolean; open?: boolean }) {
-  try {
-    assertNodeSupport();
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  const cwd = process.cwd();
-  const requestedPort = opts.port ? Number(opts.port) : undefined;
-  if (requestedPort !== undefined && (!Number.isInteger(requestedPort) || requestedPort <= 0 || requestedPort > 65535)) {
-    error(`Invalid --port: ${opts.port}`);
-    process.exit(1);
-  }
-  let port: number;
-  try {
-    const choice = await chooseDevPort(requestedPort);
-    port = choice.port;
-    if (choice.movedFrom !== null) {
-      info(`Port ${choice.movedFrom} is busy; using ${choice.port}.`);
-    }
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  const sources = collectFiles(cwd);
-  // The loop refuses only what it genuinely cannot serve. It used to refuse
-  // anything without a COMPILABLE entry, which locked out plain-JavaScript
-  // projects that deploy and serve perfectly (pfb_e32a4e630c45); the rule now
-  // matches deploy's — compile a compilable entry, serve everything else as
-  // written, and stop only when index.html asks for a file that is not here or
-  // when there is nothing to serve at all.
-  const devEntry = resolveDevEntry(sources.files);
-  const hasFunctions = Object.keys(sources.functions ?? {}).length > 0;
-  if (devEntry.kind === 'none') {
-    error(
-      `No app entry found. index.html points at ${devEntry.declared.join(', ')}, which is not in this directory. ` +
-        `An entry is a <script type="module" src="…"> naming a file that exists — ${ACCEPTED_ENTRY_FORMS}. ` +
-        'That tag is what the platform reads, here and on deploy.',
-    );
-    process.exit(1);
-  }
-  if (devEntry.kind === 'raw' && !devEntry.entry && sources.files['index.html'] === undefined && !hasFunctions) {
-    error(
-      'Nothing to serve here. `somewhere dev` runs this directory as your app: add an index.html with a ' +
-        `<script type="module" src="…"> entry (${ACCEPTED_ENTRY_FORMS}), or an api/ function.`,
-    );
-    process.exit(1);
-  }
-
-  let projectId = opts.project;
-  let config = loadProjectConfig();
-  if (!projectId) {
-    if (!config) {
-      error('No project linked. Run `somewhere init` or pass --project <id>.');
-      process.exit(1);
-    }
-    projectId = config.project_id;
-  }
-
-  // Node's type STRIPPING runs the functions, so a dropped import sails through
-  // and only crashes at request time. Surface it in the terminal first.
-  //
-  // Not when node_modules is absent, though. tsc then cannot resolve ANY
-  // package types and reports every JSX element as TS7026 — 47 red lines on
-  // the untouched init scaffold, none of them real, burying the two lines that
-  // matter and teaching a first-time developer that this command's type errors
-  // are noise (tsk_8796c588). The local loop's whole promise is that no
-  // install is needed to run; the typecheck simply needs one to be meaningful.
-  const hasModules = existsSync(join(cwd, 'node_modules'));
-  if (existsSync(join(cwd, 'tsconfig.json')) && hasModules) {
-    const spinner = ora('Typechecking (tsc --noEmit)...').start();
-    const result = await runTypecheck(cwd);
-    spinner.stop();
-    reportTypecheck(result);
-    if (!result.ok && opts.check) {
-      error('Type errors found and --check is set — not starting.');
-      process.exit(1);
-    }
-  } else if (opts.check) {
-    error(
-      hasModules
-        ? '--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).'
-        : '--check needs your dependencies installed — without node_modules tsc cannot resolve any package types. Run `npm install` here first.',
-    );
-    process.exit(1);
-  } else if (!hasModules) {
-    info(dim('Typecheck skipped — no node_modules here, so tsc could not resolve your package types. `npm install` enables it.'));
-  }
-
-  const token = getToken();
-  const client = new ApiClient(token);
-  await showProjectNotices(client, projectId);
-
-  let pkg: { dependencies?: Record<string, string> } = {};
-  try {
-    pkg = JSON.parse(sources.files['package.json'] ?? '{}') as { dependencies?: Record<string, string> };
-  } catch {
-    warn('package.json is not valid JSON — compiling with no declared dependencies.');
-  }
-
-  // VITE_*/REACT_APP_* values are compiled INTO the browser bundle, both here
-  // and on deploy. Read them from the same .env the local function runtime
-  // reads, so the bundle sees what a deploy of the same tree would see.
-  const localEnv = loadLocalEnv(cwd);
-
-  const spinner = ora('Preparing the compiler...').start();
-  let prepared = false;
-  const compiler = new LocalCompiler({
-    cwd,
-    viteEnv: localEnv,
-    onPrepare: (what) => {
-      prepared = true;
-      spinner.text = `Resolving ${what}...`;
-    },
-  });
-  let state = null;
-  try {
-    const { detectTailwind } = readCompileCore();
-    await compiler.prepare(pkg, detectTailwind(sources.files));
-    // Functions resolve packages from the SAME search path the compiler used,
-    // so `import { createClient } from '@somewhere-tech/sdk'` works in api/
-    // without a project npm install — the frontend already needed none, and a
-    // loop where only half the app can find its dependencies is worse than one
-    // where neither can (tsk_3269026d).
-    // Functions are optional: a static React app with no api/ still runs.
-    installLoader(cwd, compiler.moduleSearchPath);
-    await loadVendoredRuntime();
-    state = await prepareLocalProject(client, token, projectId, cwd, {
-      localOrigin: `http://localhost:${port}`,
-    });
-    spinner.stop();
-    if (prepared) success('Compiler ready — cached, so this only happens once.');
-    if (!state.routes.length) state = { ...state, routes: [] };
-  } catch (err) {
-    spinner.fail('Could not start');
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  // Said ONCE, after the loop is known to be startable and before the first
-  // request — never on every save, and never a reason not to serve. Placed
-  // after the start-failure handler above precisely so it cannot become one.
-  const dbNotice = localDevDbNotice(state.localDevDbAllowed, state.localDevDbPlans);
-  if (dbNotice) {
-    warn(dbNotice[0]);
-    for (const line of dbNotice.slice(1)) info(dim(line));
-  }
-
-  const latencies: number[] = [];
-  await startDevServer({
-    port,
-    cwd,
-    compiler,
-    state,
-    onRebuild: (ms) => {
-      latencies.push(ms);
-      if (latencies.length >= 5 && latencies.length % 5 === 0) {
-        const sorted = [...latencies].sort((a, b) => a - b);
-        console.log(
-          dim(`   save → served: median ${sorted[Math.floor(sorted.length / 2)]}ms over ${latencies.length} edits`),
-        );
+    .option('--port <port>', 'Local frontend port', '8787')
+    .option('--open', 'Open the local frontend in your browser')
+    .action(async (opts: { project?: string; port: string; open?: boolean }) => {
+      try {
+        const projectId = opts.project ?? loadProjectConfig()?.project_id;
+        if (!projectId) throw new Error('No project linked. Run somewhere init or pass --project <id>.');
+        const client = new ApiClient(getToken());
+        const target = await getDeployedProjectServingUrl(client, projectId);
+        await startFrontendDev(process.cwd(), target, Number(opts.port), opts.open);
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
       }
-    },
-    onListening: (url) => {
-      if (opts.open) open(url).catch(() => {});
-    },
-  });
-}
-
-async function runLocalRuntime(opts: { project?: string; port?: string; check?: boolean }) {
-  try {
-    assertNodeSupport();
-  } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-
-  const cwd = process.cwd();
-
-  // The local runtime runs functions through Node's TYPE STRIPPING, not a
-  // typechecker — a dropped import sails through here and only crashes at
-  // request time (the `sanitizeForSpeech is not defined` 500 class). Run an
-  // explicit typecheck pass first so the type error surfaces in the terminal
-  // BEFORE you hit the route. Needs the tsconfig `somewhere pull` scaffolds;
-  // skipped (with a hint) when absent so a bare `dev --local` still starts.
-  if (existsSync(join(cwd, 'tsconfig.json'))) {
-    const spinner = ora('Typechecking before local runtime (tsc --noEmit)...').start();
-    const result = await runTypecheck(cwd);
-    spinner.stop();
-    reportTypecheck(result);
-    if (!result.ok && opts.check) {
-      error('Type errors found and --check is set — not starting the local runtime.');
-      process.exit(1);
-    }
-    if (!result.ok) {
-      warn(
-        'Starting anyway — local runtime STRIPS types, so the above will crash at request time. ' +
-          'Fix them, or use `somewhere dev --local --check` to gate on a clean typecheck.',
-      );
-      console.log('');
-    }
-  } else if (opts.check) {
-    error('--check needs a tsconfig.json. Run `somewhere pull` here first (it scaffolds one).');
-    process.exit(1);
-  } else {
-    warn(
-      'No tsconfig.json — skipping the pre-start typecheck. Run `somewhere pull` to scaffold one ' +
-        'so type errors surface before runtime.',
-    );
-  }
-
-  let projectId = opts.project;
-  if (!projectId) {
-    const config = loadProjectConfig();
-    if (!config) {
-      error('No project linked. Run `somewhere init` or pass --project <id>.');
-      process.exit(1);
-    }
-    projectId = config.project_id;
-  }
-  const port = opts.port ? Number(opts.port) : 8787;
-  if (!Number.isInteger(port) || port <= 0 || port > 65535) {
-    error(`Invalid --port: ${opts.port}`);
-    process.exit(1);
-  }
-
-  const token = getToken();
-  const client = new ApiClient(token);
-  await showProjectNotices(client, projectId);
-  const spinner = ora('Loading project context (env keys, scopes, routes)...').start();
-  try {
-    installLoader(cwd);
-    await loadVendoredRuntime();
-    const state = await prepareLocalProject(client, token, projectId, cwd, {
-      localOrigin: `http://localhost:${port}`,
     });
-    spinner.stop();
-    if (state.routes.length === 0) {
-      error(
-        'No routable functions found — put a file under api/ (e.g. api/hello.ts) or a root catch-all ([...path].ts).',
-      );
-      process.exit(1);
-    }
-    success(
-      `${state.routes.length} function route${state.routes.length === 1 ? '' : 's'} · project ${state.subdomain} · env: ${state.localEnvKeys.length} local value${state.localEnvKeys.length === 1 ? '' : 's'}`,
-    );
-    // Re-typecheck on each save: the runtime strips types, so a dropped import
-    // would otherwise reload "clean" and only crash on the next request.
-    const hasTsconfig = existsSync(join(cwd, 'tsconfig.json'));
-    startLocalServer(state, {
-      port,
-      onReloadTypecheck: hasTsconfig
-        ? async () => {
-            const r = await runTypecheck(cwd);
-            reportTypecheck(r);
-          }
-        : undefined,
-    });
-  } catch (err) {
-    spinner.fail('Failed to start local runtime');
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
-}
-
-/**
- * The one line `somewhere dev` prints at startup when this plan cannot reach
- * the project database from the local loop — and `null`, meaning print nothing,
- * in every other case.
- *
- * Why it exists: a blind test on a fresh Free account (2026-09-02) wrote a whole
- * database-backed app locally before discovering, at the first request, that
- * every `sw.db` call was refused — and the refusal it eventually saw told it to
- * redeploy, which never helped. Saying it once, up front, is the difference
- * between choosing a workflow and debugging a phantom.
- *
- * THREE RULES, all deliberate:
- *   - Only an explicit `false` prints. `null` — an older platform, or a read
- *     that did not answer — must never print a refusal, because being wrong in
- *     that direction tells a working account its loop is broken.
- *   - It NEVER stops the loop. The frontend still compiles and serves, hot
- *     reload still works, `sw.fs` / `sw.ai` / `sw.auth` still call the real
- *     project, and every function that does not touch the database still runs.
- *     A dead loop would be a worse outcome than the silence it replaces.
- *   - The plan names come from the platform (`local_dev_db_required_plans`),
- *     never from a list typed here — so the day the entitlement changes, this
- *     line changes with it and no CLI release is required.
- */
-export function localDevDbNotice(
-  allowed: boolean | null,
-  plans: readonly string[] = [],
-): string[] | null {
-  if (allowed !== false) return null;
-  const named = plans.length > 0
-    ? ` It is included on the ${plans
-        .map((p) => (p.length === 0 ? p : p[0].toUpperCase() + p.slice(1)))
-        .reduce((acc, name, i, all) => (i === 0
-          ? name
-          : `${acc}${i === all.length - 1 ? ' and ' : ', '}${name}`), '')} plan${plans.length === 1 ? '' : 's'}.`
-    : '';
-  return [
-    `This plan does not include reaching the project database from \`somewhere dev\`.${named}`,
-    'Serving, hot reload and every function that does not touch the database work normally here.',
-    'Deploying is unaffected on every plan: `somewhere deploy` publishes to production and the deployed app reads and writes the database normally.',
-  ];
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
@@ -1359,54 +995,4 @@ function stamp(): string {
   const d = new Date();
   const p = (n: number) => String(n).padStart(2, '0');
   return `[${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}]`;
-}
-
-// ─── Legacy: `somewhere dev <cmd>` runs a local command with platform context.
-// Kept for anyone scripting against the old behavior; the no-arg form is the
-// recommended hot-deploy watcher above.
-async function runLegacyExec(cmdParts: string[]) {
-  const token = getToken();
-  const client = new ApiClient(token);
-  const config = loadProjectConfig();
-  if (!config) {
-    error('No project linked. Run `somewhere init` first.');
-    process.exit(1);
-  }
-
-  await showProjectNotices(client, config.project_id);
-  const spinner = ora('Loading project context from somewhere.tech...').start();
-  try {
-    const [result, servingUrl] = await Promise.all([
-      client.call<{ keys?: Array<{ key: string }>; vars?: Array<{ key: string }> }>(
-        'GET',
-        '/env',
-        undefined,
-        { project_id: config.project_id },
-      ),
-      getProjectServingUrl(client, config.project_id),
-    ]);
-    const vars = result.keys ?? result.vars ?? [];
-    spinner.stop();
-    success(`${vars.length} env vars available (values stay server-side)`);
-
-    const command = cmdParts.join(' ');
-    info(`Starting: ${dim(command)}`);
-    console.log('');
-
-    const child = spawn(command, {
-      shell: true,
-      stdio: 'inherit',
-      env: {
-        ...process.env,
-        SOMEWHERE_PROJECT_ID: config.project_id,
-        SOMEWHERE_SUBDOMAIN: config.subdomain,
-        ...(servingUrl ? { SOMEWHERE_URL: servingUrl } : {}),
-      },
-    });
-    child.on('exit', (code) => process.exit(code ?? 0));
-  } catch (err) {
-    spinner.fail('Failed to load project context');
-    error(err instanceof Error ? err.message : String(err));
-    process.exit(1);
-  }
 }

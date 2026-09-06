@@ -59,7 +59,7 @@ export function registerTypecheck(program: Command) {
     });
 }
 
-/** Print a typecheck verdict. Shared so `dev --local`/`--check` render identically. */
+/** Print the local TypeScript check verdict. */
 export function reportTypecheck(result: TypecheckResult): void {
   if (result.spawnError) {
     error(`Could not run the typechecker: ${result.spawnError}`);

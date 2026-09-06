@@ -58,22 +58,6 @@ export function previewCandidatesFromDeployment(
   });
 }
 
-/** "— included on the Pro and Scale plans", from whatever the platform named.
- *  Empty when it named nothing: better to say less than to guess a plan. */
-export function localDevDbPlanHint(plans: readonly string[] | undefined): string {
-  if (!plans || plans.length === 0) return '— `somewhere deploy` publishes on every plan';
-  const named = plans
-    .map((p) => (p.length === 0 ? p : p[0].toUpperCase() + p.slice(1)))
-    .reduce((acc, name, i, all) => (i === 0 ? name : `${acc}${i === all.length - 1 ? ' and ' : ', '}${name}`), '');
-  return `— included on the ${named} plan${plans.length === 1 ? '' : 's'}; \`somewhere deploy\` publishes on every plan`;
-}
-
-/** Codes the platform returns for "your plan does not include this", as
- *  opposed to "this project is broken". `CLOUD_DEV_NOT_ENABLED` is the one
- *  `somewhere dev --cloud` raises (see dev.ts); reaching this project's
- *  database from a local dev session is a paid feature. A plan fact is not a
- *  failure of the project, so it must not make `status` exit non-zero
- *  (tsk_f250e561). */
 const PLAN_ENTITLEMENT_CODES = new Set([
   'CLOUD_DEV_NOT_ENABLED',
   'FEATURE_NOT_ON_PLAN',
@@ -210,8 +194,6 @@ export function registerStatus(program: Command) {
         subdomain: string;
         slug?: string;
         updated_at?: string;
-        local_dev_db_allowed?: boolean;
-        local_dev_db_required_plans?: string[];
       } | null = null;
       let projectError: string | null = null;
       let deploymentStatus: Record<string, unknown> | null = null;
@@ -229,8 +211,6 @@ export function registerStatus(program: Command) {
           subdomain: string;
           slug?: string;
           updated_at?: string;
-          local_dev_db_allowed?: boolean;
-          local_dev_db_required_plans?: string[];
         }>('GET', `/projects/${encodeURIComponent(projectId)}`);
         projectStatus = p;
 
@@ -244,14 +224,7 @@ export function registerStatus(program: Command) {
           if (p.updated_at) {
             info(`Last deploy: ${timeAgo(p.updated_at)}`);
           }
-          // The `somewhere dev` question, answered here so it can be checked
-          // BEFORE a local-first workflow is chosen (tsk_4df056ea). Deploying is
-          // never gated by it, which is why the refused line says so.
-          if (typeof p.local_dev_db_allowed === 'boolean') {
-            info(p.local_dev_db_allowed
-              ? `Local dev database: available ${dim('— `somewhere dev` reads and writes this project\'s database')}`
-              : `Local dev database: not on this plan ${dim(localDevDbPlanHint(p.local_dev_db_required_plans))}`);
-          }
+
         }
       } catch (err) {
         projectError = err instanceof Error ? err.message : String(err);
@@ -361,18 +334,7 @@ export function registerStatus(program: Command) {
                 message: deploymentEntitlement.message,
                 deploy_affected: false,
               },
-          // Lifted to the top level so a script reads one key rather than
-          // knowing the project shape — and so this surface, the `somewhere dev`
-          // startup line and the platform's own refusal cannot drift apart.
-          // `null` = the platform did not say; it is never a refusal.
-          local_dev_db: projectStatus === null
-            || typeof projectStatus.local_dev_db_allowed !== 'boolean'
-            ? null
-            : {
-                allowed: projectStatus.local_dev_db_allowed,
-                required_plans: projectStatus.local_dev_db_required_plans ?? [],
-                deploy_affected: false,
-              },
+
         });
       } else {
         console.log('');

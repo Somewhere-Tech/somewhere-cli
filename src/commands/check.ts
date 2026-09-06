@@ -127,8 +127,7 @@ export function registerCheck(program: Command) {
         '"will this deploy succeed?" gate. Prints structured file:line errors. ' +
         'With --run <path> it compiles AND invokes one handler against inputs. ' +
         'Distinct from the LOCAL checks: `somewhere typecheck` runs `tsc --noEmit` on a pulled ' +
-        'tree on your machine, and `somewhere exec` / `run` execute against your real bindings ' +
-        'locally — `deploy-check` runs the actual server-side bundler that `deploy` uses, so it ' +
+        'tree on your machine. `deploy-check` runs the actual server-side compiler that `deploy` uses, so it ' +
         'catches what only the platform catches (cross-import resolution, bundling, bundled-deploy ' +
         'rejects). (Unrelated to `somewhere check`, which is the swpx npm-package verdict.)',
     )

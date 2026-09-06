@@ -27,12 +27,12 @@ import { createHash } from 'node:crypto';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-import { DevToolsSession, DEVTOOLS_COMMAND_TIMEOUT_MS, findBrowser } from '../dist/local/chrome.js';
+import { DevToolsSession, DEVTOOLS_COMMAND_TIMEOUT_MS, findBrowser } from '../dist/lib/chrome.js';
 import {
   assertLocalTargetReachable,
   isBrowserOwnFaviconRequest,
   runLocalBrowser,
-} from '../dist/local/browser-run.js';
+} from '../dist/lib/browser-run.js';
 
 const VIEWPORT = { width: 1280, height: 800 };
 

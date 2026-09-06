@@ -22,8 +22,8 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import test from 'node:test';
 
-import { findBrowser } from '../dist/local/chrome.js';
-import { isLoopbackUrl, runLocalBrowser } from '../dist/local/browser-run.js';
+import { findBrowser } from '../dist/lib/chrome.js';
+import { isLoopbackUrl, runLocalBrowser } from '../dist/lib/browser-run.js';
 
 /** Three buttons and two inputs — the page shape from the original report. */
 const FIXTURE_HTML = `<!doctype html>
