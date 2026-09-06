@@ -142,9 +142,9 @@ test('default green starter is a small typed frontend, function, and schema', ()
     'somewhere errors',
     'Reads issued together travel together',
     '`owner()` tables need no auth guard',
-    'somewhere advisor "<question>"',
     'somewhere docs <topic>',
     'https://somewhere.tech/start.txt',
+    'somewhere advisor "<question>"',
   ];
   let previous = -1;
   for (const marker of workflowOrder) {
