@@ -170,8 +170,11 @@ export async function callPlatformToolRaw(
   args: Record<string, unknown>,
   options: PlatformToolCallOptions = {},
 ): Promise<CallToolResult> {
+  const invocationArgs = ['job_create', 'ingest'].includes(name) && args.idempotency_key === undefined
+    ? { ...args, idempotency_key: crypto.randomUUID() }
+    : args;
   const result = await withPlatformClient(options, (client) =>
-    client.callTool({ name, arguments: args }));
+    client.callTool({ name, arguments: invocationArgs }));
   const typed = result as CallToolResult;
   if (typed.isError) {
     throw new PlatformToolError(name, toolErrorMessage(textFromResult(typed)));

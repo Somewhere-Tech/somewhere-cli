@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -46,6 +46,91 @@ function sendJson(res, payload) {
   res.setHeader('Content-Type', 'application/json');
   res.end(JSON.stringify(payload));
 }
+
+test('job creation retains one intent through auth renewal and separates new invocations', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-job-intent-home-'));
+  const calls = [];
+  let refreshes = 0;
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      if (req.url === '/keys/cli-pair/refresh') {
+        refreshes++;
+        sendJson(res, { ok: true, data: {
+          key: 'smt_renewed', refresh_token: 'smtr_rotated',
+          expires_at: '2099-01-01T00:00:00.000Z',
+        } });
+        return;
+      }
+      if (req.url === '/auth/whoami') {
+        if (req.headers.authorization === 'Bearer smt_renewed') {
+          sendJson(res, { ok: true, data: { user: { email: 'test@example.invalid' } } });
+        } else {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ ok: false, error: 'API_KEY_EXPIRED' }));
+        }
+        return;
+      }
+      if (!body) { res.statusCode = 202; res.end(); return; }
+      const rpc = JSON.parse(body);
+      if (rpc.method === 'initialize') {
+        sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: {
+          protocolVersion: '2024-11-05', capabilities: { tools: {} },
+          serverInfo: { name: 'job-intent-test', version: '1.0.0' },
+        } });
+      } else if (rpc.method === 'tools/call') {
+        calls.push(rpc.params);
+        if (req.headers.authorization === 'Bearer smt_expired') {
+          res.statusCode = 401;
+          res.setHeader('Content-Type', 'application/json');
+          res.end(JSON.stringify({ error: 'API_KEY_EXPIRED' }));
+        } else {
+          sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: {
+            content: [{ type: 'text', text: '{"id":"job_fixture"}' }],
+          } });
+        }
+      } else { res.statusCode = 202; res.end(); }
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  const invocations = [
+    ['job_create', { project_id: 'fixture', handler: 'https://fixture.invalid/api/job' }],
+    ['job_create', { project_id: 'fixture', handler: 'https://fixture.invalid/api/job' }],
+    ['ingest', { project_id: 'fixture', url: 'https://fixture.invalid/' }],
+    ['ingest', { project_id: 'fixture', url: 'https://fixture.invalid/', idempotency_key: 'caller-intent' }],
+    ['tasks_get', { project_id: 'fixture', task_id: 'task_fixture' }],
+  ];
+  try {
+    for (const [name, args] of invocations) {
+      writeConfig(home);
+      writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
+        token: 'smt_expired', refresh_token: 'smtr_valid',
+        user: { email: 'test@example.invalid', username: 'fixture' },
+      }));
+      const result = await run(['call', name, JSON.stringify(args), '--json'], {
+        HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: `${base}/mcp`, SOMEWHERE_API_URL: base,
+      });
+      assert.equal(result.status, 0, result.stderr);
+    }
+    assert.equal(refreshes, invocations.length);
+    assert.equal(calls.length, invocations.length * 2);
+    for (let i = 0; i < calls.length; i += 2) {
+      assert.deepEqual(calls[i], calls[i + 1], 'auth retry must preserve the exact intent and arguments');
+    }
+    const generated = [calls[0], calls[2], calls[4]].map((c) => c.arguments.idempotency_key);
+    for (const key of generated) assert.match(key, /^[0-9a-f-]{36}$/);
+    assert.equal(new Set(generated).size, 3, 'new invocations must remain independent');
+    assert.equal(calls[6].arguments.idempotency_key, 'caller-intent');
+    assert.equal(calls[8].arguments.idempotency_key, undefined, 'unrelated tools keep their existing schema');
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolve) => server.close(resolve));
+    rmSync(home, { recursive: true, force: true });
+  }
+});
 
 test('generic and Tier-1 commands are thin adapters over the full MCP tool surface', async () => {
   const home = mkdtempSync(join(tmpdir(), 'sw-platform-tools-home-'));
