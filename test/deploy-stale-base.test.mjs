@@ -939,7 +939,7 @@ test('a plain (non-json) deploy also persists the release_id anchor', async () =
       if (req.method === 'POST' && req.url === '/v1/deploy') {
         sendJson(res, 200, {
           ok: true,
-          data: { version: 1, active_release_id: 'rel_plain', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
+          data: { project_id: 'proj_stale_base', version: 1, active_release_id: 'rel_plain', files: 1, url: 'https://stale-base.somewhere.tech', has_functions: false },
         });
         return;
       }
@@ -949,6 +949,7 @@ test('a plain (non-json) deploy also persists the release_id anchor', async () =
     const env = { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: apiUrl };
     const result = await run(['deploy'], { cwd: fixtureDir, env });
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.match(result.stdout, /Project: proj_stale_base/);
     assert.equal(readProject(fixtureDir).last_deploy.release_id, 'rel_plain');
   });
 });

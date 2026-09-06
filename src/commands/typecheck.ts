@@ -5,6 +5,9 @@ import ora from '../lib/spinner.js';
 import { bold, dim, error, info, printJson, red, success, teal, warn } from '../lib/output.js';
 import { ensureDeclaredTypePackages, runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
 
+export const MISSING_TSCONFIG_GUIDANCE =
+  'For a new source app, run `somewhere init`. For an existing deployed app, run `somewhere pull`. Both create the TypeScript config this gate needs.';
+
 export function registerTypecheck(program: Command) {
   program
     .command('typecheck [dir]')
@@ -29,11 +32,7 @@ export function registerTypecheck(program: Command) {
           process.exit(1);
         }
         error('No tsconfig.json here to typecheck against.');
-        info(
-          dim(
-            'Run `somewhere pull` in this directory first — it scaffolds the tsconfig + package.json that this gate needs.',
-          ),
-        );
+        info(dim(MISSING_TSCONFIG_GUIDANCE));
         process.exit(1);
       }
 

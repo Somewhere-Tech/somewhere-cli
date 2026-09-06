@@ -23,7 +23,14 @@ const {
   typecheckArgs,
 } = await import(typecheckModule);
 const { buildScaffoldPackageJson, buildScaffoldTsconfig } = await import(scaffoldModule);
-const { reportTypecheck } = await import(typecheckCommandModule);
+const { MISSING_TSCONFIG_GUIDANCE, reportTypecheck } = await import(typecheckCommandModule);
+
+test('missing-config guidance distinguishes new source from an existing deployed app', () => {
+  assert.equal(
+    MISSING_TSCONFIG_GUIDANCE,
+    'For a new source app, run `somewhere init`. For an existing deployed app, run `somewhere pull`. Both create the TypeScript config this gate needs.',
+  );
+});
 
 test('typecheck verdict is advisory on errors and keeps the clean summary unchanged', (t) => {
   const stdout = [];

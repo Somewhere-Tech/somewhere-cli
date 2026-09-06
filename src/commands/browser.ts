@@ -520,7 +520,7 @@ export function registerBrowser(program: Command) {
     .option('--expect <assertion>', "Assert selector state: '#status:text=Ready', '#title:value=Kindred', '#dialog:visible=true', or '.row:count=2'. Repeatable.", collectExpect)
     .option('--actions <file.json>', 'Append the shared JSON action array, e.g. [{"fill":"#email","value":"a@b.co"},{"click":"#save"}], at this point in the command.', collectActionsFile)
     .option('--expect-request <path:status>', "Treat an observed request status as expected, e.g. --expect-request '/api/tasks:401'. Repeatable.", collectExpectedRequest)
-    .option('--screenshot [name]', 'Capture a screenshot and print its stored path. A name adds the shared {screenshot:name} action shorthand.')
+    .option('--screenshot [name]', 'Capture a screenshot. For a public URL, add --store to receive a short-lived link; without this flag, ordinary inspection can still return an inline capture. A name adds the shared {screenshot:name} action shorthand.')
     .option('--snapshot', 'Print the full interactive-element / DOM map, not just the count.')
     .option('--visible-only', 'Return only visible controls in the DOM outline; annotations remain on every returned node.')
     .option('--viewport <size>', 'desktop (default) or mobile.')
@@ -585,7 +585,7 @@ export function registerBrowser(program: Command) {
       const client = new ApiClient(getToken());
       // The endpoint can only store a screenshot on a project you own.
       if (opts.screenshot && !opts.store && !body.project_id && !(typeof body.url === 'string' && isLoopbackUrl(body.url))) {
-        error('--screenshot needs a project to store the image — pass --project (or a project URL you own).');
+        error('--screenshot on a public URL needs --store for a short-lived link. Run `somewhere browser <url> --screenshot --store`, or omit --screenshot for the ordinary inline inspection capture.');
         process.exit(1);
       }
 

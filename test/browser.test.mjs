@@ -68,6 +68,20 @@ test('buildBrowserBody: a URL positional becomes `url`', () => {
   });
 });
 
+test('public URL screenshot refusal gives the complete stored-link command and inline alternative', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-public-shot-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  lastRequest = null;
+
+  const result = await runCli(['browser', 'https://example.com', '--screenshot'], home);
+
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /somewhere browser <url> --screenshot --store/);
+  assert.match(result.stderr, /ordinary inline inspection capture/);
+  assert.equal(lastRequest, null);
+});
+
 test('buildBrowserBody: a non-URL positional becomes `project_id`', () => {
   assert.deepEqual(buildBrowserBody('my-app', {}), { project_id: 'my-app' });
 });

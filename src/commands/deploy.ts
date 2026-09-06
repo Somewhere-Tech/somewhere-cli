@@ -780,6 +780,7 @@ export function registerDeploy(program: Command) {
         // (audit #3: the old output printed "Functions deployed" + a static
         // count + "the other layer was left untouched" all at once).
         success(formatted.headline);
+        if (formatted.projectRef) info(`Project: ${teal(formatted.projectRef)}`);
 
         // Build log: entry chunk, chunks + sizes, functions + sizes (returned
         // by the worker since tsk_8af76ef9). Surface it instead of a bare
@@ -993,6 +994,7 @@ interface DeploySuccessFormatOptions {
 export interface FormattedDeploySuccess {
   staticFileCount: number | null;
   headline: string;
+  projectRef: string | null;
   liveUrl: string | null;
   liveMessage: string;
 }
@@ -1043,6 +1045,10 @@ export function formatDeploySuccess(
   return {
     staticFileCount,
     headline,
+    projectRef:
+      typeof result.project_id === 'string' && result.project_id.trim()
+        ? result.project_id.trim()
+        : null,
     liveUrl,
     liveMessage: liveUrl
       ? `Live at ${liveUrl}`

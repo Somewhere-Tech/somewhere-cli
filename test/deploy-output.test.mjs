@@ -37,6 +37,7 @@ test('formats the current release activation deploy response with its real count
 
   assert.equal(formatted.staticFileCount, 7);
   assert.equal(formatted.headline, '7 static files deployed (1 KB)');
+  assert.equal(formatted.projectRef, 'proj_release_v1');
   assert.equal(formatted.liveUrl, 'https://release-v1-app.somewhere.site');
   assert.equal(formatted.liveMessage, 'Live at https://release-v1-app.somewhere.site');
 });
@@ -60,6 +61,7 @@ test('does not construct a linked-project URL when the deploy response omits pro
 
   assert.equal(formatted.staticFileCount, 2);
   assert.equal(formatted.headline, '2 static files deployed (1 KB)');
+  assert.equal(formatted.projectRef, null);
   assert.equal(formatted.liveUrl, null);
   assert.equal(formatted.liveMessage, 'Deployed — check the dashboard for the live URL.');
 });
@@ -72,6 +74,7 @@ test('reports missing deploy fields honestly without rendering undefined', () =>
 
   assert.equal(formatted.staticFileCount, null);
   assert.equal(formatted.headline, 'Static files deployed (1 KB)');
+  assert.equal(formatted.projectRef, null);
   assert.equal(formatted.liveUrl, null);
   assert.equal(formatted.liveMessage, 'Deployed — check the dashboard for the live URL.');
   assert.doesNotMatch(JSON.stringify(formatted), /undefined/);
