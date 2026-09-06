@@ -1,6 +1,6 @@
 {
   "name": "@somewhere-tech/cli",
-  "version": "0.31.17",
+  "version": "0.31.18",
   "description": "CLI for somewhere.tech — auth, projects, deploy, pull, promote, db, logs, env, MCP bridge.",
   "keywords": [
     "somewhere",
