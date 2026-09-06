@@ -37,10 +37,10 @@ export default async function (_req, sw) {
 }
 \`\`\`
 
-Ask \`somewhere advisor "<question>"\` first for guidance. Then use
-\`somewhere docs <topic>\` for contracts or \`https://somewhere.tech/start.txt\`
-for quickstart. Without a shell: MCP \`advisor({ question })\`, then
-\`docs({ topic })\`; \`catalog\` finds tools.
+Ordinary lookups: \`somewhere docs <topic>\` or
+\`https://somewhere.tech/start.txt\`; uncertain architecture or composition:
+\`somewhere advisor "<question>"\`. Without a shell: MCP \`docs({ topic })\`,
+\`advisor({ question })\`; \`catalog\` finds tools.
 
 No account yet? \`npx @somewhere-tech/cli deploy\` publishes a temporary app and
 prints its live URL, claim URL, and expiry. On a hosted VM, after consent,
