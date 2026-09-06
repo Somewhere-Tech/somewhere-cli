@@ -133,9 +133,9 @@ test('default green starter is a small typed frontend, function, and schema', ()
 
   const workflowOrder = [
     'db/schema.ts',
-    'somewhere dev',
     'somewhere typecheck',
     'somewhere deploy',
+    'somewhere dev',
     'somewhere verify --url <live> --flow flow.json',
     'somewhere email test-inbox <addr>',
     'somewhere cron run <id>',
@@ -152,7 +152,7 @@ test('default green starter is a small typed frontend, function, and schema', ()
     assert.ok(next > previous, `${marker} must appear in workflow order`);
     previous = next;
   }
-  assert.match(agents, /Promise\.all\(\[/);
+  assert.match(agents, /Promise\.all/);
   assert.match(agents, /sw\.db\.from\('posts'/);
   assert.doesNotMatch(
     agents.slice(agents.indexOf('export default async function')),

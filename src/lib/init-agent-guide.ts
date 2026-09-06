@@ -5,32 +5,28 @@ export const AGENT_WORKFLOW = `## Getting started — use the whole workflow
 1. Declare every table in \`db/schema.ts\`. Choose \`owner()\` for per-user rows,
    \`shared()\` for intentional cross-user rows, or \`serverOnly()\` for trusted
    server access.
-2. Run the app locally with \`somewhere dev\`.
-3. Check TypeScript with \`somewhere typecheck\`.
-4. Deploy raw source with \`somewhere deploy\`; do not build first.
+2. Check TypeScript with \`somewhere typecheck\`.
+3. Deploy raw source with \`somewhere deploy\`; do not build first. That deploy
+   is your backend.
+4. Optional: \`somewhere dev\` for frontend hot reload against it.
 5. Verify the live flow with
    \`somewhere verify --url <live> --flow flow.json\`. One call runs the named
    steps, checks page/console/network health, and captures screenshots.
-6. For sign-in checks, read the project test inbox with
-   \`somewhere email test-inbox <addr>\`.
+6. For sign-in checks, read the test inbox: \`somewhere email test-inbox <addr>\`.
 7. Exercise a scheduled job now with \`somewhere cron run <id>\`.
-8. Diagnose with \`somewhere errors\`, which separates deliberate refusals from
-   exceptions; use \`somewhere logs\` for the full detail.
+8. Diagnose with \`somewhere errors\` (refusals vs exceptions); \`somewhere logs\`
+   has the full detail.
 
 ### Two habits that keep the app fast and scoped
 
-**Reads issued together travel together.** Start independent reads in one
-\`Promise.all\`:
-
-\`\`\`ts
-const [account, projects] = await Promise.all([
-  sw.db.from('accounts', { where: { id: accountId }, limit: 1 }),
-  sw.db.from('projects', { order: ['created_at', 'desc'], limit: 20 }),
-]);
-\`\`\`
+**Reads issued together travel together:** independent reads go in one
+\`Promise.all\` — one round trip, not one each.
 
 **\`owner()\` tables need no auth guard.** Structured queries already resolve the
-request identity and scope rows; do not query auth first just to protect them:
+request identity and scope rows; do not query auth first just to protect them.
+Scope: project isolation and row ownership on the structured API. Raw SQL and
+your own endpoints enforce their own caller policy; the platform cannot tell if
+a custom admin endpoint checks its caller:
 
 \`\`\`ts
 export default async function (_req, sw) {
@@ -48,8 +44,8 @@ for quickstart. Without a shell: MCP \`advisor({ question })\`, then
 
 No account yet? \`npx @somewhere-tech/cli deploy\` publishes a temporary app and
 prints its live URL, claim URL, and expiry. On a hosted VM, after consent,
-\`somewhere login\` prints a code for a human to approve in their browser and the
-machine stays signed in.`;
+\`somewhere login\` prints a code a human approves in their browser; the machine
+stays signed in.`;
 
 export const INIT_AGENTS_MD = `# somewhere.tech project contract\n\n${AGENT_WORKFLOW}\n`;
 export const INIT_CLAUDE_MD = 'Read AGENTS.md for project instructions.\n';
