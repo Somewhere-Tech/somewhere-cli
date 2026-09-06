@@ -80,7 +80,7 @@ test('typecheck verdict is advisory on errors and keeps the clean summary unchan
     raw: '',
   });
 
-  assert.deepEqual(stdout, ['✓ Typecheck clean (via bundled tsc) — safe to deploy.']);
+  assert.deepEqual(stdout, ['✓ Typecheck clean (via bundled tsc).']);
   assert.deepEqual(stderr, []);
 });
 

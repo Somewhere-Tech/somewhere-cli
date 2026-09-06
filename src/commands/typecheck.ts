@@ -12,8 +12,8 @@ export function registerTypecheck(program: Command) {
   program
     .command('typecheck [dir]')
     .description(
-      'Typecheck a source project with `tsc --noEmit` — the "is this safe to deploy?" gate. ' +
-        'Catches undefined symbols (a dropped import) and type errors with file:line BEFORE they 500 in production. ' +
+      'Check a source project with `tsc --noEmit`. ' +
+        'Reports TypeScript errors with file:line before deploy. ' +
         'Requires a local tsconfig.json; add one for a new app, or run `somewhere pull` for an existing deployed app.',
     )
     .option('--json', 'Print the raw typecheck result as JSON')
@@ -66,7 +66,7 @@ export function reportTypecheck(result: TypecheckResult): void {
   }
 
   if (result.ok) {
-    success(`Typecheck clean ${dim(`(via ${result.via} tsc)`)} — safe to deploy.`);
+    success(`Typecheck clean ${dim(`(via ${result.via} tsc)`)}.`);
     return;
   }
 
