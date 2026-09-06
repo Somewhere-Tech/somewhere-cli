@@ -6,15 +6,15 @@ import { bold, dim, error, info, printJson, red, success, teal, warn } from '../
 import { ensureDeclaredTypePackages, runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
 
 export const MISSING_TSCONFIG_GUIDANCE =
-  'For a new source app, run `somewhere init`. For an existing deployed app, run `somewhere pull`. Both create the TypeScript config this gate needs.';
+  'No tsconfig.json here to typecheck against. Add a local tsconfig.json for a new app, or run `somewhere pull` for an existing deployed app.';
 
 export function registerTypecheck(program: Command) {
   program
     .command('typecheck [dir]')
     .description(
-      'Typecheck a pulled project with `tsc --noEmit` — the "is this safe to deploy?" gate. ' +
+      'Typecheck a source project with `tsc --noEmit` — the "is this safe to deploy?" gate. ' +
         'Catches undefined symbols (a dropped import) and type errors with file:line BEFORE they 500 in production. ' +
-        'Run after `somewhere pull`, which scaffolds the tsconfig this uses.',
+        'Requires a local tsconfig.json; add one for a new app, or run `somewhere pull` for an existing deployed app.',
     )
     .option('--json', 'Print the raw typecheck result as JSON')
     .action(async (dirArg: string | undefined, opts) => {
@@ -27,12 +27,11 @@ export function registerTypecheck(program: Command) {
             errors: [],
             via: 'bundled',
             raw: '',
-            spawnError: 'No tsconfig.json here to typecheck against.',
+            spawnError: MISSING_TSCONFIG_GUIDANCE,
           });
           process.exit(1);
         }
-        error('No tsconfig.json here to typecheck against.');
-        info(dim(MISSING_TSCONFIG_GUIDANCE));
+        error(MISSING_TSCONFIG_GUIDANCE);
         process.exit(1);
       }
 

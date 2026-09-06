@@ -28,7 +28,7 @@ const { MISSING_TSCONFIG_GUIDANCE, reportTypecheck } = await import(typecheckCom
 test('missing-config guidance distinguishes new source from an existing deployed app', () => {
   assert.equal(
     MISSING_TSCONFIG_GUIDANCE,
-    'For a new source app, run `somewhere init`. For an existing deployed app, run `somewhere pull`. Both create the TypeScript config this gate needs.',
+    'No tsconfig.json here to typecheck against. Add a local tsconfig.json for a new app, or run `somewhere pull` for an existing deployed app.',
   );
 });
 
