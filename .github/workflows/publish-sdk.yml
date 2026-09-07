@@ -6,7 +6,7 @@
 #   secret and cannot be read back or copied out of GitHub. The SDK repo
 #   (Somewhere-Tech/somewhere-sdk-js) has its own publish.yml but NO secrets, so
 #   it cannot publish yet. This workflow borrows this repo's token to unblock the
-#   pre-launch 0.7.4 release.
+#   pre-launch 0.7.5 release.
 #
 # NO --provenance, deliberately:
 #   Provenance is an OIDC-signed attestation binding the tarball to the repo and
@@ -39,7 +39,7 @@ on:
       ref:
         description: 'Tag/SHA in Somewhere-Tech/somewhere-sdk-js to publish'
         required: true
-        default: 'v0.7.4'
+        default: '9a1a6424018cc3c1b60e79dc7905748ba3ea1fb1'
       dry_run:
         description: 'Dry run (no publish)'
         required: true
@@ -48,7 +48,7 @@ on:
         options: ['true', 'false']
 
 env:
-  PUBLISH_REF: 'v0.7.4'
+  PUBLISH_REF: '9a1a6424018cc3c1b60e79dc7905748ba3ea1fb1'
   DRY_RUN: 'false'
 
 permissions:
