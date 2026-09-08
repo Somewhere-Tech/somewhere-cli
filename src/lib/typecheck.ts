@@ -9,12 +9,14 @@
  *   3. `npx -y typescript` as a last resort
  */
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, readFileSync } from 'node:fs';
+import { existsSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { dirname, join } from 'node:path';
+import { dirname, join, relative } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SCAFFOLD_TSCONFIG_FILENAME } from './scaffold.js';
 import { TYPECHECK_TYPESCRIPT_VERSION } from './typecheck-version.js';
+import { prepareDeclaredData, type LocalDeclaredData } from './declared-data.js';
 
 export interface TypeError {
   file: string;
@@ -230,6 +232,12 @@ export function runTypecheck(
   projectDir: string,
   options: { installTypePackages?: TypePackageInstaller | false } = {},
 ): Promise<TypecheckResult> {
+  let declaredData: LocalDeclaredData | undefined;
+  try { declaredData = prepareDeclaredData(projectDir); }
+  catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return Promise.resolve({ ok: false, errors: [{ file: 'db/schema.ts', line: 1, column: 1, code: 'SCHEMA_DECLARATION_INVALID', message }], via: 'bundled', raw: message });
+  }
   // Declared type packages first, so the FIRST check is a real verdict rather
   // than a report that the tree is not installed yet.
   if (options.installTypePackages !== false) {
@@ -238,6 +246,35 @@ export function runTypecheck(
   const { command, args, via } = resolveTsc(projectDir);
   // --pretty false → stable, parseable one-line diagnostics regardless of TTY.
   const fullArgs = typecheckArgs(args);
+  let overlay: string | undefined;
+  if (declaredData) {
+    // TypeScript resolves JSONC, inherited configs and explicit files itself.
+    // Preserve that complete file set, adding only our declaration and schema.
+    const config = spawnSync(command, [...args, '--project', SCAFFOLD_TSCONFIG_FILENAME, '--showConfig'], {
+      cwd: projectDir, encoding: 'utf8', shell: /\.(cmd|bat)$/i.test(command),
+    });
+    if (config.error || config.status !== 0) {
+      return Promise.resolve({ ok: false, errors: [], via, raw: config.stdout + config.stderr,
+        ...(config.error ? { spawnError: config.error.message } : {}) });
+    }
+    try {
+      const parsed = JSON.parse(config.stdout) as { files?: unknown };
+      if (!Array.isArray(parsed.files) || !parsed.files.every((file): file is string => typeof file === 'string')) {
+        throw new Error('TypeScript did not return the project file list.');
+      }
+      overlay = join(projectDir, `.__somewhere_typecheck_${randomUUID()}.json`);
+      writeFileSync(overlay, JSON.stringify({
+        extends: './' + SCAFFOLD_TSCONFIG_FILENAME,
+        files: [...new Set([...parsed.files, relative(projectDir, declaredData.declarationPath), relative(projectDir, declaredData.schemaPath)])],
+        include: [], exclude: [],
+      }));
+      fullArgs[args.length + 1] = relative(projectDir, overlay);
+    } catch (error) {
+      if (overlay) rmSync(overlay, { force: true });
+      return Promise.resolve({ ok: false, errors: [], via, raw: error instanceof Error ? error.message : String(error) });
+    }
+  }
+  const cleanup = () => { if (overlay) rmSync(overlay, { force: true }); };
 
   return new Promise((resolve) => {
     let child;
@@ -253,6 +290,7 @@ export function runTypecheck(
         shell: /\.(cmd|bat)$/i.test(command),
       });
     } catch (err) {
+      cleanup();
       resolve({
         ok: false,
         errors: [],
@@ -268,15 +306,18 @@ export function runTypecheck(
     child.stderr?.on('data', (d: Buffer) => (out += d.toString()));
 
     child.on('error', (err: Error) => {
+      cleanup();
       resolve({ ok: false, errors: [], via, raw: out, spawnError: err.message });
     });
 
     child.on('close', (code: number | null) => {
+      cleanup();
       const allErrors = parseTscOutput(out);
       // Drop locally-unresolvable bare-import diagnostics (they resolve on
       // deploy via esm.sh) so they don't bury the real bugs. Undefined symbols
       // (TS2304) survive the filter.
-      const errors = allErrors.filter((e) => !UNRESOLVED_DEP_CODES.has(e.code));
+      const errors = allErrors.filter((e) => !UNRESOLVED_DEP_CODES.has(e.code)
+        || /['"]somewhere(?::data|\/db)['"]/.test(e.message));
 
       // tsc exits non-zero whenever it emits diagnostics. If it failed but we
       // parsed NONE (a config/crash failure, not type errors), don't claim

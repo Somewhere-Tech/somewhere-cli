@@ -1,7 +1,9 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
+import { realpathSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { declaredDataPlugin } from './declared-data.js';
 
 export interface FrontendDevServer {
   listen(): Promise<unknown>;
@@ -14,6 +16,7 @@ interface ViteModule {
 }
 
 export const FRONTEND_API_PATH = '^/api(?:/|\\?|$)';
+export const FRONTEND_DATA_PATH = '^/__sw/data(?:\\?|$)';
 
 export function deployedOrigin(value: string): string {
   const url = new URL(value);
@@ -70,6 +73,9 @@ export function frontendProxy(target: string, localOrigin: string) {
 
 export async function startFrontendDev(cwd: string, target: string, port = 8787, open = false): Promise<FrontendDevServer> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be an integer from 1 through 65535.');
+  // Match Vite's resolved file identities, including macOS /var -> /private/var.
+  // Otherwise its file-loading check can skip transforms and serve raw source.
+  cwd = realpathSync(cwd);
   const origin = deployedOrigin(target);
   let vitePath: string;
   try { vitePath = createRequire(join(cwd, 'package.json')).resolve('vite'); }
@@ -80,14 +86,15 @@ export async function startFrontendDev(cwd: string, target: string, port = 8787,
   const server = await vite.createServer({
     root: cwd,
     server: { host: '127.0.0.1', port, strictPort: true, open: open ? localOrigin : false, cors: false },
-    plugins: [{
+    plugins: [declaredDataPlugin(cwd), {
       name: 'somewhere-deployed-api',
       // Existing framework plugins/config remain. This API selector must be
       // first, so an existing broad proxy cannot redirect these requests.
       configResolved(config: { server: { proxy?: Record<string, unknown> } }) {
         const others = { ...config.server.proxy };
         delete others[FRONTEND_API_PATH];
-        config.server.proxy = { [FRONTEND_API_PATH]: proxy, ...others };
+        delete others[FRONTEND_DATA_PATH];
+        config.server.proxy = { [FRONTEND_API_PATH]: proxy, [FRONTEND_DATA_PATH]: proxy, ...others };
       },
     }],
   });

@@ -5,12 +5,13 @@ import assert from 'node:assert/strict';
 import { createServer as httpServer, request as httpRequest } from 'node:http';
 import https from 'node:https';
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, symlinkSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import vm from 'node:vm';
 import ts from 'typescript';
 import { startFrontendDev } from '../dist/lib/frontend-dev.js';
+import { prepareDeclaredData } from '../dist/lib/declared-data.js';
 import { launchLocalBrowser, findBrowser } from '../dist/lib/chrome.js';
 
 const [viteRootArg, platformArg] = process.argv.slice(2);
@@ -51,6 +52,13 @@ try {
       const cookie = csrf(new Request(target + req.url, { method: req.method, headers }));
       observed.push({ url: req.url, headers: req.headers, body, policy, cookie });
       if (!policy.allowed || cookie.wouldBlock) { res.writeHead(403); res.end('actual policy denied'); return; }
+      if (req.url === '/__sw/data') {
+        const input = JSON.parse(body);
+        assert.equal(input.table, 'notes'); assert.equal(input.operation, 'list');
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ data: [{ id: 1, title: 'typed response' }], next: null, has_more: false }));
+        return;
+      }
       if (req.url === '/api/cookie') res.setHeader('Set-Cookie', ['__Host-token=synthetic-app-session; Path=/; Secure; HttpOnly; SameSite=Lax', 'scoped=synthetic-domain-cookie; Domain=fixture.somewhere.site; Path=/; Secure; HttpOnly; SameSite=Strict']);
       res.writeHead(req.url.startsWith('/api/write') ? 201 : 200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ body, cookie: req.headers.cookie ?? null, origin: req.headers.origin ?? null }));
@@ -68,7 +76,11 @@ try {
   const local = `http://localhost:${port}`;
   writeFileSync(join(temp, 'package.json'), JSON.stringify({ type: 'module', dependencies: { vite: '*' } }));
   writeFileSync(join(temp, 'index.html'), '<!doctype html><div id="app">frontend source</div>');
-  writeFileSync(join(temp, 'vite.config.mjs'), `export default { cacheDir: ${JSON.stringify(join(temp, 'vite-cache'))}, server: { proxy: { '/api': 'https://must-not-be-used.invalid' } } };`);
+  writeFileSync(join(temp, 'vite.config.mjs'), `export default { cacheDir: ${JSON.stringify(join(temp, 'vite-cache'))}, server: { proxy: { '/api': 'https://must-not-be-used.invalid', '^/__sw/data': 'https://must-not-be-used.invalid' } } };`);
+  mkdirSync(join(temp, 'db')); mkdirSync(join(temp, 'src'));
+  const schema = `export default schema({ notes: table({ id: id(), title: text() }, { scope: shared(), client: { read: true } }) });`;
+  writeFileSync(join(temp, 'db/schema.ts'), schema);
+  writeFileSync(join(temp, 'src/data-check.ts'), `import { data } from 'somewhere:data'; export const query = () => data.notes.list({ limit: 1 });`);
   symlinkSync(join(viteRoot, 'node_modules'), join(temp, 'node_modules'));
   server = await startFrontendDev(temp, target, port);
   assert.match((await send(port, '/')).data, /frontend source/);
@@ -81,7 +93,9 @@ try {
   assert.equal(last.headers['x-forwarded-host'], undefined); assert.equal(last.headers['x-sw-cors-authorized'], undefined);
   assert.equal(last.cookie.wouldBlock, false); assert.equal(last.policy.originAuthorized, true);
   const before = observed.length;
-  for (const headers of [{ origin: 'https://evil.invalid' }, { origin: 'null' }, { host: 'evil.invalid' }, { 'sec-fetch-site': 'cross-site' }]) assert.equal((await send(port, '/api/write', headers, 'POST')).status, 403);
+  for (const headers of [{ origin: 'https://evil.invalid' }, { origin: 'null' }, { host: 'evil.invalid' }, { 'sec-fetch-site': 'cross-site' }]) {
+    for (const path of ['/api/write', '/__sw/data']) assert.equal((await send(port, path, headers, 'POST')).status, 403);
+  }
   await send(port, '/v1/db/query'); await send(port, '/__sw_cap');
   assert.equal(observed.length, before, 'non-API or denied paths never reach deployed adapter');
 
@@ -93,6 +107,36 @@ try {
   assert.match(result.result.value.data.cookie, /__Host-token=synthetic-app-session/);
   assert.match(result.result.value.data.cookie, /scoped=synthetic-domain-cookie/);
   assert.doesNotMatch(result.result.value.visibleCookies, /synthetic-app-session|synthetic-domain-cookie/);
+  const moduleResponse = await send(port, '/src/data-check.ts');
+  assert.equal(moduleResponse.status, 200, moduleResponse.data);
+  assert.match(moduleResponse.headers['content-type'], /javascript/, moduleResponse.data);
+  assert.doesNotMatch(moduleResponse.data, /from ["']somewhere:data["']/, 'Vite must resolve the platform module to a local URL: ' + moduleResponse.data);
+  const networkFailures = [];
+  browser.session.on('Network.loadingFailed', event => networkFailures.push(event));
+  await browser.session.send('Network.enable');
+  const dataResult = await browser.session.send('Runtime.evaluate', { expression: `(async () => { const { query } = await import('/src/data-check.ts'); return query(); })()`, awaitPromise: true, returnByValue: true });
+  assert.equal(dataResult.result?.value?.data?.[0]?.title, 'typed response', JSON.stringify({ dataResult, networkFailures }));
+  const dataCall = observed.at(-1);
+  assert.equal(dataCall.url, '/__sw/data');
+  assert.equal(dataCall.headers.origin, target);
+  assert.match(dataCall.headers.cookie, /__Host-token=synthetic-app-session/);
+  assert.equal(dataCall.headers.authorization, undefined, 'no platform identity injected');
+  const firstDigest = JSON.parse(dataCall.body).contract;
+  assert.equal(firstDigest, prepareDeclaredData(temp).client.contract_digest);
+  writeFileSync(join(temp, 'db/schema.ts'), schema.replace('title: text()', 'title: number()'));
+  const schemaDeadline = Date.now() + 10000;
+  let schemaReloaded = false;
+  while (Date.now() < schemaDeadline) {
+    const declaration = readFileSync(join(temp, 'src/__somewhere_data.d.ts'), 'utf8');
+    if (declaration.includes('"title": number')) { schemaReloaded = true; break; }
+    await new Promise(resolve => setTimeout(resolve, 50));
+  }
+  assert.ok(schemaReloaded, 'schema file changes update local editor types');
+  const nextDigest = prepareDeclaredData(temp).client.contract_digest;
+  assert.notEqual(nextDigest, firstDigest);
+  const virtual = await send(port, '/@id/__x00__somewhere:data');
+  assert.equal(virtual.status, 200, virtual.data);
+  assert.ok(virtual.data.includes(nextDigest), 'actual Vite virtual module is regenerated after schema change');
   writeFileSync(join(temp, 'index.html'), '<!doctype html><div id="app">frontend changed</div>');
   const reloadDeadline = Date.now() + 10000;
   let reloaded = false;
