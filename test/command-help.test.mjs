@@ -38,7 +38,7 @@ test('every registered non-pass-through command owns its --help output', async (
     .split('\n')
     .slice(top.stdout.split('\n').findIndex((line) => line === 'Commands:') + 1)
     .map((line) => /^  ([a-z][a-z0-9-]*)\b/.exec(line)?.[1])
-    .filter((name) => name && !['npx', 'npm', 'help'].includes(name));
+    .filter((name) => name && name !== 'help');
 
   assert.ok(commands.includes('cron'));
   assert.ok(commands.includes('email'));
@@ -47,6 +47,20 @@ test('every registered non-pass-through command owns its --help output', async (
     assert.equal(result.status, 0, `${name}: ${result.stderr}`);
     assert.match(result.stdout, new RegExp(`^Usage: somewhere ${name}\\b`), name);
     assert.doesNotMatch(result.stdout, /^Usage: somewhere \[options\] \[command\]/, name);
+  }
+});
+
+test('retired npm wrapper commands are absent', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-command-retired-home-'));
+  const top = await run(['--help'], home);
+  assert.equal(top.status, 0, top.stderr);
+  assert.doesNotMatch(top.stdout, /^  (?:npm|npx|check)(?:\s|$)/m);
+  assert.doesNotMatch(top.stdout, /\bswpx\b|\bswpm\b/);
+
+  for (const command of ['npm', 'npx', 'check']) {
+    const result = await run([command, 'fixture'], home);
+    assert.notEqual(result.status, 0);
+    assert.match(result.stderr, new RegExp(`unknown command '${command}'`));
   }
 });
 

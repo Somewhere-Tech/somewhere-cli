@@ -129,7 +129,7 @@ export function registerCheck(program: Command) {
         'Distinct from the LOCAL checks: `somewhere typecheck` runs `tsc --noEmit` on a pulled ' +
         'tree on your machine. `deploy-check` runs the actual server-side compiler that `deploy` uses, so it ' +
         'catches what only the platform catches (cross-import resolution, bundling, bundled-deploy ' +
-        'rejects). (Unrelated to `somewhere check`, which is the swpx npm-package verdict.)',
+        'rejects).',
     )
     .option('--project <ref>', 'Project to check against (defaults to the linked project).')
     .option(

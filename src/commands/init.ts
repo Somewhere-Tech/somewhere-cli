@@ -151,7 +151,7 @@ export function registerInit(program: Command) {
         if (shouldScaffold) {
           const scaffold = writeInitScaffold(dir, createGreenTemplate());
           success(`Full-stack starter written (${scaffold.created.length} files)`);
-          info('Installing pinned dependencies with `somewhere npm install`…');
+          info('Installing pinned dependencies with `npm install`…');
           await installInitDependencies({ cwd: dir, quiet: false });
           success('Dependencies installed');
         } else {

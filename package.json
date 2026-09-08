@@ -23,9 +23,7 @@
   "bin": {
     "cli": "bin/somewhere.js",
     "somewhere": "bin/somewhere.js",
-    "sw": "bin/somewhere.js",
-    "swpx": "bin/swpx.js",
-    "swpm": "bin/swpm.js"
+    "sw": "bin/somewhere.js"
   },
   "files": [
     "LICENSE",

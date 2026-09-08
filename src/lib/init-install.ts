@@ -7,29 +7,15 @@ export interface InitInstallOptions {
 
 export type InitInstallRunner = (options: InitInstallOptions) => Promise<number>;
 
-/**
- * Run the same guarded install exposed as `somewhere npm install`. Re-entering
- * the current CLI keeps init on the swpm verdict path without assuming where a
- * globally or locally installed `somewhere` binary lives.
- */
+/** Install the generated starter with the system npm executable. */
 export function runInitInstall({ cwd, quiet }: InitInstallOptions): Promise<number> {
   return new Promise((resolve) => {
-    const child = spawn(
-      process.execPath,
-      [
-        ...process.execArgv,
-        process.argv[1],
-        'npm',
-        'install',
-        '--no-audit',
-        '--no-fund',
-      ],
-      {
-        cwd,
-        shell: false,
-        stdio: quiet ? 'ignore' : 'inherit',
-      },
-    );
+    const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
+    const child = spawn(command, ['install', '--no-audit', '--no-fund'], {
+      cwd,
+      shell: false,
+      stdio: quiet ? 'ignore' : 'inherit',
+    });
     child.once('error', () => resolve(127));
     child.once('exit', (code, signal) => resolve(signal ? 1 : code ?? 1));
   });
@@ -43,7 +29,7 @@ export async function installInitDependencies(
   if (exitCode !== 0) {
     throw new Error(
       `Starter files were written, but dependency installation exited ${exitCode}. ` +
-        'Run `somewhere npm install` in this directory, then try again.',
+        'Run `npm install` in this directory, then try again.',
     );
   }
 }

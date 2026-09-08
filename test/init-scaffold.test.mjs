@@ -209,7 +209,7 @@ test('init dependency installation is required for a green completion', async ()
       { cwd: '/fixture/app', quiet: false },
       async () => 9,
     ),
-    /somewhere npm install/,
+    /npm install/,
   );
 });
 

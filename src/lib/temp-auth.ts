@@ -78,7 +78,7 @@ interface Envelope<T> {
 
 /** Mint a temporary, no-login developer credential: GET the PoW challenge,
  *  solve it locally, POST the solution for a bearer key. `fetchImpl` is
- *  injectable (same DI seam as src/swpx/run-common.ts) so tests never touch
+ *  injectable so tests never touch
  *  the network. Throws a clear Error — including the server's own message
  *  where available — on any failure at either step. */
 export async function mintTempAccount(

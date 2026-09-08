@@ -3,20 +3,17 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NoticeContext, NoticeProvider } from './types.js';
 import { updateProvider } from './providers/update.js';
-// import { advisoryProvider } from './providers/advisory.js'; // dormant — see that file
 
 /** Registered notice sources. Add a provider here to surface a new kind of notice;
  *  it inherits the gate + stderr emission below, so it can never reach stdout,
- *  agent/piped output, or swpx/swpm verdict grading. */
+ *  or agent/piped output. */
 const PROVIDERS: NoticeProvider[] = [updateProvider];
 
-/** `somewhere <sub>` forms that must stay silent: the verdict/safety pass-throughs
- *  (their own bins already bypass this entry, but `somewhere swpx …` reaches here)
- *  and the machine-oriented npx/npm aliases. */
-const SKIP_SUBCOMMANDS = new Set(['swpx', 'swpm', 'x', 'm', 'npx', 'npm', 'update']);
+/** Commands that manage the CLI update own their terminal output. */
+const SKIP_SUBCOMMANDS = new Set(['update']);
 
-/** Commands that own their output or run in a safety-sensitive pass-through
- * stay silent. In particular, an `update` process keeps its old in-memory
+/** Commands that own their output stay silent. In particular, an `update`
+ * process keeps its old in-memory
  * version after installing the new package, so its generic exit notice would
  * otherwise repeat the update that just succeeded. */
 export function subcommandSuppressesNotifications(argv: string[]): boolean {

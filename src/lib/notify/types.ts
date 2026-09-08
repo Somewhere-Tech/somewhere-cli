@@ -1,14 +1,13 @@
 /** The user-notification pipeline.
  *
  *  A `NoticeProvider` is a source of an out-of-band, user-facing message — "a new
- *  CLI version is out", "a package you ran through swpx now has an advisory", a
- *  one-off announcement, etc. The pipeline (see ./index.ts) runs every registered
+ *  CLI version is out", a one-off announcement, etc. The pipeline (see
+ *  ./index.ts) runs every registered
  *  provider behind a SINGLE central gate and emits the results to stderr as a
  *  parting line after the command. That gate is the safety contract: providers
  *  only run for interactive (TTY) `somewhere` invocations that are not CI, not a
- *  pass-through/safety command (swpx/swpm), and not opted out. So a notice can
- *  never reach stdout, agent/piped output, or the swpx/swpm verdict grading —
- *  adding a provider cannot trip up our own safety output. */
+ *  command with owned output, and not opted out. A notice can never reach stdout
+ *  or agent/piped output. */
 export interface NoticeContext {
   /** The full process argv, so a provider can branch on the subcommand if needed. */
   argv: string[];

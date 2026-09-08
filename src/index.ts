@@ -28,7 +28,6 @@ import { registerCheck } from './commands/check.js';
 import { registerApi } from './commands/api.js';
 import { registerFs } from './commands/fs.js';
 import { registerMcp } from './commands/mcp.js';
-import { registerSwpx } from './commands/swpx.js';
 import { registerUpdate } from './commands/update.js';
 import { registerCall } from './commands/call.js';
 import { registerTasks } from './commands/tasks.js';
@@ -52,27 +51,21 @@ const program = new Command()
   .description('CLI for somewhere.tech')
   .version(pkg.version);
 
-const passThroughCommand = process.argv[2] === 'npx' || process.argv[2] === 'npm';
 recordLastRun(process.argv.slice(2));
-const jsonOutputRequested = !passThroughCommand && process.argv.includes('--json');
+const jsonOutputRequested = process.argv.includes('--json');
 setJsonOutputMode(jsonOutputRequested);
 
 // First output of every interactive command — see lib/startup-notice.ts.
 const notice = startupNotice(pkg.version, {
   isTTY: Boolean(process.stdout.isTTY),
   jsonOutput: jsonOutputRequested,
-  passThrough: passThroughCommand,
+  passThrough: false,
 });
 if (notice) process.stderr.write(notice + '\n');
 if (jsonOutputRequested) {
   program.exitOverride();
   program.configureOutput({ writeErr: () => {} });
 }
-
-// Required so the npx/npm pass-through commands can forward unknown flags to the
-// wrapped tool (passThroughOptions). Only affects program-level option ordering
-// (global -V/--version/--help still work); each subcommand parses as before.
-program.enablePositionalOptions();
 
 registerAuth(program);
 registerInit(program);
@@ -101,7 +94,6 @@ registerCheck(program);
 registerApi(program);
 registerFs(program);
 registerMcp(program);
-registerSwpx(program);
 registerUpdate(program);
 registerCall(program);
 registerTasks(program);
@@ -114,8 +106,8 @@ registerEmail(program);
 
 // User-notification pipeline (update-available, advisories, announcements…).
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to
-// STDERR as a parting line AFTER the command — never stdout, agent, or swpx/swpm
-// safety output. Fail-open: collectNotices swallows all errors.
+// STDERR as a parting line AFTER the command, never stdout or agent output.
+// Fail-open: collectNotices swallows all errors.
 //
 // Do NOT await this before parsing — the once-a-day cache-refresh fetch would add
 // startup latency to every command. Kick it off, parse immediately; if it resolves

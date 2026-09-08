@@ -31,9 +31,7 @@
       "bin": {
         "cli": "bin/somewhere.js",
         "somewhere": "bin/somewhere.js",
-        "sw": "bin/somewhere.js",
-        "swpm": "bin/swpm.js",
-        "swpx": "bin/swpx.js"
+        "sw": "bin/somewhere.js"
       },
       "devDependencies": {
         "@types/node": "^22.19.21",
