@@ -29,7 +29,7 @@ somewhere logs           # Stream logs
 somewhere open           # Open in browser
 ```
 
-The CLI needs no MCP setup: every command works from the shell, and `somewhere run <script>` executes code against your live project. `somewhere init` also writes a `.mcp.json` so hosts that read it (Claude Code, Codex) can additionally connect the same tools in context — optional, not required. Just start coding.
+The CLI needs no MCP setup: every command works from the shell, and `somewhere run <script>` executes code against your live project. `somewhere init` also writes a `.mcp.json` so supporting hosts can additionally connect the same tools in context — optional, not required. Just start coding.
 
 ## Commands
 
@@ -91,7 +91,7 @@ The CLI configures every MCP host (Claude Code, Cursor, Codex) to use the **stdi
 `somewhere init` creates a project on the platform and writes two files:
 
 - **`.somewhere.json`** — project ID, name, subdomain. The CLI reads this to know which project you're working on.
-- **`.mcp.json`** — optional MCP server config pointing at the `somewhere mcp` stdio bridge. Hosts that read it (Claude Code, Codex) connect the same tools in context using your live login; the CLI itself never needs it. No token baked into the file, no manual config.
+- **`.mcp.json`** — optional MCP server config pointing at the `somewhere mcp` stdio bridge. Supporting hosts connect the same tools in context using your live login; the CLI itself never needs it. No token baked into the file, no manual config.
 
 After init, `claude "build me a booking app"` works immediately.
 
