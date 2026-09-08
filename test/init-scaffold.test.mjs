@@ -1,8 +1,10 @@
 import assert from 'node:assert/strict';
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,7 +16,7 @@ import ts from 'typescript';
 const moduleRoot = process.env.SOMEWHERE_TEST_SOURCE ? '../src' : '../dist';
 const { canWriteInitScaffold, writeInitScaffold } =
   await import(`${moduleRoot}/lib/init-scaffold.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
-const { installInitDependencies } =
+const { initInstallSpawnSpec, installInitDependencies, runInitInstall } =
   await import(`${moduleRoot}/lib/init-install.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createGreenTemplate } =
   await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
@@ -211,6 +213,47 @@ test('init dependency installation is required for a green completion', async ()
     ),
     /npm install/,
   );
+});
+
+test('init launches npm with platform-correct command and literal arguments', async () => {
+  assert.deepEqual(initInstallSpawnSpec('linux'), {
+    command: 'npm',
+    args: ['install', '--no-audit', '--no-fund'],
+    shell: false,
+  });
+  assert.deepEqual(initInstallSpawnSpec('win32'), {
+    command: 'npm.cmd',
+    args: ['install', '--no-audit', '--no-fund'],
+    shell: true,
+  });
+
+  const dir = tempDir();
+  const fakeBin = join(dir, 'fake-bin');
+  const app = join(dir, 'starter with spaces');
+  const record = join(dir, 'npm-call.json');
+  mkdirSync(fakeBin);
+  mkdirSync(app);
+  const fakeNpm = join(fakeBin, 'npm');
+  writeFileSync(fakeNpm, `#!/bin/sh\nprintf '{"cwd":"%s","args":"%s"}\\n' "$PWD" "$*" > "$SOMEWHERE_FAKE_NPM_RECORD"\n`);
+  chmodSync(fakeNpm, 0o755);
+
+  const previousPath = process.env.PATH;
+  const previousRecord = process.env.SOMEWHERE_FAKE_NPM_RECORD;
+  process.env.PATH = `${fakeBin}:${previousPath ?? ''}`;
+  process.env.SOMEWHERE_FAKE_NPM_RECORD = record;
+  try {
+    assert.equal(await runInitInstall({ cwd: app, quiet: true }), 0);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    if (previousRecord === undefined) delete process.env.SOMEWHERE_FAKE_NPM_RECORD;
+    else process.env.SOMEWHERE_FAKE_NPM_RECORD = previousRecord;
+  }
+
+  assert.deepEqual(JSON.parse(readFileSync(record, 'utf8')), {
+    cwd: realpathSync(app),
+    args: 'install --no-audit --no-fund',
+  });
 });
 
 test('one generated template consumes the SDK auth adapter and server data/files contract', () => {

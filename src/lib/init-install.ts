@@ -7,13 +7,27 @@ export interface InitInstallOptions {
 
 export type InitInstallRunner = (options: InitInstallOptions) => Promise<number>;
 
+export interface InitInstallSpawnSpec {
+  command: string;
+  args: string[];
+  shell: boolean;
+}
+
+export function initInstallSpawnSpec(platform: NodeJS.Platform): InitInstallSpawnSpec {
+  return {
+    command: platform === 'win32' ? 'npm.cmd' : 'npm',
+    args: ['install', '--no-audit', '--no-fund'],
+    shell: platform === 'win32',
+  };
+}
+
 /** Install the generated starter with the system npm executable. */
 export function runInitInstall({ cwd, quiet }: InitInstallOptions): Promise<number> {
   return new Promise((resolve) => {
-    const command = process.platform === 'win32' ? 'npm.cmd' : 'npm';
-    const child = spawn(command, ['install', '--no-audit', '--no-fund'], {
+    const spec = initInstallSpawnSpec(process.platform);
+    const child = spawn(spec.command, spec.args, {
       cwd,
-      shell: false,
+      shell: spec.shell,
       stdio: quiet ? 'ignore' : 'inherit',
     });
     child.once('error', () => resolve(127));
