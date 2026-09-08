@@ -28,6 +28,17 @@ interface TaskListOptions extends ProjectOptions {
   full?: boolean;
   limit?: string;
   offset?: string;
+  cursor?: string;
+}
+
+interface TaskReadOptions extends ProjectOptions {
+  view?: string;
+  kind?: string;
+  field?: string;
+  eventId?: string;
+  cursor?: string;
+  offset?: string;
+  limit?: string;
 }
 
 interface TaskWriteOptions extends ProjectOptions {
@@ -123,7 +134,8 @@ export function registerTasks(program: Command): void {
     .option('--sort <sort>', 'Sort by priority, updated, or created')
     .option('--full', 'Return complete descriptions')
     .option('--limit <n>', 'Maximum rows')
-    .option('--offset <n>', 'Rows to skip')
+    .option('--offset <n>', 'Fresh row offset; prefer cursor for continuation')
+    .option('--cursor <cursor>', 'next_cursor from the previous page; repeat filters')
     .option('--json', 'Print the complete response as JSON')
     .action(async (opts: TaskListOptions) => {
       const args = compactRecord([
@@ -140,24 +152,43 @@ export function registerTasks(program: Command): void {
         ['detail', opts.full ? 'full' : undefined],
         ['limit', numberOption(opts.limit)],
         ['offset', numberOption(opts.offset)],
+        ['cursor', opts.cursor],
       ]);
       await runTaskTool('tasks_list', args, opts.json, (value) => {
         const rows = taskRows(value);
         if (rows.length === 0) console.log(dim('No matching tasks.'));
         else table(['ID', 'Title', 'Status', 'Priority', 'Updated'], rows);
+        if (isRecord(value) && isRecord(value.page)) {
+          const page = value.page;
+          console.log(dim(`Showing ${page.count} of ${page.total}. Order: ${page.order ?? 'unspecified'}`));
+          if (page.consistency) console.log(dim(String(page.consistency)));
+          if (page.next_cursor) console.log(`Next page: repeat this command's filters with --cursor '${page.next_cursor}'`);
+        }
+        const data = unwrapPlatformData(value);
+        if (Array.isArray(data) && data.some(row => isRecord(row) && (row.omitted || row.description_truncated))) {
+          console.log(dim('Some fields are partial. Read a task with tasks get <id>; expand a field with --view field --field <name>. --json includes omission details.'));
+        }
       });
     });
 
   tasks
     .command('get <task-id>')
-    .description('Get one task with comments, activity, and relationships')
+    .description('Get current task state; retrieve history or long fields explicitly')
     .option('-p, --project <project>', 'Project slug or ID; defaults to the linked project')
+    .option('--view <view>', 'current (default), history, field, or full (unbounded)')
+    .option('--kind <kind>', 'comments (default) or activity for history')
+    .option('--field <field>', 'Top-level field to expand with --view field')
+    .option('--event-id <id>', 'History event whose field to expand; repeat --kind')
+    .option('--cursor <cursor>', 'next_cursor from previous read; repeat view and field/kind')
+    .option('--offset <n>', 'Fresh offset; prefer cursor for checked continuation')
+    .option('--limit <n>', 'History page size (default 5, cap 20)')
     .option('--json', 'Print the complete response as JSON')
-    .action(async (taskId: string, opts: ProjectOptions) => {
-      await runTaskTool('tasks_get', {
-        project_id: resolveProjectRef(opts.project),
-        task_id: taskId,
-      }, opts.json, (value) => printJson(unwrapPlatformData(value)));
+    .action(async (taskId: string, opts: TaskReadOptions) => {
+      await runTaskTool('tasks_get', compactRecord([
+        ['project_id', resolveProjectRef(opts.project)], ['task_id', taskId],
+        ['view', opts.view], ['kind', opts.kind], ['field', opts.field], ['event_id', opts.eventId],
+        ['cursor', opts.cursor], ['offset', numberOption(opts.offset)], ['limit', numberOption(opts.limit)],
+      ]), opts.json, (value) => printJson(unwrapPlatformData(value)));
     });
 
   tasks
