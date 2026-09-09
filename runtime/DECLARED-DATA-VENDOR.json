@@ -5,9 +5,9 @@
     "worker/containers/compile/schema-types.cjs": "3af28d0bc0e1171fc8b1e75d81080c4d3a2aba901331ecd095a8d60f01272fad",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
     "worker/src/utils/authority/scope-enforcement.ts": "af266f61606b5253d77ab9277d892dfd0e12e19ef2e9c10f735bd1bb4915655a",
-    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "5fe95b166dd3939a675cd5e8cbd79989c2fade43840be6af735a3b418f7424ca",
+    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "3438ca54739a13ce0d0b2fc2c01b82f1dc1bea637151732aca78aeb5f6110b5e",
     "worker/src/utils/db-schema-deploy/client-permissions.ts": "77e375bb4947aff5a04a7f73a842b7a901bec4221f3fd683eaba8023dd83765c",
     "worker/src/utils/db-schema-deploy/extract-schema-ts.ts": "3d91b4d8f18cbf22b805a226f62cd3a9c7033379c9d01a89824da1609b2b5844"
   },
-  "sha256": "ea79ee852b7d0f7e3a24885d7a02d80633903d5c7171a69a340673d5bf28dede"
+  "sha256": "be6d6802311d0ea8310ef28db8be891a1841df7d6c28420449461956f3b1c22c"
 }

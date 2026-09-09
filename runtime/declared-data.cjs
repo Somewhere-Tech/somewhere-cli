@@ -1416,11 +1416,14 @@ function canonicalTableShape(t) {
 // worker/src/utils/db-schema-deploy/client-contract-source.ts
 var import_declared_data_contract = __toESM(require_declared_data_contract());
 function clientAuthorityFromSource(files) {
+  const authority = schemaAuthorityFromSource(files);
+  return Object.values(authority?.schema ?? {}).some((table) => table.client !== void 0) ? authority : void 0;
+}
+function schemaAuthorityFromSource(files) {
   const source = files["db/schema.ts"];
   if (source === void 0) return void 0;
   const parsed = extractSchemaTs(source);
   if (!parsed.ok) throw new Error(`Invalid db/schema.ts: ${parsed.errors.join(" ")}`);
-  if (!parsed.declaration.tables.some((table) => table.client !== void 0)) return void 0;
   const schema = /* @__PURE__ */ Object.create(null);
   const intents = /* @__PURE__ */ Object.create(null);
   const scopes = /* @__PURE__ */ Object.create(null);

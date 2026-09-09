@@ -8,6 +8,7 @@ import { join } from 'node:path';
 import { DATA_VIRTUAL_ID, DATA_DECLARATION_FILE, declaredDataPlugin, prepareDeclaredData } from '../dist/lib/declared-data.js';
 import { FRONTEND_DATA_PATH, frontendProxy } from '../dist/lib/frontend-dev.js';
 import { runTypecheck } from '../dist/lib/typecheck.js';
+import { collectFiles } from '../dist/lib/files.js';
 
 const schema = `export default schema({
   notes: table({ id: id(), title: text(), optional: text({ nullable: true }), enabled: boolean({ default: true }), secret: text({ default: 'hidden' }) }, {
@@ -17,6 +18,16 @@ const schema = `export default schema({
   internal: table({ id: id(), secret: text() }, { scope: serverOnly() }),
 });`;
 const compilerOptions = { strict: true, skipLibCheck: false, target: 'ES2022', module: 'ESNext', moduleResolution: 'Bundler' };
+test('deploy carries schema source without generated editor declarations, preserving authored declarations', t => {
+  const root = fixture(t);
+  prepareDeclaredData(root);
+  let collected = collectFiles(root);
+  assert.equal(collected.files['db/schema.ts'], schema);
+  assert.equal(collected.files['src/' + DATA_DECLARATION_FILE], undefined);
+  writeFileSync(join(root, 'src', DATA_DECLARATION_FILE), 'declare const authored: string;');
+  collected = collectFiles(root);
+  assert.equal(collected.files['src/' + DATA_DECLARATION_FILE], 'declare const authored: string;');
+});
 function fixture(t, files = {}) {
   const root = mkdtempSync(join(tmpdir(), 'sw-declared-data-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
