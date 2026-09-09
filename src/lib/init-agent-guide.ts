@@ -2,9 +2,9 @@
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — use the whole workflow
 
-1. Declare every table in \`db/schema.ts\`. Choose \`owner()\` for per-user rows,
-   \`shared()\` for intentional cross-user rows, or \`serverOnly()\` for trusted
-   server access.
+1. Declare every table in \`db/schema.ts\`. Choose \`owner()\` (own rows), \`shared()\`
+   (cross-user rows) or \`serverOnly()\`, plus a \`client\` block for browser
+   columns (docs: declared-data).
 2. Check TypeScript with \`somewhere typecheck\`.
 3. Deploy raw source with \`somewhere deploy\`; do not build first. That deploy
    is your backend.
