@@ -1,4 +1,4 @@
-import { readFileSync, writeFileSync } from 'node:fs';
+import { writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { Command } from 'commander';
 import ora from '../lib/spinner.js';
@@ -12,22 +12,6 @@ interface QueryResult {
   data: Array<Record<string, unknown>>;
   changes: number;
   duration_ms?: number;
-}
-
-interface ApplySchemaResult {
-  applied?: boolean;
-  no_op?: boolean;
-  report_lines?: unknown;
-  reportLines?: unknown;
-}
-
-function schemaReportLines(result: ApplySchemaResult): string[] {
-  const candidate = Array.isArray(result.report_lines)
-    ? result.report_lines
-    : Array.isArray(result.reportLines)
-      ? result.reportLines
-      : [];
-  return candidate.filter((line): line is string => typeof line === 'string' && line.trim().length > 0);
 }
 
 export function registerDb(program: Command) {
@@ -101,63 +85,15 @@ export function registerDb(program: Command) {
     });
 
   db
-    .command('apply-schema [path]')
-    .description('Apply db/schema.ts to the project database without publishing the app')
-    .option('--project <id>', 'Project ID (defaults to .somewhere.json)')
-    .option('--json', 'Print the raw apply result')
-    .action(async (
-      schemaPath: string | undefined,
-      opts: { project?: string; json?: boolean },
-    ) => {
-      let projectId: string | undefined = opts.project;
-      if (!projectId) {
-        const config = loadProjectConfig();
-        if (!config) {
-          error('No project specified and no .somewhere.json found. Pass --project <id>.');
-          process.exit(1);
-        }
-        projectId = config.project_id;
-      }
-
-      const requestedPath = schemaPath ?? 'db/schema.ts';
-      const absolutePath = resolve(process.cwd(), requestedPath);
-      let schemaModule: string;
-      try {
-        schemaModule = readFileSync(absolutePath, 'utf8');
-      } catch {
-        error(`Could not read ${requestedPath}. Pass the path to your managed schema file.`);
-        process.exit(1);
-      }
-
-      const client = new ApiClient(getToken());
-      const spinner = opts.json ? null : ora('Applying database schema…').start();
-      try {
-        const result = await client.call<ApplySchemaResult>('POST', '/db/schema/apply', {
-          project_id: projectId,
-          schema_source: schemaModule,
-          target: 'production',
-        });
-        spinner?.stop();
-        if (opts.json) {
-          printJson(result);
-          return;
-        }
-
-        if (result.applied === false || result.no_op === true) {
-          success('Database schema already matches — nothing changed.');
-        } else {
-          success('Database schema applied.');
-        }
-        for (const line of schemaReportLines(result)) info(dim(line));
-      } catch (err) {
-        spinner?.fail('Database schema was not applied');
-        if (err instanceof Error) {
-          error(err.message);
-        } else {
-          error(String(err));
-        }
-        process.exit(1);
-      }
+    .command('apply-schema [path]', { hidden: true })
+    .description('Retired: edit db/schema.ts and deploy the complete app source')
+    .option('--project <id>', 'Project ID')
+    .option('--json', 'Print the retirement error as JSON')
+    .action((_schemaPath: string | undefined, opts: { json?: boolean }) => {
+      const message = 'Standalone schema apply is retired. Edit db/schema.ts, then run somewhere deploy from the app root with the complete app source (or create a preview). Schema changes are applied with that release. Nothing was changed.';
+      if (opts.json) printJson({ ok: false, error: 'SCHEMA_APPLY_RETIRED', message });
+      else error(`SCHEMA_APPLY_RETIRED: ${message}`);
+      process.exitCode = 1;
     });
 
   db
