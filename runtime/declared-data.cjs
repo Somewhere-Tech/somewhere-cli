@@ -87,9 +87,12 @@ var require_declared_data_contract = __commonJS({
         if (!["scoped", "shared", "member"].includes(intent)) fail(`${name} intent`);
         const owner = intent === "scoped" ? scopes[name] : null;
         if (intent === "scoped" && (typeof owner !== "string" || !identifier.test(owner))) fail(`${name} owner`);
+        const author = intent === "shared" ? table.author : null;
+        if (intent === "shared" && (author !== "_sw_author_id" || !columns.some((column) => column.n === author && column.t === "text" && column.nul === 1))) fail(`${name} author`);
+        if (Array.isArray(read) && read.includes(author)) fail(`${name} internal author projection`);
         if (input.identity === "visitor" && intent !== "scoped") fail(`${name} visitor identity`);
         if (input.publicRead && !Array.isArray(read)) fail(`${name} public read`);
-        if ([...create || [], ...update || []].some((field) => field === pk || field === owner)) fail(`${name} identity writes`);
+        if ([...create || [], ...update || []].some((field) => field === pk || field === owner || field === author)) fail(`${name} identity writes`);
         let member = null;
         if (intent === "member") {
           record(table.member, `${name}.member`);
@@ -100,7 +103,7 @@ var require_declared_data_contract = __commonJS({
           if ((update || []).some((field) => g.includes(field))) fail(`${name} membership writes`);
           member = { g: [...g], m, u, mg: [...mg] };
         }
-        tables.push({ name, columns, client: { identity: input.identity, read, publicRead: input.publicRead, create, update, delete: input.delete }, primaryKey: pk, intent, owner, member });
+        tables.push({ name, columns, client: { identity: input.identity, read, publicRead: input.publicRead, create, update, delete: input.delete }, primaryKey: pk, intent, owner, author, member });
       }
       return JSON.stringify({ version: 1, tables });
     }
@@ -123,7 +126,7 @@ var require_declared_data_contract = __commonJS({
       const runtimeTables = [];
       for (const table of tables) {
         const { name, columns, client, primaryKey } = table;
-        const readable = client.read === true ? columns.map((column) => column.n) : client.read || [];
+        const readable = client.read === true ? columns.filter((column) => column.n !== table.author).map((column) => column.n) : client.read || [];
         const row = shape(columns, readable, "read");
         const id = columnType(columns.find((column) => column.n === primaryKey));
         const operations = [];
@@ -257,6 +260,9 @@ __export(declared_data_vendor_entry_exports, {
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
 
+// worker/src/utils/db-schema-deploy/schema-ownership.ts
+var SHARED_AUTHOR_COLUMN = "_sw_author_id";
+
 // worker/src/utils/db-schema-deploy/client-permissions.ts
 function parseClientPermissions(value, columns, scope) {
   const fail = (message) => ({ ok: false, message });
@@ -352,7 +358,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
   for (const c of columns) {
     if (c === null || typeof c !== "object") return null;
     const col = c;
-    if (typeof col.name !== "string" || !SAFE_SCOPE_IDENTIFIER.test(col.name)) return null;
+    if (typeof col.name !== "string" || !SAFE_SCOPE_IDENTIFIER.test(col.name) || col.name.toLowerCase() === SHARED_AUTHOR_COLUMN) return null;
     if (typeof col.helper !== "string") return null;
     let t;
     let implicitDefault = false;
@@ -392,7 +398,9 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (!member) return null;
     return relations ? { columns: out, member, relations, ...browser } : { columns: out, member, ...browser };
   }
-  return relations ? { columns: out, relations, ...browser } : { columns: out, ...browser };
+  const author = scope !== null && typeof scope === "object" && scope.kind === "shared" ? SHARED_AUTHOR_COLUMN : void 0;
+  if (author) out.push({ n: author, t: "text", nul: 1 });
+  return { columns: out, ...relations ? { relations } : {}, ...author ? { author } : {}, ...browser };
 }
 function bakedRelationsFromDeclared(value) {
   if (!Array.isArray(value) || value.length === 0) return void 0;
@@ -1103,6 +1111,9 @@ function readTable(r, rawName, nameLine) {
   r.tryPunct(",");
   r.expectPunct(")", `closing table("${rawName}")`);
   scope ??= { kind: "owner", column: DEFAULT_OWNER_COLUMN };
+  if (columns.some((column) => column.name === SHARED_AUTHOR_COLUMN || column.renamedFrom === SHARED_AUTHOR_COLUMN) || removedColumns.includes(SHARED_AUTHOR_COLUMN) || scope.kind === "owner" && scope.column === SHARED_AUTHOR_COLUMN) {
+    throw new SchemaTsError(`line ${nameLine}: "${SHARED_AUTHOR_COLUMN}" is platform-maintained row authorship and cannot be declared, removed, renamed, or used as a custom owner column.`);
+  }
   if (scope.kind === "owner") {
     const clash = columns.find((c) => c.name === scope.column);
     if (clash) {
