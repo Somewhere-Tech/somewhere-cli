@@ -87,6 +87,10 @@ var require_declared_data_contract = __commonJS({
         if (!["scoped", "shared", "member"].includes(intent)) fail(`${name} intent`);
         const owner = intent === "scoped" ? scopes[name] : null;
         if (intent === "scoped" && (typeof owner !== "string" || !identifier.test(owner))) fail(`${name} owner`);
+        if (table.visitors !== void 0 && table.visitors !== true) fail(`${name} visitors`);
+        const visitors = table.visitors === true;
+        if (visitors && intent !== "scoped") fail(`${name} visitors require ownership`);
+        if (input.identity !== (visitors ? "visitor" : "authenticated")) fail(`${name} identity must match visitor declaration`);
         const author = intent === "shared" ? table.author : null;
         if (intent === "shared" && (author !== "_sw_author_id" || !columns.some((column) => column.n === author && column.t === "text" && column.nul === 1))) fail(`${name} author`);
         if (Array.isArray(read) && read.includes(author)) fail(`${name} internal author projection`);
@@ -103,7 +107,7 @@ var require_declared_data_contract = __commonJS({
           if ((update || []).some((field) => g.includes(field))) fail(`${name} membership writes`);
           member = { g: [...g], m, u, mg: [...mg] };
         }
-        tables.push({ name, columns, client: { identity: input.identity, read, publicRead: input.publicRead, create, update, delete: input.delete }, primaryKey: pk, intent, owner, author, member });
+        tables.push({ name, columns, client: { identity: input.identity, read, publicRead: input.publicRead, create, update, delete: input.delete }, primaryKey: pk, intent, owner, author, visitors, member });
       }
       return JSON.stringify({ version: 1, tables });
     }
@@ -236,7 +240,7 @@ function boolean(options?: SomewhereSchemaDeclaration.ColumnOptions<boolean>): S
 function timestamp(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
 function json(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
 function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): SomewhereSchemaDeclaration.Column;
-function owner(options?: { column?: string }): SomewhereSchemaDeclaration.OwnerScope;
+function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
 function shared(): SomewhereSchemaDeclaration.Scope;
 function serverOnly(): SomewhereSchemaDeclaration.Scope;
 function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[] }): SomewhereSchemaDeclaration.Scope;
@@ -278,12 +282,12 @@ function parseClientPermissions(value, columns, scope) {
   if (!["owner", "member", "shared"].includes(scope.kind)) {
     return fail("serverOnly() tables cannot declare client access. Use a server function for business logic.");
   }
-  const identity = input.identity ?? "authenticated";
-  if (identity !== "authenticated" && identity !== "visitor") {
+  const identity = scope.kind === "owner" && scope.visitors === true ? "visitor" : "authenticated";
+  if (input.identity !== void 0 && input.identity !== "authenticated" && input.identity !== "visitor") {
     return fail('client.identity must be "authenticated" or "visitor".');
   }
-  if (identity === "visitor" && scope.kind !== "owner") {
-    return fail('client.identity: "visitor" requires owner() so anonymous visitors only access their own rows.');
+  if (input.identity !== void 0 && input.identity !== identity) {
+    return fail("client.identity must match the owner() declaration. Visitor access requires owner({ visitors: true }); owner() and other scopes require authenticated identity.");
   }
   let read = input.read ?? false;
   const publicRead = input.publicRead ?? false;
@@ -379,6 +383,12 @@ function bakedTableSchemaFromDeclared(declaredJson) {
   }
   const relations = bakedRelationsFromDeclared(shape.relations);
   const scope = shape.scope;
+  let visitors;
+  if (scope !== null && typeof scope === "object" && Object.prototype.hasOwnProperty.call(scope, "visitors")) {
+    const declaredScope = scope;
+    if (declaredScope.kind !== "owner" || typeof declaredScope.visitors !== "boolean") return null;
+    if (declaredScope.visitors) visitors = true;
+  }
   let browser = {};
   if (Object.prototype.hasOwnProperty.call(shape, "client")) {
     if (!scope || typeof scope !== "object" || primaryKeys.length !== 1) return null;
@@ -386,6 +396,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (typeof sc.kind !== "string") return null;
     const parsed = parseClientPermissions(shape.client, permissionColumns, {
       kind: sc.kind,
+      ...visitors ? { visitors: true } : {},
       ...typeof sc.column === "string" ? { column: sc.column } : {},
       ...Array.isArray(sc.group) && sc.group.every((value) => typeof value === "string") ? { group: sc.group } : {}
     });
@@ -400,7 +411,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
   }
   const author = scope !== null && typeof scope === "object" && scope.kind === "shared" ? SHARED_AUTHOR_COLUMN : void 0;
   if (author) out.push({ n: author, t: "text", nul: 1 });
-  return { columns: out, ...relations ? { relations } : {}, ...author ? { author } : {}, ...browser };
+  return { columns: out, ...relations ? { relations } : {}, ...author ? { author } : {}, ...visitors ? { visitors } : {}, ...browser };
 }
 function bakedRelationsFromDeclared(value) {
   if (!Array.isArray(value) || value.length === 0) return void 0;
@@ -964,16 +975,24 @@ function readScope(r, tableName) {
   }
   if (tok.value === "owner") {
     let column = DEFAULT_OWNER_COLUMN;
+    let visitors = false;
     for (const [key, { value, line }] of opts) {
+      if (key === "visitors") {
+        if (typeof value !== "boolean") {
+          throw new SchemaTsError(`line ${line}: owner({ visitors }) on table "${tableName}" must be true or false.`);
+        }
+        visitors = value;
+        continue;
+      }
       if (key !== "column") {
-        throw new SchemaTsError(`line ${line}: owner() on table "${tableName}" has an unknown option "${key}". Allowed: column.`);
+        throw new SchemaTsError(`line ${line}: owner() on table "${tableName}" has an unknown option "${key}". Allowed: column, visitors.`);
       }
       if (typeof value !== "string" || !SAFE_IDENT.test(value) || value.length > MAX_NAME_LENGTH) {
         throw new SchemaTsError(`line ${line}: owner({ column }) on table "${tableName}" must be a valid column name.`);
       }
       column = value.toLowerCase();
     }
-    return { kind: "owner", column };
+    return { kind: "owner", column, ...visitors ? { visitors: true } : {} };
   }
   if (opts.size > 0) {
     throw new SchemaTsError(`line ${tok.line}: ${tok.value}() on table "${tableName}" takes no options.`);
