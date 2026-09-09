@@ -43,10 +43,39 @@ test('vendored parser/generator artifact is pinned and its bytes match provenanc
   const manifest = JSON.parse(readFileSync(new URL('../runtime/DECLARED-DATA-VENDOR.json', import.meta.url), 'utf8'));
   const artifact = readFileSync(new URL('../runtime/declared-data.cjs', import.meta.url));
   assert.equal(manifest.sha256, createHash('sha256').update(artifact).digest('hex'));
-  for (const part of ['client-contract-source.ts', 'extract-schema-ts.ts', 'typed-data.cjs', 'schema-types.cjs']) {
+  for (const part of ['client-contract-source.ts', 'extract-schema-ts.ts', 'typed-data.cjs', 'schema-types.cjs', 'runtime-types.cjs']) {
     assert.ok(Object.keys(manifest.source_files).some(file => file.endsWith('/' + part)));
   }
   assert.equal(manifest.esbuild, '0.24.0');
+});
+
+test('same compiler context types server writes without widening browser operations', async t => {
+  const root = fixture(t, { 'src/server.ts': `
+export type Contract = { input: { id: string }; output: { changes: number } };
+export default (async (req, sw) => {
+  const { id } = await req.json();
+  await sw.db.server.insert('notes', { custom_owner: id, title: 'hello' });
+  await sw.db.server.insert('inbox', { _sw_author_id: null, message: 'system' });
+  const results = await sw.db.server.tx([
+    { op: 'update', table: 'notes', set: { custom_owner: id }, where: { id } },
+    { op: 'remove', table: 'notes', where: { id: 'old' } },
+  ]);
+  return { changes: results[0].changes };
+}) satisfies ServerFunction<Contract>;
+` });
+  assert.equal((await check(root)).ok, true);
+  writeFileSync(join(root, 'src', 'bad.ts'), `
+import { data } from 'somewhere:data';
+declare const sw: SomewhereRuntimeContext;
+sw.db.server.tx([{ op: 'query', sql: 'DELETE FROM notes' }]);
+sw.db.server.tx(async () => []);
+sw.db.server.from('notes', { asServer: true });
+sw.db.server.query('DELETE FROM notes');
+data.server;
+`);
+  const bad = await check(root);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.length, 5, bad.raw);
 });
 
 test('named operations and schema helpers typecheck with src-only configuration', async t => {

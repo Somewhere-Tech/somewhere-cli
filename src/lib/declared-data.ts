@@ -16,6 +16,7 @@ export interface DeclaredDataClient {
 interface DeclaredDataGenerator {
   generateFromFiles(files: Record<string, string>): DeclaredDataClient | undefined;
   SCHEMA_DECLARATION: string;
+  RUNTIME_CONTEXT_DECLARATION: string;
 }
 // This file is bundled from the platform's parser and compiler; no second DSL.
 const require = createRequire(import.meta.url);
@@ -48,7 +49,7 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
     if (previous !== undefined) rmSync(declarationPath);
     throw error;
   }
-  const declaration = GENERATED_DATA_HEADER + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
+  const declaration = GENERATED_DATA_HEADER + generator.RUNTIME_CONTEXT_DECLARATION + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
   if (declaration !== previous) writeFileSync(declarationPath, declaration);
   return { client, declarationPath, schemaPath };
 }

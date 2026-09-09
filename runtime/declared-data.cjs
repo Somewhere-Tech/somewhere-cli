@@ -256,9 +256,94 @@ ${signatures.replace(/^function /gm, "  export function ")}}
   }
 });
 
+// worker/containers/compile/runtime-types.cjs
+var require_runtime_types = __commonJS({
+  "worker/containers/compile/runtime-types.cjs"(exports2, module2) {
+    "use strict";
+    var RUNTIME_CONTEXT_DECLARATION2 = `
+type __SomewhereJsonPrimitive = string | number | boolean | null;
+type __SomewhereJson = __SomewhereJsonPrimitive | { [key: string]: __SomewhereJson } | __SomewhereJson[];
+type SomewhereDbScalar = string | number | boolean | null;
+type __SomewhereDbOperators = {
+  eq: SomewhereDbScalar; ne: SomewhereDbScalar;
+  lt: SomewhereDbScalar; lte: SomewhereDbScalar;
+  gt: SomewhereDbScalar; gte: SomewhereDbScalar;
+  like: SomewhereDbScalar; in: readonly SomewhereDbScalar[];
+  not: null; contains: string; startsWith: string; endsWith: string;
+};
+type __SomewhereDbOperator = {
+  [K in keyof __SomewhereDbOperators]: Pick<__SomewhereDbOperators, K>
+    & Partial<Record<Exclude<keyof __SomewhereDbOperators, K>, never>>
+}[keyof __SomewhereDbOperators];
+type SomewhereDbCondition = SomewhereDbScalar | __SomewhereDbOperator;
+type SomewhereDbWhere = Readonly<Record<string, SomewhereDbCondition | readonly SomewhereDbCondition[]>>;
+type SomewhereDbOrder = string | readonly [string, ('asc' | 'desc')?]
+  | readonly (readonly [string, ('asc' | 'desc')?])[];
+interface SomewhereDbReadOptions {
+  where?: SomewhereDbWhere | null;
+  order?: SomewhereDbOrder | null;
+  limit?: number | null;
+  offset?: number | null;
+  columns?: readonly string[] | null;
+  include?: readonly string[] | null;
+  has?: Readonly<Record<string, SomewhereDbWhere>> | null;
+}
+interface SomewhereDbCountOptions { where?: SomewhereDbWhere | null }
+interface SomewhereDbInsertOptions { onConflict?: 'ignore' | 'update' | null }
+type SomewhereDbValues = Readonly<Record<string, __SomewhereJson>>;
+interface SomewhereDbUpdate {
+  set: SomewhereDbValues;
+  where?: SomewhereDbWhere | null;
+}
+interface SomewhereDbRemove { where?: SomewhereDbWhere | null }
+type SomewhereDbWriteIntent =
+  | { op: 'insert'; table: string; values: SomewhereDbValues; options?: SomewhereDbInsertOptions | null }
+  | { op: 'update'; table: string; set: SomewhereDbValues; where?: SomewhereDbWhere | null }
+  | { op: 'remove'; table: string; where?: SomewhereDbWhere | null };
+interface SomewhereDbResult {
+  // Composed results preserve the database representation. They do not use
+  // the browser client's boolean/JSON normalization or its field projection.
+  data: Record<string, unknown>[];
+  error: null;
+  count: number;
+  changes: number;
+  last_row_id: number | string | null;
+  live_delivery?: { delivery: 'invalidated' }
+    | { delivery: 'resync_required'; reason: string };
+}
+interface SomewhereServerDb {
+  from(table: string, options?: SomewhereDbReadOptions | null): Promise<SomewhereDbResult>;
+  count(table: string, options?: SomewhereDbCountOptions | null): Promise<{ data: number; error: null }>;
+  insert(table: string, values: SomewhereDbValues, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult>;
+  update(table: string, spec: SomewhereDbUpdate): Promise<SomewhereDbResult>;
+  remove(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
+  // Closed atomic batch, 1-100 intents checked before execution. No callback,
+  // reads, SQL, or caller-supplied authority. A lost acknowledgement can have
+  // an unknown outcome; a rejection never promises rollback or safe replay.
+  tx(intents: readonly SomewhereDbWriteIntent[]): Promise<SomewhereDbResult[]>;
+}
+interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count'> {
+  from(table: string, options?: (SomewhereDbReadOptions & { asServer?: boolean }) | null): Promise<SomewhereDbResult>;
+  count(table: string, options?: (SomewhereDbCountOptions & { asServer?: boolean }) | null): Promise<{ data: number; error: null }>;
+  delete(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
+  readonly server: SomewhereServerDb;
+}
+// Deliberately describes the composed database subset. Other sw namespaces
+// are not inferred from code or copied from the unrelated developer SDK.
+interface SomewhereRuntimeContext { readonly db: SomewhereCallerDb }
+interface __SomewhereTypedRequest<Input> extends Request { json(): Promise<Input> }
+type ServerFunction<Contract extends { input: unknown; output: unknown }> =
+  (req: __SomewhereTypedRequest<Contract["input"]>, sw: SomewhereRuntimeContext) =>
+    Contract["output"] | Promise<Contract["output"]>;
+`;
+    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2 };
+  }
+});
+
 // declared-data-vendor-entry.js
 var declared_data_vendor_entry_exports = {};
 __export(declared_data_vendor_entry_exports, {
+  RUNTIME_CONTEXT_DECLARATION: () => import_runtime_types.RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION: () => import_schema_types.SCHEMA_DECLARATION,
   generateFromFiles: () => generateFromFiles
 });
@@ -1470,12 +1555,14 @@ function schemaAuthorityFromSource(files) {
 // declared-data-vendor-entry.js
 var import_typed_data = __toESM(require_typed_data());
 var import_schema_types = __toESM(require_schema_types());
+var import_runtime_types = __toESM(require_runtime_types());
 function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? (0, import_typed_data.generateDataClient)(authority) : void 0;
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION,
   generateFromFiles
 });

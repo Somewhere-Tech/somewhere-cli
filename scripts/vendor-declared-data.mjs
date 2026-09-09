@@ -21,6 +21,7 @@ const result = await esbuild.build({
     contents: `import { clientAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
 import { generateDataClient } from './worker/containers/compile/typed-data.cjs';
 export { SCHEMA_DECLARATION } from './worker/containers/compile/schema-types.cjs';
+export { RUNTIME_CONTEXT_DECLARATION } from './worker/containers/compile/runtime-types.cjs';
 export function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? generateDataClient(authority) : undefined;
