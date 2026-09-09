@@ -671,7 +671,7 @@ export function registerDeploy(program: Command) {
         if (scope !== 'functions' && Object.keys(binaryFiles).length > 0) {
           body.binary_files = binaryFiles;
         }
-        if (scope !== 'static' && Object.keys(functions).length > 0) {
+        if (scope !== 'static' && (opts.replaceFunctions || Object.keys(functions).length > 0)) {
           body.functions = functions;
         }
         if (scope) body.scope = scope;

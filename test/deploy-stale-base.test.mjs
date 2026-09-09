@@ -76,6 +76,45 @@ async function withServer(handler, fn) {
   }
 }
 
+test('deploy sends an explicit empty function map only for requested non-static replacement', async () => {
+  const testHome = mkdtempSync(join(tmpdir(), 'sw-replace-functions-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-replace-functions-fixture-'));
+  writeLogin(testHome);
+  writeProject(fixtureDir);
+  writeFixture(fixtureDir);
+  const bodies = [];
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        bodies.push(JSON.parse(body));
+        sendJson(res, 200, { ok: true, data: {
+          version: bodies.length, files: 1,
+          url: 'https://fixture.somewhere.site', has_functions: false,
+        } });
+      } else sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async apiUrl => {
+    for (const flags of [[], ['--replace-functions'], ['--scope', 'functions', '--replace-functions'],
+      ['--scope', 'static', '--replace-functions'], ['--scope', 'functions']]) {
+      const result = await run(['deploy', '--json', ...flags], {
+        cwd: fixtureDir, env: { HOME: testHome, USERPROFILE: testHome, SOMEWHERE_API_URL: apiUrl },
+      });
+      assert.equal(result.status, 0, `${flags.join(' ')}: ${result.stdout}\n${result.stderr}`);
+    }
+  });
+  assert.equal(bodies.length, 5);
+  assert.equal(Object.hasOwn(bodies[0], 'functions'), false, 'ordinary omission preserves existing functions');
+  assert.equal(Object.hasOwn(bodies[0], 'replace_functions'), false);
+  assert.deepEqual(bodies[1].functions, {}, 'full replacement explicitly removes the function half');
+  assert.equal(bodies[1].replace_functions, true);
+  assert.deepEqual(bodies[2].functions, {}, 'functions-only replacement also transmits intent');
+  assert.deepEqual(bodies[2].files, {});
+  assert.equal(Object.hasOwn(bodies[3], 'functions'), false, 'static scope never sends functions');
+  assert.equal(Object.hasOwn(bodies[4], 'functions'), false, 'ordinary functions-only omission preserves');
+});
+
 function sendJson(res, status, payload) {
   res.statusCode = status;
   res.setHeader('Content-Type', 'application/json');
