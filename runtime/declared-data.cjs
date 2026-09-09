@@ -323,8 +323,8 @@ interface SomewhereServerDb {
   tx(intents: readonly SomewhereDbWriteIntent[]): Promise<SomewhereDbResult[]>;
 }
 interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count'> {
-  from(table: string, options?: (SomewhereDbReadOptions & { asServer?: boolean }) | null): Promise<SomewhereDbResult>;
-  count(table: string, options?: (SomewhereDbCountOptions & { asServer?: boolean }) | null): Promise<{ data: number; error: null }>;
+  from(table: string, options?: (SomewhereDbReadOptions & { asServer?: true }) | null): Promise<SomewhereDbResult>;
+  count(table: string, options?: (SomewhereDbCountOptions & { asServer?: true }) | null): Promise<{ data: number; error: null }>;
   delete(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
   readonly server: SomewhereServerDb;
 }

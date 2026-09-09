@@ -71,11 +71,13 @@ sw.db.server.tx([{ op: 'query', sql: 'DELETE FROM notes' }]);
 sw.db.server.tx(async () => []);
 sw.db.server.from('notes', { asServer: true });
 sw.db.server.query('DELETE FROM notes');
+sw.db.from('notes', { asServer: false });
+sw.db.count('notes', { asServer: false });
 data.server;
 `);
   const bad = await check(root);
   assert.equal(bad.ok, false);
-  assert.equal(bad.errors.length, 5, bad.raw);
+  assert.equal(bad.errors.length, 7, bad.raw);
 });
 
 test('named operations and schema helpers typecheck with src-only configuration', async t => {
