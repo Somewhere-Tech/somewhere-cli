@@ -1530,6 +1530,9 @@ function canonicalTableShape(t) {
 
 // worker/src/utils/db-schema-deploy/client-contract-source.ts
 var import_declared_data_contract = __toESM(require_declared_data_contract());
+function declareEntry(dictionary, name, value) {
+  Object.defineProperty(dictionary, name, { value, writable: true, enumerable: true, configurable: true });
+}
 function clientAuthorityFromSource(files) {
   const authority = schemaAuthorityFromSource(files);
   return Object.values(authority?.schema ?? {}).some((table) => table.client !== void 0) ? authority : void 0;
@@ -1539,15 +1542,15 @@ function schemaAuthorityFromSource(files) {
   if (source === void 0) return void 0;
   const parsed = extractSchemaTs(source);
   if (!parsed.ok) throw new Error(`Invalid db/schema.ts: ${parsed.errors.join(" ")}`);
-  const schema = /* @__PURE__ */ Object.create(null);
-  const intents = /* @__PURE__ */ Object.create(null);
-  const scopes = /* @__PURE__ */ Object.create(null);
+  const schema = {};
+  const intents = {};
+  const scopes = {};
   for (const table of parsed.declaration.tables) {
     const baked = bakedTableSchemaFromDeclared(JSON.stringify(canonicalTableShape(table)));
     if (!baked) throw new Error(`Could not derive the client contract for declared table "${table.name}".`);
-    schema[table.name] = baked;
-    intents[table.name] = table.scope.kind === "owner" ? "scoped" : table.scope.kind;
-    if (table.scope.kind === "owner") scopes[table.name] = table.scope.column;
+    declareEntry(schema, table.name, baked);
+    declareEntry(intents, table.name, table.scope.kind === "owner" ? "scoped" : table.scope.kind);
+    if (table.scope.kind === "owner") declareEntry(scopes, table.name, table.scope.column);
   }
   return { schema, intents, scopes };
 }
