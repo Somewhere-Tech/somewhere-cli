@@ -1,5 +1,6 @@
 import type { ApiResponse } from '../types.js';
-import { Agent, fetch as undiciFetch, type BodyInit, type Response as UndiciResponse } from 'undici';
+import type { BodyInit, Response as UndiciResponse } from 'undici';
+import { fetchWithProxy as undiciFetch } from './http.js';
 import { loadConfig, updateTokens } from './config.js';
 
 /** The /v1 API host. Override for staging/tests via SOMEWHERE_API_URL
@@ -148,8 +149,7 @@ export class ApiClient {
         body: bodyFactory?.(),
         duplex: bodyFactory ? 'half' : undefined,
         signal: AbortSignal.timeout(timeoutMs),
-        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
-      });
+      }, timeoutMs);
     } catch (err) {
       if (err instanceof Error && (err.name === 'TimeoutError' || err.name === 'AbortError')) {
         throw new CliApiError(
@@ -258,19 +258,14 @@ export class ApiClient {
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
-      // Use undici's OWN fetch (not Node's global fetch) so the Agent dispatcher
-      // is from the SAME undici instance — a standalone-undici Agent on the
-      // global fetch throws UND_ERR_INVALID_ARG on newer Node (dual-undici;
-      // tsk_0a3f106d). The Agent also pins undici's header/body timeouts to OUR
-      // budget so a cold first deploy isn't mislabeled as a network failure
-      // (tsk_896f9c7b) — our AbortSignal stays the only real deadline.
+      // Shared transport honors the VM's proxy and keeps undici's header/body
+      // timeout at this call's budget, including long cold deploys.
       res = await undiciFetch(url, {
         method,
         headers,
         body: reqBody,
         signal: AbortSignal.timeout(timeoutMs),
-        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
-      });
+      }, timeoutMs);
     } catch (err) {
       // AbortSignal.timeout fired — no bytes back within the budget. Name it
       // so the user can tell a hang from a rejection (review F8/Q5: a bare
@@ -405,14 +400,13 @@ export class ApiClient {
     const timeoutMs = opts?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     let res: Awaited<ReturnType<typeof undiciFetch>>;
     try {
-      // undici's own fetch — see call() for why (dual-undici, tsk_0a3f106d).
+      // Same proxy-aware transport and timeout budget as authenticated calls.
       res = await undiciFetch(url, {
         method,
         headers,
         body: reqBody,
         signal: AbortSignal.timeout(timeoutMs),
-        dispatcher: new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs }),
-      });
+      }, timeoutMs);
     } catch (err) {
       const cause = (err as { cause?: { code?: string; message?: string } }).cause;
       const detail = cause?.code ?? cause?.message ?? (err instanceof Error ? err.message : String(err));

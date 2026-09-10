@@ -17,6 +17,7 @@ import type { CliConfig } from '../types.js';
 import { getDeviceKeyName } from './device.js';
 import { CLI_VERSION } from './version.js';
 import { API_BASE_URL } from './client.js';
+import { fetchWithProxy as fetch } from './http.js';
 
 // Same host the rest of the CLI talks to (SOMEWHERE_API_URL overrides it for
 // staging / a local platform); this flow addresses /v1/auth/* itself.

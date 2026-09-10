@@ -1,3 +1,4 @@
+import { fetchWithProxy as fetch } from '../lib/http.js';
 import { Command } from 'commander';
 import { spawnSync } from 'node:child_process';
 // The @modelcontextprotocol/sdk value imports (transports, UnauthorizedError)

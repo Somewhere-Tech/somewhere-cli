@@ -3,6 +3,8 @@
 import type { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import type { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import type { CallToolResult, Tool } from '@modelcontextprotocol/sdk/types.js';
+import type { FetchLike } from '@modelcontextprotocol/sdk/shared/transport.js';
+import { fetchWithProxy } from './http.js';
 import { ApiClient } from './client.js';
 import { getToken, loadConfig } from './config.js';
 
@@ -73,6 +75,11 @@ export async function createPlatformMcpTransport(
     err instanceof UnauthorizedError
     || (err instanceof StreamableHTTPError && err.code === 401);
   return new StreamableHTTPClientTransport(mcpUrl(options.allTools === true), {
+    // The SDK uses web Fetch types; bundled undici implements the same API.
+    // Preserve the SDK's cancellation signal and allow long tool responses.
+    fetch: ((url, init) => fetchWithProxy(
+      url, init as Parameters<typeof fetchWithProxy>[1], 600_000,
+    )) as FetchLike,
     requestInit: {
       headers: {
         Authorization: `Bearer ${token}`,

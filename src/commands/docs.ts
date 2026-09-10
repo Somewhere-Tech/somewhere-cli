@@ -1,3 +1,4 @@
+import { fetchWithProxy as fetch } from '../lib/http.js';
 import { once } from 'node:events';
 import { Command } from 'commander';
 import { loadConfig } from '../lib/config.js';
@@ -181,7 +182,7 @@ async function fetchPublicCorpus(): Promise<string> {
   return res.text();
 }
 
-export async function writeResponseBodyToStdout(res: Response): Promise<void> {
+export async function writeResponseBodyToStdout(res: Pick<Response, 'body'>): Promise<void> {
   if (!res.body) return;
 
   const reader = res.body.getReader();

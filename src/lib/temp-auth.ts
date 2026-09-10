@@ -6,6 +6,7 @@
 
 import { createHash } from 'node:crypto';
 import { API_BASE_URL } from './client.js';
+import { fetchWithProxy } from './http.js';
 
 /** GET /v1/auth/pow/challenge response payload (unauthenticated). */
 export interface PowChallenge {
@@ -82,7 +83,7 @@ interface Envelope<T> {
  *  the network. Throws a clear Error — including the server's own message
  *  where available — on any failure at either step. */
 export async function mintTempAccount(
-  fetchImpl: typeof fetch = globalThis.fetch,
+  fetchImpl: typeof fetchWithProxy = fetchWithProxy,
 ): Promise<TempAccount> {
   const challengeRes = await fetchImpl(`${API_BASE_URL}/auth/pow/challenge`);
   const challengeBody = (await challengeRes.json()) as Envelope<PowChallenge>;

@@ -1,3 +1,4 @@
+import { fetchWithProxy as fetch } from './http.js';
 export interface AdvisorHealth {
   status: 'healthy' | 'degraded' | 'unknown';
   checked_at: number | null;

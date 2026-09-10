@@ -1,4 +1,5 @@
 import { spawn } from 'node:child_process';
+import { fetchWithProxy as fetch } from '../lib/http.js';
 import { randomBytes } from 'node:crypto';
 import {
   closeSync,
