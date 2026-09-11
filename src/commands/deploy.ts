@@ -839,6 +839,25 @@ export function registerDeploy(program: Command) {
             const hours = formatTtlHours(tempSession.ttlSeconds);
             info(`Expires: about ${hours} hour${hours === 1 ? '' : 's'} after the temporary session was created`);
           }
+          // Same discoverability the account path gets — this is a main
+          // fresh-agent route, not a side door. Addressed by URL on purpose:
+          // beside a real login the throwaway project is deliberately NOT in
+          // `.somewhere.json`, so a bare `somewhere browser` would open the
+          // developer's own app. Temporary credentials carry the `browser`
+          // scope, so the URL form works on both temporary paths.
+          if (!hasFunctionErrors) {
+            for (const line of formatNextActions(
+              nextActions({
+                stage: 'deploy',
+                projectLinked: false,
+                liveUrl: formatted.liveUrl ?? null,
+                temporary: true,
+              }),
+              { command: teal, why: dim },
+            )) {
+              console.log(line);
+            }
+          }
           info(
             besideRealLogin
               ? `Your account login is untouched. Open the claim URL to move this app into it; drop ${teal('--temporary')} to deploy to your account instead.`
@@ -863,6 +882,7 @@ export function registerDeploy(program: Command) {
                   cwdConfig && projectId && cwdConfig.project_id === projectId,
                 ),
                 liveUrl: formatted.liveUrl ?? null,
+                temporary: false,
               }),
               { command: teal, why: dim },
             )) {

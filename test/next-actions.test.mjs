@@ -20,7 +20,7 @@ const distIndex = join(repoRoot, 'dist', 'index.js');
 const moduleUnderTest = process.env.SOMEWHERE_TEST_SOURCE
   ? '../src/lib/next-actions.ts'
   : '../dist/lib/next-actions.js';
-const { nextActions, formatNextActions } = await import(moduleUnderTest);
+const { nextActions, formatNextActions, shellQuote } = await import(moduleUnderTest);
 
 function commandsOf(actions) {
   return actions.map((a) => a.command);
@@ -46,7 +46,7 @@ test('init and deploy both name the browser check, so it is discoverable without
   for (const ctx of [
     { stage: 'init', scaffolded: true },
     { stage: 'init', scaffolded: false },
-    { stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site' },
+    { stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site', temporary: false },
   ]) {
     const commands = commandsOf(nextActions(ctx));
     assert.ok(
@@ -58,7 +58,7 @@ test('init and deploy both name the browser check, so it is discoverable without
 
 test('a linked deploy suggests the project-default browser and verify runs', () => {
   assert.deepEqual(
-    commandsOf(nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site' })),
+    commandsOf(nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site', temporary: false })),
     ['somewhere browser --screenshot', 'somewhere verify'],
   );
 });
@@ -67,13 +67,40 @@ test('an unlinked deploy screenshots BY URL, with the --store the public path re
   // commands/browser.ts refuses `--screenshot` on a public URL without
   // `--store`; a suggestion missing it would fail the moment it was pasted.
   const commands = commandsOf(
-    nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://temp-app.somewhere.site' }),
+    nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://temp-app.somewhere.site', temporary: false }),
   );
   assert.deepEqual(commands, ['somewhere browser https://temp-app.somewhere.site --screenshot --store']);
 });
 
+test('a temporary deploy is addressed BY URL even though a link may exist', () => {
+  // `--temporary` beside a real login deliberately keeps the throwaway project
+  // out of `.somewhere.json`, so the bare project form would open the
+  // developer's own app. One step on this path, never two.
+  assert.deepEqual(
+    commandsOf(nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://temp-fresh.somewhere.site', temporary: true })),
+    ['somewhere browser https://temp-fresh.somewhere.site --screenshot --store'],
+  );
+  assert.deepEqual(
+    nextActions({ stage: 'deploy', projectLinked: true, liveUrl: null, temporary: true }),
+    [],
+  );
+});
+
+test('a URL that is not safe bare in a shell is quoted', () => {
+  assert.equal(shellQuote('https://ok-app.somewhere.site/path'), 'https://ok-app.somewhere.site/path');
+  assert.equal(shellQuote('https://a.example/?x=1&y=2'), `'https://a.example/?x=1&y=2'`);
+  assert.equal(shellQuote("https://a.example/it's"), `'https://a.example/it'\\''s'`);
+  const action = nextActions({
+    stage: 'deploy',
+    projectLinked: false,
+    liveUrl: 'https://a.example/?x=1&y=2',
+    temporary: true,
+  })[0];
+  assert.equal(action.command, `somewhere browser 'https://a.example/?x=1&y=2' --screenshot --store`);
+});
+
 test('a deploy with nothing to point at suggests nothing rather than guessing', () => {
-  assert.deepEqual(nextActions({ stage: 'deploy', projectLinked: false, liveUrl: null }), []);
+  assert.deepEqual(nextActions({ stage: 'deploy', projectLinked: false, liveUrl: null, temporary: false }), []);
   assert.deepEqual(formatNextActions([]), []);
 });
 
@@ -83,7 +110,7 @@ test('login points at init or deploy depending on whether this directory is a pr
 });
 
 test('rendering stays short, aligned, and plain by default', () => {
-  const actions = nextActions({ stage: 'deploy', projectLinked: true, liveUrl: null });
+  const actions = nextActions({ stage: 'deploy', projectLinked: true, liveUrl: null, temporary: false });
   const lines = formatNextActions(actions);
   assert.equal(lines.length, 2);
   for (const line of lines) {
@@ -111,8 +138,8 @@ test('no next step tells the developer to run somebody else\'s tool', () => {
     ...nextActions({ stage: 'init', scaffolded: false }),
     ...nextActions({ stage: 'login', linkedProject: true }),
     ...nextActions({ stage: 'login', linkedProject: false }),
-    ...nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site' }),
-    ...nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://app.somewhere.site' }),
+    ...nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site', temporary: false }),
+    ...nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://app.somewhere.site', temporary: false }),
   ];
   for (const action of every) {
     assert.match(action.command, /^somewhere /, action.command);
@@ -148,8 +175,8 @@ test('every suggested command is a real command with real flags', { skip: proces
       ...nextActions({ stage: 'init', scaffolded: false }),
       ...nextActions({ stage: 'login', linkedProject: true }),
       ...nextActions({ stage: 'login', linkedProject: false }),
-      ...nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site' }),
-      ...nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://app.somewhere.site' }),
+      ...nextActions({ stage: 'deploy', projectLinked: true, liveUrl: 'https://app.somewhere.site', temporary: false }),
+      ...nextActions({ stage: 'deploy', projectLinked: false, liveUrl: 'https://app.somewhere.site', temporary: false }),
     ].map((a) => a.command),
   );
   assert.ok(suggested.size >= 4);

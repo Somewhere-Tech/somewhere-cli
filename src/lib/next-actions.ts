@@ -1,33 +1,13 @@
 /**
  * What to run next, decided in ONE place.
  *
- * Agents are the primary users of this CLI, and they only learn a capability
- * exists if a command they already ran names it. The comparison test that
- * produced this module found two concrete gaps:
- *
- *   1. `somewhere init` closed with "Next: somewhere dev", but `somewhere dev`
- *      proxies API calls to the DEPLOYED origin and refuses on a project that
- *      has never been deployed (lib/project-urls.ts, getDeployedProjectServingUrl).
- *      The first instruction a fresh project received could not succeed
- *      (pfb_9a035f5ac8e9).
- *   2. Nothing in the init or deploy path said the CLI can open the app in a
- *      browser, screenshot it, and report its console/network errors — so
- *      nobody found `somewhere browser` or `somewhere verify` without being
- *      told.
- *
- * Rules this module holds itself to:
- *   - EXACT commands only. Every `command` string below is a registered command
- *     with real flags; test/next-actions.test.mjs re-derives each one from the
- *     CLI's own `--help` output, so a renamed flag fails the build rather than
- *     shipping a suggestion that errors.
- *   - At most three. This is a next step, not a capability catalogue.
- *   - Human output only. It never touches `--json` stdout: `deploy --json`
- *     emits the raw platform response and nothing else (pinned by
- *     test/json-output.test.mjs), and `init --json` passes the project object
- *     straight through. Adding keys there would break parsers for a hint the
- *     caller did not ask for.
- *   - No network, no extra work. Everything here is decided from values the
- *     caller already has.
+ * Invariants:
+ *  - Exact commands. test/next-actions.test.mjs re-derives every suggestion
+ *    from the CLI's own `--help`, so a renamed flag fails the build.
+ *  - At most three. A next step, not a capability catalogue.
+ *  - Human output only. `deploy --json` emits the raw platform response and
+ *    `init --json` the project object; neither gains a key nobody asked for.
+ *  - No network and no new state: every input is one the caller already has.
  */
 
 export interface NextAction {
@@ -42,15 +22,28 @@ export type NextActionContext =
   | { stage: 'login'; linkedProject: boolean }
   | {
       stage: 'deploy';
-      /** A project this directory is linked to — the `browser`/`verify`
-       *  default target. Absent on an anonymous `--temporary` deploy. */
+      /** The current directory links to the project this deploy targeted, so a
+       *  bare `somewhere browser` resolves it. */
       projectLinked: boolean;
       liveUrl: string | null;
+      /** Anonymous `--temporary` deploy. Always addressed by URL: with
+       *  `--temporary` beside a real login the throwaway project is
+       *  deliberately kept OUT of `.somewhere.json` (commands/deploy.ts), so a
+       *  bare `somewhere browser` would open the developer's own app instead. */
+      temporary: boolean;
     };
 
+/** Quote an argument that is not safe bare in a shell. Live URLs are plain
+ *  today; a suggestion is pasted verbatim, so it may not depend on that. */
+export function shellQuote(value: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(value)
+    ? value
+    : `'${value.replace(/'/g, `'\\''`)}'`;
+}
+
 const SEE_IT_LINKED: NextAction = {
-  // VERIFY mode: with a linked project the screenshot is saved into the
-  // project files and the report prints a link that opens it.
+  // VERIFY mode: a linked project saves the screenshot into the project files
+  // and prints a link that opens it.
   command: 'somewhere browser --screenshot',
   why: 'see the live page — console errors, failed requests, and a screenshot link',
 };
@@ -60,11 +53,12 @@ const CHECK_IT_LINKED: NextAction = {
   why: 'run it at desktop and phone size; exits non-zero if the page is unhealthy',
 };
 
-/** EYES mode on a public URL. `--screenshot` there REQUIRES `--store`, which is
- *  what returns the short-lived link (commands/browser.ts refuses without it). */
+/** EYES mode on a public URL, which REQUIRES `--store` — commands/browser.ts
+ *  refuses `--screenshot` without it. Temporary credentials carry the `browser`
+ *  scope (worker TEMP_ACCOUNT_KEY_SCOPES), so this works on that path too. */
 function seeItByUrl(liveUrl: string): NextAction {
   return {
-    command: `somewhere browser ${liveUrl} --screenshot --store`,
+    command: `somewhere browser ${shellQuote(liveUrl)} --screenshot --store`,
     why: 'see the live page — console errors, failed requests, and a screenshot link',
   };
 }
@@ -81,8 +75,8 @@ export function nextActions(ctx: NextActionContext): NextAction[] {
         },
         SEE_IT_LINKED,
         {
-          // Deliberately third and explicitly "after that": frontend hot reload
-          // proxies to the deployed backend, so it cannot run before a deploy.
+          // Last, and explicitly "after that": frontend hot reload proxies to
+          // the deployed backend and refuses on a project with no release.
           command: 'somewhere dev',
           why: 'after that, frontend hot reload against the deployed backend',
         },
@@ -99,6 +93,7 @@ export function nextActions(ctx: NextActionContext): NextAction[] {
       ];
 
     case 'deploy': {
+      if (ctx.temporary) return ctx.liveUrl ? [seeItByUrl(ctx.liveUrl)] : [];
       if (ctx.projectLinked) return [SEE_IT_LINKED, CHECK_IT_LINKED];
       if (ctx.liveUrl) return [seeItByUrl(ctx.liveUrl)];
       return [];
@@ -113,10 +108,8 @@ export interface NextActionStyles {
   why?: (value: string) => string;
 }
 
-/**
- * Render as aligned lines, ready for `console.log`. Returns `[]` for no
- * actions so a caller can print unconditionally without emitting a bare label.
- */
+/** Aligned lines ready for `console.log`. `[]` for no actions, so a caller can
+ *  print unconditionally without emitting a bare label. */
 export function formatNextActions(
   actions: NextAction[],
   styles: NextActionStyles = {},
