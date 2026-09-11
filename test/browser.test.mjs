@@ -9,6 +9,14 @@ import { join } from 'node:path';
 // client.ts reads BASE_URL at module load, so point it at the mock server
 // BEFORE the first import (browser.js imports client.js transitively).
 let lastRequest = null;
+// The hosted browser returns the DOM section ONLY when the request asked for
+// it: confirmed against the live tool on 2026-09-11, a bare `{"url": ...}` call
+// comes back with no `dom_outline` key at all, while `include: ["dom"]` on the
+// same page returns the one link example.com has. The stub mirrors that, so a
+// call that forgets to ask is visible here instead of only in production.
+let domFixture = [{ tag: 'a', text: 'Learn more', selector: 'a' }];
+// An older platform that ignores the section and returns no map even when asked.
+let platformReturnsDom = true;
 const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -20,23 +28,23 @@ const server = createServer((req, res) => {
       contentType: req.headers['content-type'],
       body: body ? JSON.parse(body) : null,
     };
+    const askedForDom = Array.isArray(lastRequest.body?.include)
+      && lastRequest.body.include.includes('dom');
+    const data = {
+      passed: true,
+      final_url: 'https://example.com/',
+      console_errors: [],
+      page_errors: [],
+      failed_requests: [],
+      steps: [],
+      screenshots: [],
+    };
+    if (askedForDom && platformReturnsDom) {
+      data.dom_outline = domFixture;
+      data.testid_map = {};
+    }
     res.setHeader('Content-Type', 'application/json');
-    res.end(
-      JSON.stringify({
-        ok: true,
-        data: {
-          passed: true,
-          final_url: 'https://example.com/',
-          console_errors: [],
-          page_errors: [],
-          failed_requests: [],
-          steps: [],
-          screenshots: [],
-          dom_outline: [],
-          testid_map: {},
-        },
-      }),
-    );
+    res.end(JSON.stringify({ ok: true, data }));
   });
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -65,6 +73,7 @@ function runCli(args, home) {
 test('buildBrowserBody: a URL positional becomes `url`', () => {
   assert.deepEqual(buildBrowserBody('https://example.com', {}), {
     url: 'https://example.com',
+    include: ['dom'],
   });
 });
 
@@ -83,28 +92,31 @@ test('public URL screenshot refusal gives the complete stored-link command and i
 });
 
 test('buildBrowserBody: a non-URL positional becomes `project_id`', () => {
-  assert.deepEqual(buildBrowserBody('my-app', {}), { project_id: 'my-app' });
+  assert.deepEqual(buildBrowserBody('my-app', {}), { project_id: 'my-app', include: ['dom'] });
 });
 
 test('buildBrowserBody: falls back to the linked project when no target', () => {
   assert.deepEqual(buildBrowserBody(undefined, {}, 'linked-proj'), {
     project_id: 'linked-proj',
+    include: ['dom'],
   });
 });
 
 test('buildBrowserBody: an explicit URL stays in EYES mode in a linked directory', () => {
   assert.deepEqual(buildBrowserBody('https://third-party.test/docs', {}, 'linked-proj'), {
     url: 'https://third-party.test/docs',
+    include: ['dom'],
   });
   assert.deepEqual(buildBrowserBody(undefined, { url: 'https://third-party.test/docs' }, 'linked-proj'), {
     url: 'https://third-party.test/docs',
+    include: ['dom'],
   });
 });
 
 test('buildBrowserBody: --url and --project flags win over the positional', () => {
   assert.deepEqual(
     buildBrowserBody('positional', { url: 'https://x.test', project: 'p' }),
-    { url: 'https://x.test', project_id: 'p' },
+    { url: 'https://x.test', project_id: 'p', include: ['dom'] },
   );
 });
 
@@ -194,8 +206,58 @@ test('buildBrowserBody: --snapshot merges with --include without duplicating', (
   assert.deepEqual(body.include, ['network', 'dom']);
 });
 
-test('buildBrowserBody: without --snapshot the DOM section stays opt-in', () => {
-  assert.equal('include' in buildBrowserBody('https://example.com', { wait: 'button' }), false);
+// The default report PRINTS a `dom:` count line, so the default request has to
+// ASK for the map — the same rule --snapshot already follows. Leaving the
+// section opt-in while still printing a count is how a bare
+// `somewhere browser https://example.com` claimed "dom: 0 interactive elements"
+// about a page with a link, while `--snapshot` on the same URL said 1
+// (pfb_57c43192d553).
+test('buildBrowserBody: the default report asks for the DOM section', () => {
+  assert.deepEqual(buildBrowserBody('https://example.com', {}).include, ['dom']);
+  assert.deepEqual(buildBrowserBody('https://example.com', { wait: 'button' }).include, ['dom']);
+  assert.deepEqual(buildBrowserBody('my-app', {}).include, ['dom']);
+});
+
+test('default EYES prints the real interactive-element count', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-dom-count-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  lastRequest = null;
+
+  const result = await runCli(['browser', 'https://example.com'], home);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.ok(lastRequest.body.include.includes('dom'), JSON.stringify(lastRequest.body));
+  assert.match(result.stdout, /dom: 1 interactive element\b/);
+});
+
+test('default EYES says the DOM was not read rather than claiming zero', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-dom-missing-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  platformReturnsDom = false;
+  try {
+    const result = await runCli(['browser', 'https://example.com'], home);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /^dom: not read/m);
+    assert.doesNotMatch(result.stdout, /interactive element/);
+  } finally {
+    platformReturnsDom = true;
+  }
+});
+
+test('default EYES still reports a genuinely empty page as zero', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-browser-dom-empty-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_test_key' }));
+  domFixture = [];
+  try {
+    const result = await runCli(['browser', 'https://example.com'], home);
+    assert.equal(result.status, 0, result.stderr);
+    assert.match(result.stdout, /dom: 0 interactive elements/);
+  } finally {
+    domFixture = [{ tag: 'a', text: 'Learn more', selector: 'a' }];
+  }
 });
 
 // A stored screenshot came back as a storage path alone. Read as a URL — the
@@ -247,9 +309,9 @@ test('buildBrowserBody: --extract forwards extract:"markdown" (feature A)', () =
   assert.equal(body.extract, 'markdown');
 });
 
-test('buildBrowserBody: --include markdown passes through', () => {
+test('buildBrowserBody: --include markdown passes through alongside the default DOM section', () => {
   const body = buildBrowserBody('https://example.com', { include: 'markdown' });
-  assert.deepEqual(body.include, ['markdown']);
+  assert.deepEqual(body.include, ['markdown', 'dom']);
 });
 
 test('buildBrowserBody: --session forwards session_id (feature B)', () => {
@@ -300,6 +362,7 @@ test('request shape: POSTs /browser with bearer auth and the built body', async 
   assert.deepEqual(lastRequest.body, {
     url: 'https://example.com',
     steps: [{ action: 'eval', script: 'document.title' }],
+    include: ['dom'],
   });
 });
 
@@ -427,6 +490,35 @@ test('formatBrowserReport: --snapshot prints the full DOM map', () => {
     { snapshot: true },
   );
   assert.match(lines.join('\n'), /dom: button \[data-testid=submit\] \[visible\] "Go"/);
+});
+
+// "No map came back" and "the page has no controls" are different facts. Only
+// the second one is a count; printing the first as `0 interactive elements` is
+// a false statement about the page (pfb_57c43192d553).
+test('formatBrowserReport: a missing DOM map is reported as not read, never as zero', () => {
+  const out = formatBrowserReport({ passed: true, final_url: 'https://example.com/' }).join('\n');
+  assert.match(out, /^dom: not read/m);
+  assert.doesNotMatch(out, /interactive element/);
+});
+
+test('formatBrowserReport: an empty DOM map is still a count of zero', () => {
+  const out = formatBrowserReport({ passed: true, dom_outline: [] }).join('\n');
+  assert.match(out, /^dom: 0 interactive elements$/m);
+});
+
+test('formatBrowserReport: an unavailable DOM map names the reason', () => {
+  const out = formatBrowserReport({
+    passed: true,
+    dom_error: 'DOM probe failed: Execution context was destroyed',
+  }).join('\n');
+  assert.match(out, /^dom: unavailable \(DOM probe failed: Execution context was destroyed\)$/m);
+  assert.doesNotMatch(out, /interactive element/);
+});
+
+test('formatBrowserReport: --snapshot on a missing DOM map prints no map lines', () => {
+  const out = formatBrowserReport({ passed: true }, { snapshot: true }).join('\n');
+  assert.match(out, /^dom: not read/m);
+  assert.equal(out.split('\n').filter((l) => l.startsWith('dom: ')).length, 1);
 });
 
 test('formatBrowserReport: DOM state annotations distinguish hidden and disabled controls', () => {

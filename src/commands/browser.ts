@@ -86,6 +86,9 @@ export interface BrowserResult {
     visible?: boolean;
     disabled?: boolean;
   }>;
+  /** Why the interactive-element map is missing, when the run knows. Absent
+   *  `dom_outline` with no reason is reported as "not read", never as zero. */
+  dom_error?: string;
   testid_map?: Record<string, unknown>;
   /** Structured extraction (--extract / --include markdown): the page as clean markdown. */
   markdown?: string;
@@ -163,12 +166,15 @@ export function buildBrowserBody(
   const sections = new Set(
     (opts.include ?? '').split(',').map((s) => s.trim()).filter(Boolean),
   );
-  // `--snapshot` PRINTS the interactive-element map, so it has to ASK for it.
-  // The DOM map is an opt-in section; without this the flag rendered whatever
-  // the response happened to carry, which was nothing — `--wait button
-  // --snapshot` matched a button and then printed "dom: 0 interactive
-  // elements" on a page with three of them (tsk_bdd72f02c2).
-  if (opts.snapshot) sections.add('dom');
+  // The report PRINTS the interactive-element map — the count by default, the
+  // full map with `--snapshot` — so every call has to ASK for it. The DOM map
+  // is an opt-in section; without this the report rendered whatever the
+  // response happened to carry, which was nothing: `--wait button --snapshot`
+  // matched a button and then printed "dom: 0 interactive elements" on a page
+  // with three of them (tsk_bdd72f02c2), and the default report said the same
+  // about example.com's one link while `--snapshot` said 1 (pfb_57c43192d553).
+  // Added last so an explicit `--include` keeps its own order.
+  sections.add('dom');
   if (sections.size) body.include = [...sections];
   // Structured extraction: read the page as clean markdown (feature A).
   if (opts.extract) body.extract = 'markdown';
@@ -271,7 +277,10 @@ export function formatBrowserReport(
   const ce = r.console_errors ?? [];
   const pe = r.page_errors ?? [];
   const fr = r.failed_requests ?? [];
-  const dom = r.dom_outline ?? [];
+  // No map at all is NOT a count of zero. `?? []` collapsed the two, so a
+  // response that never carried the section was reported as the factual claim
+  // "0 interactive elements" about a page full of controls (pfb_57c43192d553).
+  const dom = Array.isArray(r.dom_outline) ? r.dom_outline : undefined;
 
   const verdict = r.passed === false ? red('FAIL') : green('PASS');
   lines.push(`${verdict} ${teal(r.final_url ?? '(no url)')}`);
@@ -289,7 +298,15 @@ export function formatBrowserReport(
     const suffix = expectation.error ? ` ${dim(`— ${expectation.error}`)}` : '';
     lines.push(`expect_request: ${mark} ${expectation.path}:${expectation.status}${suffix}`);
   }
-  lines.push(`dom: ${dom.length} interactive element${dom.length === 1 ? '' : 's'}`);
+  if (dom) {
+    lines.push(`dom: ${dom.length} interactive element${dom.length === 1 ? '' : 's'}`);
+  } else if (r.dom_error) {
+    lines.push(`dom: unavailable (${r.dom_error})`);
+  } else {
+    lines.push(
+      `dom: not read ${dim('(the response carried no interactive-element map — this is not a count of zero)')}`,
+    );
+  }
 
   for (const [i, s] of (r.steps ?? []).entries()) {
     const ok = s.ok ?? s.passed;
@@ -351,7 +368,7 @@ export function formatBrowserReport(
 
   // Full interactive-element map only on demand; the count above is the default.
   if (opts.snapshot) {
-    for (const el of dom) {
+    for (const el of dom ?? []) {
       const handle = el.testid ? `[data-testid=${el.testid}]` : el.selector ?? el.tag ?? '?';
       const text = el.text ? ` "${el.text}"` : '';
       const state = el.visible === false ? ' [hidden]' : el.disabled ? ' [disabled]' : ' [visible]';
@@ -530,7 +547,7 @@ export function registerBrowser(program: Command) {
     )
     .option(
       '--include <sections>',
-      'Opt-in heavy sections for a no-steps inspect call: a comma list of "network", "dom", and/or "markdown" (e.g. --include network,dom). Lean by default.',
+      'Opt-in heavy sections for a no-steps inspect call: a comma list of "network", "dom", and/or "markdown" (e.g. --include network,dom). Lean by default. The DOM map is always requested — the report prints its count — so "dom" here is redundant.',
     )
     .option(
       '--extract',

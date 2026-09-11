@@ -172,7 +172,8 @@ test('browser --json reports an unhealthy linked-directory URL as EYES passed:fa
 
     assert.equal(result.status, 1);
     assert.equal(result.stderr, '');
-    assert.deepEqual(browserBody, { url: 'https://third-party.test/missing' });
+    // The default report prints a `dom:` count, so every call asks for the map.
+    assert.deepEqual(browserBody, { url: 'https://third-party.test/missing', include: ['dom'] });
     const payload = JSON.parse(result.stdout);
     assert.equal(payload.passed, false);
     assert.equal(payload.failed_requests.length, 1);

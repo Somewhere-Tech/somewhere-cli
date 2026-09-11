@@ -89,7 +89,10 @@ export interface LocalBrowserReport {
   request_expectations?: BrowserRequestExpectationResult[];
   steps: LocalStepResult[];
   screenshots: Array<{ label: string; path: string }>;
-  dom_outline: Array<Record<string, unknown>>;
+  /** Absent when the probe could not read the page; `dom_error` says why. An
+   *  empty array means the page really has no interactive elements. */
+  dom_outline?: Array<Record<string, unknown>>;
+  dom_error?: string;
   testid_map: Record<string, string>;
   /** Names the half that answered, so a report is never mistaken for the other. */
   environment: 'local';
@@ -565,7 +568,8 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
     // The interactive-element map, read AFTER the steps — the same ordering the
     // hosted browser uses, so the map describes the page the run left behind
     // rather than the page before the wait resolved.
-    let domOutline: Array<Record<string, unknown>> = [];
+    let domOutline: Array<Record<string, unknown>> | undefined;
+    let domError: string | undefined;
     let testidMap: Record<string, string> = {};
     try {
       const probe = (await evaluate(session, await domOutlineScript())) as {
@@ -577,7 +581,11 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
         : [];
       testidMap = probe?.testid_map ?? {};
     } catch (err) {
-      consoleErrors.push(`[inspect] DOM probe failed: ${err instanceof Error ? err.message : String(err)}`);
+      // A probe that could not run leaves the map UNKNOWN. Reporting it as an
+      // empty outline would print "0 interactive elements" — a claim about the
+      // page that nothing here measured (pfb_57c43192d553).
+      domError = `DOM probe failed: ${err instanceof Error ? err.message : String(err)}`;
+      consoleErrors.push(`[inspect] ${domError}`);
     }
 
     if (req.screenshotPath) {
@@ -619,6 +627,7 @@ export async function runLocalBrowser(req: LocalBrowserRequest): Promise<LocalBr
       steps,
       screenshots,
       dom_outline: domOutline,
+      ...(domError ? { dom_error: domError } : {}),
       testid_map: testidMap,
       environment: 'local',
     };
