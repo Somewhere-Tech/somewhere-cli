@@ -7,6 +7,7 @@ import { isBuildError, renderBuildError } from '../lib/build-errors.js';
 import {
   getToken,
   loadConfig,
+  loadProjectConfig,
   loadProjectConfigEntry,
   projectConfigMatchesRef,
   readProjectDeployState,
@@ -25,6 +26,7 @@ import { mintTempAccount } from '../lib/temp-auth.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
+import { formatNextActions, nextActions } from '../lib/next-actions.js';
 import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
 import {
   formatVerifyReport,
@@ -848,7 +850,26 @@ export function registerDeploy(program: Command) {
           } else {
             success(formatted.liveMessage);
           }
-          if (!hasFunctionErrors) info(POST_DEPLOY_HINT);
+          if (!hasFunctionErrors) {
+            // Would a bare `somewhere browser` from HERE reach what was just
+            // deployed? It resolves the link from the current directory only
+            // (commands/browser.ts → loadProjectConfig()), which is not always
+            // the directory this deploy targeted.
+            const cwdConfig = loadProjectConfig();
+            for (const line of formatNextActions(
+              nextActions({
+                stage: 'deploy',
+                projectLinked: Boolean(
+                  cwdConfig && projectId && cwdConfig.project_id === projectId,
+                ),
+                liveUrl: formatted.liveUrl ?? null,
+              }),
+              { command: teal, why: dim },
+            )) {
+              console.log(line);
+            }
+            info(POST_DEPLOY_HINT);
+          }
         }
 
         // Remind the dev of the round-trip trade-off they opted into. Raw

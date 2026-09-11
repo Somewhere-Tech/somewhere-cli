@@ -13,7 +13,8 @@ import {
 import { installInitDependencies } from '../lib/init-install.js';
 import { canWriteInitScaffold, writeInitScaffold } from '../lib/init-scaffold.js';
 import { createGreenTemplate } from '../lib/init-green-template.js';
-import { error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { formatNextActions, nextActions, type NextActionContext } from '../lib/next-actions.js';
+import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 interface InitOptions {
   name?: string;
@@ -168,11 +169,7 @@ export function registerInit(program: Command) {
         }
 
         console.log('');
-        info(
-          shouldScaffold
-            ? 'Next: somewhere dev → somewhere deploy → open the live URL'
-            : 'Project created. Run somewhere dev to build locally, then somewhere deploy to put it live.',
-        );
+        printNext({ stage: 'init', scaffolded: shouldScaffold });
       } catch (err) {
         spinner?.fail('Failed to create project');
         error(err instanceof Error ? err.message : String(err));
@@ -248,5 +245,14 @@ export async function linkExisting(
   }
 
   console.log('');
-  info('Next: somewhere dev to run it here, somewhere deploy to publish it. Any coding agent can drive this CLI.');
+  printNext({ stage: 'init', scaffolded: false });
+}
+
+/** One rendering of the contextual next steps (lib/next-actions.ts), so create
+ *  and link close the same way. */
+function printNext(ctx: NextActionContext): void {
+  info(bold('Next'));
+  for (const line of formatNextActions(nextActions(ctx), { command: teal, why: dim })) {
+    console.log(line);
+  }
 }

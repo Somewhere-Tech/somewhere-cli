@@ -44,12 +44,14 @@ test('no command tells the developer to run a specific vendor tool', () => {
   assert.deepEqual(offenders, [], `vendor-specific next step:\n${offenders.join('\n')}`);
 });
 
-test('init closes with the greenfield on-ramp language', () => {
+test('init closes with the greenfield on-ramp, and it no longer opens with dev', () => {
   const init = readFileSync(join(srcDir, 'commands', 'init.ts'), 'utf8');
-  assert.match(init, /Next: somewhere dev → somewhere deploy → open the live URL/);
-  assert.match(
-    init,
-    /Project created\. Run somewhere dev to build locally, then somewhere deploy to put it live\./,
-  );
+  // The closing copy moved into lib/next-actions.ts so create and link share
+  // one answer; what init owns is the call. The ORDER assertion lives in
+  // test/next-actions.test.mjs — `somewhere dev` refuses on a project that has
+  // never been deployed, so it can never be the first step (pfb_9a035f5ac8e9).
+  assert.match(init, /printNext\(\{ stage: 'init'/);
+  assert.doesNotMatch(init, /Next: somewhere dev/);
+  assert.doesNotMatch(init, /Run somewhere dev to build locally/);
   assert.doesNotMatch(init, /Project created:.*\(preview\)/);
 });

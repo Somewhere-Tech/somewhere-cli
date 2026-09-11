@@ -17,11 +17,13 @@ import {
   clearConfig,
   getToken,
   loadConfig,
+  loadProjectConfig,
   saveConfig,
   saveGlobalMcpConfig,
 } from '../lib/config.js';
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
-import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { formatNextActions, nextActions } from '../lib/next-actions.js';
+import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
 
 async function readAuthToken(): Promise<string> {
   const envToken = process.env.SOMEWHERE_TOKEN?.trim();
@@ -290,6 +292,18 @@ export function registerAuth(program: Command) {
     });
 }
 
+/** Both login paths end the same way: one step, chosen by whether this
+ *  directory is already a project. Never on `--json` — login prints no JSON,
+ *  and this is stdout copy for a human or an agent reading the transcript. */
+function printPostLoginNext(): void {
+  console.log('');
+  info(bold('Next'));
+  const actions = nextActions({ stage: 'login', linkedProject: Boolean(loadProjectConfig()) });
+  for (const line of formatNextActions(actions, { command: teal, why: dim })) {
+    console.log(line);
+  }
+}
+
 function installCancelHandler(getSpinner: () => Ora | null): void {
   process.on('SIGINT', () => {
     getSpinner()?.stop();
@@ -332,6 +346,7 @@ async function runDeviceLogin(): Promise<void> {
     success(`Device: ${getDeviceKeyName()}`);
     success(`Access: ${describeScope(scope)}`);
     success('Claude Code MCP configured');
+    printPostLoginNext();
     process.exit(0);
   } catch (err) {
     (spinner as Ora | null)?.stop();
@@ -360,6 +375,7 @@ async function runLegacyLogin(): Promise<void> {
     spinner.stop();
     success(`Logged in as ${teal(config.user.email)}`);
     success('Claude Code MCP configured');
+    printPostLoginNext();
     process.exit(0);
   } catch (err) {
     spinner.fail('Login failed');
