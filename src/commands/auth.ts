@@ -1,4 +1,3 @@
-import { advisorHealthLine, fetchAdvisorHealth } from '../lib/advisor-health.js';
 import { Command } from 'commander';
 import { readFileSync } from 'node:fs';
 import prompts from 'prompts';
@@ -167,7 +166,6 @@ export function registerAuth(program: Command) {
 
       const client = new ApiClient(config.token);
       try {
-        const advisorHealthPromise = fetchAdvisorHealth();
         const r = await client.call<{
           user: {
             email: string;
@@ -179,13 +177,11 @@ export function registerAuth(program: Command) {
           session?: { id: string; label: string; expires_at: string | null; scope: DeviceSessionScope | null } | null;
         }>('GET', '/auth/whoami');
 
-        const advisor_health = await advisorHealthPromise;
         if (opts.json) {
-          printJson({ ...r, advisor_health });
+          printJson(r);
           return;
         }
 
-        info(advisorHealthLine(advisor_health));
         const tier = r.user.effective_tier === 'builder' ? 'Builder' : 'Free';
         console.log(`${teal(r.user.email)}  ${dim(`(${tier})`)}`);
         if (r.user.name) info(dim(r.user.name));
@@ -265,7 +261,6 @@ export function registerAuth(program: Command) {
     .command('status')
     .description('Show current login state, device ID, key name, and advisor health')
     .action(async () => {
-      info(advisorHealthLine(await fetchAdvisorHealth()));
       const config = loadConfig();
       const deviceId = getDeviceId();
       const keyName = getDeviceKeyName();

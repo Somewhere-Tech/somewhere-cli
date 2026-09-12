@@ -372,7 +372,7 @@ test('rollback --json emits JSON errors for network failures', async () => {
   assert.doesNotMatch(result.stdout, /Rollback failed|✗/);
 });
 
-test('whoami --json preserves account data and adds independent advisor health', async () => {
+test('whoami --json preserves account data without advisor health polling', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-whoami-home-'));
   writeConfig(HOME);
 
@@ -399,9 +399,7 @@ test('whoami --json preserves account data and adds independent advisor health',
 
     assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
     const output = JSON.parse(result.stdout);
-    const { advisor_health, ...account } = output;
-    assert.deepEqual(account, whoamiData);
-    assert.equal(advisor_health.status, 'unknown');
+    assert.deepEqual(output, whoamiData);
     assert.doesNotMatch(result.stdout, /json@example\.com\s+\(/);
   });
 });

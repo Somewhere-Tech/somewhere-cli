@@ -5,21 +5,15 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { fetchAdvisorHealth, advisorHealthLine } from '../dist/lib/advisor-health.js';
 
 // Real command handlers, fixture server, isolated HOME. No live credentials.
-test('cached health and CLI entrypoints reveal degradation without breaking account JSON or blocking questions', async () => {
+test('account and advisor commands perform no synthetic health preflight', async () => {
   const home = mkdtempSync(join(tmpdir(), 'cli-advisor-health-'));
   const requests = [];
-  let status = 'healthy';
-  let checkedAt = Date.now();
   const server = createServer(async (req, res) => {
     requests.push({ path: req.url, auth: req.headers.authorization });
     res.setHeader('content-type', 'application/json');
-    if (req.url === '/health?cached=1') {
-      res.statusCode = status === 'degraded' ? 503 : 200;
-      res.end(JSON.stringify({ advisor: { status, checked_at: checkedAt, reason: status === 'healthy' ? null : 'Advisor is slow.', alternative: 'Use somewhere docs payments.' } }));
-    } else if (req.url === '/v1/auth/whoami') {
+    if (req.url === '/v1/auth/whoami') {
       res.end(JSON.stringify({ ok: true, data: { user: { email: 'fixture@example.test', effective_tier: 'free' }, stats: { projects: 0, api_keys: 1 } } }));
     } else if (req.url === '/mcp' && req.method === 'POST') {
       let raw = ''; for await (const chunk of req) raw += chunk;
@@ -59,32 +53,15 @@ test('cached health and CLI entrypoints reveal degradation without breaking acco
     return { out, err };
   }
   try {
-    assert.equal((await fetchAdvisorHealth()).status, 'healthy');
-    const healthy = await command(['whoami', '--json']);
-    assert.equal(JSON.parse(healthy.out).advisor_health.status, 'healthy');
-    status = 'degraded';
-    const degraded = await command(['whoami', '--json']);
-    assert.equal(JSON.parse(degraded.out).user.email, 'fixture@example.test');
-    assert.equal(JSON.parse(degraded.out).advisor_health.status, 'degraded');
-    const human = await command(['auth', 'status']);
-    assert.match(human.out + human.err, /Advisor: degraded/);
-    const before = requests.length;
-    const answer = await command(['advisor', 'How does this work?', '--json', '--no-context']);
-    assert.match(answer.err, /Advisor: degraded.*somewhere docs payments/);
-    assert.equal(JSON.parse(answer.out).answer, 'The actual answer.');
-    assert.equal(requests[before].path, '/health?cached=1', 'health is visible before the advisor request');
-    assert.ok(requests.filter((r) => r.path.startsWith('/health')).every((r) => !r.auth), 'public cached check never carries credentials');
-    status = 'healthy';
-    checkedAt = 1e100;
-    const invalidTime = await command(['whoami', '--json']);
-    assert.equal(JSON.parse(invalidTime.out).advisor_health.checked_at, null, 'invalid health time cannot break account output');
-    const invalidTimeHuman = await command(['auth', 'status']);
-    assert.match(invalidTimeHuman.out + invalidTimeHuman.err, /Advisor: healthy/);
-    status = 'invalid';
-    assert.equal((await fetchAdvisorHealth()).status, 'unknown');
-    process.env.SOMEWHERE_MCP_URL = 'invalid';
-    assert.equal((await fetchAdvisorHealth()).status, 'unknown', 'bad status configuration cannot report an account failure');
-    assert.match(advisorHealthLine({ status: 'unknown', checked_at: null, reason: null, alternative: 'Use docs.' }), /unknown.*Use docs/);
+    const account = await command(['whoami', '--json']);
+    assert.equal(JSON.parse(account.out).user.email, 'fixture@example.test');
+    assert.equal(JSON.parse(account.out).advisor_health, undefined);
+    await command(['auth', 'status']);
+    const answer = await command(['advisor', 'How do I deploy?', '--no-context']);
+    assert.match(answer.out, /The actual answer/);
+    assert.doesNotMatch(account.err + answer.err, /Advisor:|health check/);
+    assert.ok(requests.some(r => r.path === '/mcp'));
+    assert.ok(requests.every(r => !r.path.startsWith('/health')), 'no health fetch on account or actual advisor calls');
   } finally {
     if (originalUrl === undefined) delete process.env.SOMEWHERE_MCP_URL; else process.env.SOMEWHERE_MCP_URL = originalUrl;
     server.closeAllConnections();

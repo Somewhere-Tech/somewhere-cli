@@ -1,6 +1,6 @@
 {
   "name": "@somewhere-tech/cli",
-  "version": "0.32.3",
+  "version": "0.32.4",
   "description": "CLI for somewhere.tech — auth, projects, deploy, pull, promote, db, logs, env, MCP bridge.",
   "keywords": [
     "somewhere",
@@ -39,7 +39,6 @@
     "prepublishOnly": "npm run build",
     "test": "npm run build && node --test \"test/*.test.mjs\"",
     "test:roundtrip": "node scripts/e2e-roundtrip.mjs",
-    "check-advisor-health": "npm run build && node --test test/advisor-health.test.mjs",
     "prebuild": "node -e \"require('node:fs').rmSync('dist', { recursive: true, force: true })\""
   },
   "engines": {
