@@ -1,3 +1,4 @@
+import { fileURLToPath } from 'node:url';
 /**
  * The CLI's own instructions to the developer name the PLATFORM, not a vendor.
  *
@@ -14,7 +15,7 @@ import { readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
 
-const srcDir = new URL('../src/', import.meta.url).pathname;
+const srcDir = fileURLToPath(new URL('../src/', import.meta.url));
 
 function sourceFiles(dir) {
   const out = [];

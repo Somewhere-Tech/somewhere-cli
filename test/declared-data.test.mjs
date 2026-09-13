@@ -39,6 +39,44 @@ function fixture(t, files = {}) {
 }
 const check = root => runTypecheck(root, { installTypePackages: false });
 
+test('local typecheck resolves declared relation reads and parent-authorized moves', async t => {
+  const relationalSchema = `import { anyOf, parent } from 'somewhere/db';
+  export default schema({
+    projects: table({ id: id(), title: text() }, {
+      scope: anyOf(owner(), member({ group: 'id', membership: 'project_members', member_user: 'user_id', member_group: 'project_id' })),
+      relations: { tasks: hasMany('tasks', 'project_id') },
+      client: { read: ['id', 'title'], create: ['title'] },
+    }),
+    project_members: table({ id: id(), project_id: integer({ references: 'projects' }), user_id: text() }, { scope: serverOnly() }),
+    tasks: table({ id: id(), project_id: integer({ references: 'projects' }), title: text(), secret: text({ default: 'private' }) }, {
+      scope: parent({ via: 'project_id' }),
+      client: { read: ['id', 'title'], create: ['project_id', 'title'], update: ['project_id', 'title'] },
+    }),
+  });`;
+  const root = fixture(t, {
+    'db/schema.ts': relationalSchema,
+    'src/main.ts': `import { data } from 'somewhere:data';
+const first = await data.projects.relations.tasks.list(1, { limit: 2, where: { title: 'Draft' } });
+const title: string | undefined = first.data[0]?.title;
+if (first.next !== null) await data.projects.relations.tasks.list(1, { after: first.next });
+await data.tasks.update(1, { project_id: 2, title: 'Moved' });
+export { title };`,
+  });
+  const good = await check(root);
+  assert.equal(good.ok, true, good.raw);
+  writeFileSync(join(root, 'src', 'bad.ts'), `import { data } from 'somewhere:data';
+const page = await data.projects.relations.tasks.list(1);
+page.data[0].project_id;
+page.data[0].secret;
+data.projects.relations.tasks.list(1, { where: { secret: 'private' } });
+data.projects.relations.tasks.create({ title: 'No relation writes' });
+data.projects.create({ title: 'No owner assignment', user_id: 'another-user' });
+`);
+  const bad = await check(root);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.length, 5, bad.raw);
+});
+
 test('vendored parser/generator artifact is pinned and its bytes match provenance', () => {
   const manifest = JSON.parse(readFileSync(new URL('../runtime/DECLARED-DATA-VENDOR.json', import.meta.url), 'utf8'));
   const artifact = readFileSync(new URL('../runtime/declared-data.cjs', import.meta.url));

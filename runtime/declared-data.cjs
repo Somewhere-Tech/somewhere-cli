@@ -48,12 +48,41 @@ var require_declared_data_contract = __commonJS({
       if (result.some((field) => typeof field !== "string" || !columns.has(field)) || new Set(result).size !== result.length) fail(name);
       return result.sort();
     }
+    function policy(value, label) {
+      record(value, label);
+      const keys = Object.keys(value).sort().join(",");
+      if (value.k === "o" && keys === "c,k" && identifier.test(value.c)) return { k: "o", c: value.c };
+      if (value.k === "m" && keys === "k,m") {
+        record(value.m, label + ".member");
+        const { g, m, u, mg } = value.m;
+        if (Object.keys(value.m).sort().join(",") !== "g,m,mg,u" || !identifier.test(m) || !identifier.test(u) || !Array.isArray(g) || !g.length || !Array.isArray(mg) || g.length !== mg.length || [...g, ...mg].some((field) => typeof field !== "string" || !identifier.test(field))) fail(label);
+        return { k: "m", m: { g: [...g], m, u, mg: [...mg] } };
+      }
+      if (value.k === "a" && keys === "k,p" && Array.isArray(value.p) && value.p.length === 2) {
+        const left = policy(value.p[0], label), right = policy(value.p[1], label);
+        if (left.k !== "o" || right.k !== "m") fail(label);
+        return { k: "a", p: [left, right] };
+      }
+      if (value.k === "p" && keys === "k,p,pk,t,v" && [value.v, value.t, value.pk].every((item) => typeof item === "string" && identifier.test(item))) {
+        const inherited = policy(value.p, label);
+        if (!["o", "m", "a"].includes(inherited.k)) fail(label);
+        return { k: "p", v: value.v, t: value.t, pk: value.pk, p: inherited };
+      }
+      fail(label);
+    }
+    function policyMembershipTables(value, out) {
+      if (!value || typeof value !== "object") return;
+      if (value.k === "m" && value.m) out.add(value.m.m);
+      else if (value.k === "a") value.p.forEach((item) => policyMembershipTables(item, out));
+      else if (value.k === "p") policyMembershipTables(value.p, out);
+    }
     function canonicalize2(schema, intents, scopes) {
       record(schema, "schema");
       record(intents, "intents");
       record(scopes, "scopes");
       const tables = [];
       const membershipTables = new Set(Object.values(schema).filter((table) => table && table.member).map((table) => table.member.m));
+      for (const table of Object.values(schema)) if (table?.policy) policyMembershipTables(table.policy, membershipTables);
       for (const name of Object.keys(schema).sort()) {
         const table = schema[name];
         record(table, `table ${name}`);
@@ -78,14 +107,30 @@ var require_declared_data_contract = __commonJS({
         if (Object.keys(input).some((key) => !["read", "publicRead", "create", "update", "delete", "identity"].includes(key))) fail(`${name} permissions`);
         const read = typeof input.read === "boolean" ? input.read : fields(input.read, seen, `${name}.read`);
         if (Array.isArray(read) && !read.includes(pk)) fail(`${name}.read must include the primary key`);
-        if (typeof input.publicRead !== "boolean" || typeof input.delete !== "boolean" || !["authenticated", "visitor"].includes(input.identity)) fail(`${name} permissions`);
+        let publicRead = input.publicRead;
+        if (typeof publicRead !== "boolean") {
+          record(publicRead, `${name} public read`);
+          if (Object.keys(publicRead).some((key) => key !== "where")) fail(`${name} public read`);
+          record(publicRead.where, `${name} public read predicate`);
+          const entries = Object.entries(publicRead.where);
+          if (!entries.length || entries.length > 8) fail(`${name} public read predicate`);
+          const where = {};
+          for (const [field, value] of entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+            const column = columns.find((column2) => column2.n === field);
+            if (!column || ["json", "blob"].includes(column.t) || !(value === null || typeof value === "string" && value.length <= 256 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) fail(`${name} public read predicate`);
+            if (value === null ? column.nul !== 1 : column.t === "boolean" ? typeof value !== "boolean" : ["integer", "number"].includes(column.t) ? typeof value !== "number" : ["text", "timestamp"].includes(column.t) ? typeof value !== "string" : true) fail(`${name} public read predicate type`);
+            where[field] = value;
+          }
+          publicRead = { where };
+        }
+        if (typeof input.delete !== "boolean" || !["authenticated", "visitor"].includes(input.identity)) fail(`${name} permissions`);
         const create = input.create === null ? null : fields(input.create, seen, `${name}.create`, true);
         const update = input.update === null ? null : fields(input.update, seen, `${name}.update`);
         if (membershipTables.has(name) && (create !== null || update !== null || input.delete)) fail(`${name} membership authority writes`);
         if ([...create || [], ...update || []].some((field) => columns.find((column) => column.n === field).t === "blob")) fail(`${name} blob browser writes require a server function`);
         const intent = intents[name];
-        if (!["scoped", "shared", "member"].includes(intent)) fail(`${name} intent`);
-        const owner = intent === "scoped" ? scopes[name] : null;
+        if (!["scoped", "shared", "member", "policy"].includes(intent)) fail(`${name} intent`);
+        let owner = intent === "scoped" ? scopes[name] || null : null;
         if (intent === "scoped" && (typeof owner !== "string" || !identifier.test(owner))) fail(`${name} owner`);
         if (table.visitors !== void 0 && table.visitors !== true) fail(`${name} visitors`);
         const visitors = table.visitors === true;
@@ -95,7 +140,8 @@ var require_declared_data_contract = __commonJS({
         if (intent === "shared" && (author !== "_sw_author_id" || !columns.some((column) => column.n === author && column.t === "text" && column.nul === 1))) fail(`${name} author`);
         if (Array.isArray(read) && read.includes(author)) fail(`${name} internal author projection`);
         if (input.identity === "visitor" && intent !== "scoped") fail(`${name} visitor identity`);
-        if (input.publicRead && !Array.isArray(read)) fail(`${name} public read`);
+        if (publicRead && !Array.isArray(read)) fail(`${name} public read`);
+        if (typeof publicRead === "object" && [...create || [], ...update || []].some((field) => Object.prototype.hasOwnProperty.call(publicRead.where, field))) fail(`${name} publication writes require a server function`);
         if ([...create || [], ...update || []].some((field) => field === pk || field === owner || field === author)) fail(`${name} identity writes`);
         let member = null;
         if (intent === "member") {
@@ -107,7 +153,49 @@ var require_declared_data_contract = __commonJS({
           if ((update || []).some((field) => g.includes(field))) fail(`${name} membership writes`);
           member = { g: [...g], m, u, mg: [...mg] };
         }
-        tables.push({ name, columns, client: { identity: input.identity, read, publicRead: input.publicRead, create, update, delete: input.delete }, primaryKey: pk, intent, owner, author, visitors, member });
+        const normalizedPolicy = intent === "policy" ? policy(table.policy, `${name}.policy`) : null;
+        if (normalizedPolicy && !["a", "p"].includes(normalizedPolicy.k)) fail(`${name}.policy root`);
+        if (normalizedPolicy?.k === "a") {
+          owner = normalizedPolicy.p[0].c;
+          if ([...create || [], ...update || []].includes(owner) || (update || []).some((field) => normalizedPolicy.p[1].m.g.includes(field))) fail(`${name}.policy identity writes`);
+        }
+        if (normalizedPolicy?.k === "p" && create !== null && !create.includes(normalizedPolicy.v)) fail(`${name}.policy parent create`);
+        tables.push({
+          name,
+          columns,
+          client: { identity: input.identity, read, publicRead, create, update, delete: input.delete },
+          primaryKey: pk,
+          intent,
+          owner,
+          author,
+          visitors,
+          member,
+          ...normalizedPolicy ? { policy: normalizedPolicy } : {}
+        });
+      }
+      const tableByName = new Map(tables.map((table) => [table.name, table]));
+      for (const table of tables) {
+        const declared = schema[table.name].relations;
+        if (declared === void 0) continue;
+        if (!Array.isArray(declared)) fail(`${table.name}.relations`);
+        const relations = [];
+        const names = /* @__PURE__ */ new Set();
+        for (const relation of declared) {
+          record(relation, `${table.name}.relation`);
+          if (Object.keys(relation).some((key) => !["name", "table", "fk", "parentKey"].includes(key))) fail(`${table.name}.relation`);
+          const { name, table: childName, fk, parentKey } = relation;
+          if (![name, childName, fk, parentKey].every((value) => typeof value === "string" && identifier.test(value)) || names.has(name)) {
+            fail(`${table.name}.relation`);
+          }
+          names.add(name);
+          const declaredChild = schema[childName];
+          if (!declaredChild || !Array.isArray(declaredChild.columns) || parentKey !== table.primaryKey || !declaredChild.columns.some((column) => column && column.n === fk)) fail(`${table.name}.relation`);
+          const child = tableByName.get(childName);
+          if (table.client.read !== false && child && child.client.read !== false) {
+            relations.push({ name, table: childName, fk, parentKey });
+          }
+        }
+        if (relations.length) table.relations = relations.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
       }
       return JSON.stringify({ version: 1, tables });
     }
@@ -115,10 +203,10 @@ var require_declared_data_contract = __commonJS({
       const type = { integer: "number | string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "Json", blob: "number[]" }[column.t];
       return column.nul ? `${type} | null` : type;
     }
-    function shape(columns, names, mode) {
+    function shape(columns, names, mode, required = /* @__PURE__ */ new Set()) {
       const values = names.map((name) => {
         const column = columns.find((candidate) => candidate.n === name);
-        const optional = mode === "update" || mode === "create" && (column.d || column.nul);
+        const optional = mode === "update" || mode === "create" && !required.has(name) && (column.d || column.nul);
         return `${JSON.stringify(name)}${optional ? "?" : ""}: ${columnType(column)}`;
       });
       return values.length ? `{ ${values.join("; ")} }` : "Record<string, never>";
@@ -143,7 +231,8 @@ var require_declared_data_contract = __commonJS({
         }
         const mutation = client.read === false ? "{ count: number; changes: number }" : `{ data: ${row} | null; count: number; changes: number }`;
         if (client.create !== null) {
-          operations.push(`create(values: ${shape(columns, client.create, "create")}): Promise<${mutation}>`);
+          const required = table.policy?.k === "p" ? /* @__PURE__ */ new Set([table.policy.v]) : /* @__PURE__ */ new Set();
+          operations.push(`create(values: ${shape(columns, client.create, "create", required)}): Promise<${mutation}>`);
           methods.push("create");
         }
         if (client.update !== null) {
@@ -154,8 +243,21 @@ var require_declared_data_contract = __commonJS({
           operations.push(`delete(id: ${id}): Promise<${mutation}>`);
           methods.push("delete");
         }
+        const relationDeclarations = [];
+        const relationNames = [];
+        for (const relation of table.relations || []) {
+          const child = tables.find((candidate) => candidate.name === relation.table);
+          const childReadable = child.client.read === true ? child.columns.filter((column) => column.n !== child.author).map((column) => column.n) : child.client.read;
+          const childRow = shape(child.columns, childReadable, "read");
+          const childId = columnType(child.columns.find((column) => column.n === child.primaryKey));
+          const parentId = columnType(columns.find((column) => column.n === primaryKey));
+          const equality = childReadable.filter((field) => !["json", "blob"].includes(child.columns.find((column) => column.n === field).t));
+          relationDeclarations.push(`${JSON.stringify(relation.name)}: { list(parentId: ${parentId}, options?: { limit?: number; after?: ${childId}; where?: ${shape(child.columns, equality, "update")} }): Promise<{ data: ${childRow}[]; next: ${childId} | null; has_more: boolean }> }`);
+          relationNames.push(relation.name);
+        }
+        if (relationDeclarations.length) operations.push(`relations: { ${relationDeclarations.join("; ")} }`);
         declarations.push(`${JSON.stringify(name)}: { ${operations.join("; ")} }`);
-        runtimeTables.push([name, methods]);
+        runtimeTables.push([name, methods, relationNames]);
       }
       const declaration = `declare module ${JSON.stringify("somewhere:data")} {
   export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
@@ -166,7 +268,7 @@ var require_declared_data_contract = __commonJS({
       const runtime = `const contract=${JSON.stringify(contract_digest)};
 class DataError extends Error{constructor(status,payload){super(payload&&typeof payload.message==="string"?payload.message:payload&&typeof payload.error==="string"?payload.error:"Data operation failed");this.name="DataError";this.status=status;this.code=payload&&typeof payload.error==="string"?payload.error:null}}
 const invoke=async(table,operation,input)=>{const response=await fetch("/__sw/data",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,contract,table,operation})});const payload=await response.json().catch(()=>{throw new DataError(response.status,{error:"INVALID_DATA_RESPONSE",message:"Data operation returned an invalid response"})});if(!response.ok)throw new DataError(response.status,payload);return payload};
-const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations])=>[table,Object.freeze(Object.fromEntries(operations.map(operation=>[operation,operation==="list"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):id=>invoke(table,operation,{id})])))])));
+const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];})));
 export{data,DataError};
 `;
       return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration } };
@@ -216,12 +318,13 @@ var require_schema_types = __commonJS({
   interface Relation { readonly __somewhereRelation: unique symbol }
   interface Scope { readonly __somewhereScope: unique symbol }
   interface OwnerScope extends Scope { readonly __somewhereOwner: unique symbol }
+  interface MemberScope extends Scope { readonly __somewhereMember: unique symbol }
   interface ColumnOptions<Default> {
     nullable?: boolean; default?: Default | null; unique?: boolean;
     references?: string; onDelete?: 'cascade' | 'restrict'; renamedFrom?: string;
   }
   interface ClientPermissions<Field extends string> {
-    identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean;
+    identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
     create?: Field[] | false | null; update?: Field[] | false | null; delete?: boolean;
   }
   interface TableOptions<Field extends string> {
@@ -243,14 +346,18 @@ function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): Somewh
 function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
 function shared(): SomewhereSchemaDeclaration.Scope;
 function serverOnly(): SomewhereSchemaDeclaration.Scope;
-function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[] }): SomewhereSchemaDeclaration.Scope;
+function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[] }): SomewhereSchemaDeclaration.MemberScope;
 function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
 function removed(): SomewhereSchemaDeclaration.ColumnMarker;
 function removedTable(): SomewhereSchemaDeclaration.TableMarker;
 function exported(): SomewhereSchemaDeclaration.TableMarker;
 `;
+    var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, member: SomewhereSchemaDeclaration.MemberScope): SomewhereSchemaDeclaration.Scope;
+function anyOf(member: SomewhereSchemaDeclaration.MemberScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
+function parent(options: { via: string }): SomewhereSchemaDeclaration.Scope;
+`;
     var SCHEMA_DECLARATION2 = types + signatures.replace(/^function /gm, "declare function ") + `declare module 'somewhere/db' {
-${signatures.replace(/^function /gm, "  export function ")}}
+${(signatures + policySignatures).replace(/^function /gm, "  export function ")}}
 `;
     module2.exports = { SCHEMA_DECLARATION: SCHEMA_DECLARATION2 };
   }
@@ -276,7 +383,10 @@ type __SomewhereDbOperator = {
     & Partial<Record<Exclude<keyof __SomewhereDbOperators, K>, never>>
 }[keyof __SomewhereDbOperators];
 type SomewhereDbCondition = SomewhereDbScalar | __SomewhereDbOperator;
-type SomewhereDbWhere = Readonly<Record<string, SomewhereDbCondition | readonly SomewhereDbCondition[]>>;
+type SomewhereDbOrBranch = Readonly<Record<string, SomewhereDbCondition>>;
+type SomewhereDbWhere = Readonly<{
+  $or?: readonly SomewhereDbOrBranch[];
+} & Record<string, SomewhereDbCondition | readonly SomewhereDbCondition[] | readonly SomewhereDbOrBranch[] | undefined>>;
 type SomewhereDbOrder = string | readonly [string, ('asc' | 'desc')?]
   | readonly (readonly [string, ('asc' | 'desc')?])[];
 interface SomewhereDbReadOptions {
@@ -291,14 +401,17 @@ interface SomewhereDbReadOptions {
 interface SomewhereDbCountOptions { where?: SomewhereDbWhere | null }
 interface SomewhereDbInsertOptions { onConflict?: 'ignore' | 'update' | null }
 type SomewhereDbValues = Readonly<Record<string, __SomewhereJson>>;
-interface SomewhereDbUpdate {
-  set: SomewhereDbValues;
+type SomewhereDbIncrement = Readonly<Record<string, number>>;
+type SomewhereDbUpdate = {
   where?: SomewhereDbWhere | null;
-}
+} & (
+  | { set: SomewhereDbValues; increment?: SomewhereDbIncrement | null }
+  | { set?: never; increment: SomewhereDbIncrement }
+);
 interface SomewhereDbRemove { where?: SomewhereDbWhere | null }
 type SomewhereDbWriteIntent =
   | { op: 'insert'; table: string; values: SomewhereDbValues; options?: SomewhereDbInsertOptions | null }
-  | { op: 'update'; table: string; set: SomewhereDbValues; where?: SomewhereDbWhere | null }
+  | ({ op: 'update'; table: string } & SomewhereDbUpdate)
   | { op: 'remove'; table: string; where?: SomewhereDbWhere | null };
 interface SomewhereDbResult {
   // Composed results preserve the database representation. They do not use
@@ -364,7 +477,7 @@ function parseClientPermissions(value, columns, scope) {
       return fail(`Unknown client permission "${key}".`);
     }
   }
-  if (!["owner", "member", "shared"].includes(scope.kind)) {
+  if (!["owner", "member", "shared", "policy"].includes(scope.kind)) {
     return fail("serverOnly() tables cannot declare client access. Use a server function for business logic.");
   }
   const identity = scope.kind === "owner" && scope.visitors === true ? "visitor" : "authenticated";
@@ -375,8 +488,33 @@ function parseClientPermissions(value, columns, scope) {
     return fail("client.identity must match the owner() declaration. Visitor access requires owner({ visitors: true }); owner() and other scopes require authenticated identity.");
   }
   let read = input.read ?? false;
-  const publicRead = input.publicRead ?? false;
-  if (typeof publicRead !== "boolean") return fail("client.publicRead must be true or false.");
+  const rawPublicRead = input.publicRead ?? false;
+  let publicRead;
+  if (typeof rawPublicRead === "boolean") publicRead = rawPublicRead;
+  else {
+    if (!rawPublicRead || typeof rawPublicRead !== "object" || Array.isArray(rawPublicRead) || Object.keys(rawPublicRead).some((key) => key !== "where")) {
+      return fail("client.publicRead must be true, false, or { where: { field: literal } }.");
+    }
+    const where = rawPublicRead.where;
+    if (!where || typeof where !== "object" || Array.isArray(where)) return fail("client.publicRead.where must be a non-empty object.");
+    const entries = Object.entries(where);
+    if (entries.length === 0 || entries.length > 8) return fail("client.publicRead.where must declare 1 to 8 equality fields.");
+    const normalized = {};
+    for (const [rawName, literal] of entries) {
+      const name = rawName.toLowerCase();
+      const column = columns.find((candidate) => candidate.name === name);
+      if (Object.prototype.hasOwnProperty.call(normalized, name)) return fail(`client.publicRead.where declares field "${rawName}" twice.`);
+      if (!column || ["json", "blob"].includes(column.helper)) return fail(`client.publicRead.where names undeclared or non-scalar field "${rawName}".`);
+      if (!(literal === null || typeof literal === "boolean" || typeof literal === "string" || typeof literal === "number" && Number.isFinite(literal))) return fail(`client.publicRead.where field "${rawName}" must equal a literal scalar.`);
+      if (typeof literal === "string" && literal.length > 256) return fail(`client.publicRead.where field "${rawName}" exceeds 256 characters.`);
+      if (literal === null && !column.nullable) return fail(`client.publicRead.where field "${rawName}" cannot equal null because it is required.`);
+      if (literal !== null && (column.helper === "boolean" && typeof literal !== "boolean" || ["integer", "number"].includes(column.helper) && typeof literal !== "number" || ["text", "timestamp"].includes(column.helper) && typeof literal !== "string")) {
+        return fail(`client.publicRead.where field "${rawName}" must match its declared type.`);
+      }
+      normalized[name] = literal;
+    }
+    publicRead = { where: Object.fromEntries(Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b))) };
+  }
   if (read !== true && read !== false && !Array.isArray(read)) return fail("client.read must list readable fields, or be true or false.");
   if (publicRead && (!Array.isArray(read) || read.length === 0)) {
     return fail("client.publicRead requires an explicit non-empty client.read field list.");
@@ -406,11 +544,14 @@ function parseClientPermissions(value, columns, scope) {
       const name = entry.toLowerCase();
       const column = fields.get(name);
       if (!column) return fail(`client.${operation} names undeclared or platform-managed field "${entry}".`);
-      if (column.helper === "id" || scope.kind === "owner" && name === scope.column) {
+      if (column.helper === "id" || (scope.kind === "owner" || scope.kind === "policy") && name === scope.column) {
         return fail(`client.${operation} cannot write the platform-assigned identity field "${entry}".`);
       }
       if (column.helper === "blob") return fail(`client.${operation} cannot write binary field "${entry}". Use project files for uploads.`);
-      if (operation === "update" && scope.kind === "member" && scope.group?.includes(name)) {
+      if (typeof publicRead === "object" && Object.prototype.hasOwnProperty.call(publicRead.where, name)) {
+        return fail(`client.${operation} cannot write publication field "${entry}". Use a server operation to publish rows.`);
+      }
+      if (operation === "update" && (scope.kind === "member" || scope.kind === "policy") && scope.group?.includes(name)) {
         return fail(`client.update cannot move a row between membership groups by changing "${entry}".`);
       }
       if (allowed.includes(name)) return fail(`client.${operation} declares field "${entry}" twice.`);
@@ -420,6 +561,18 @@ function parseClientPermissions(value, columns, scope) {
     writes[operation] = allowed.sort();
   }
   if (writes.create !== null) {
+    if (typeof publicRead === "object") {
+      let guaranteedPrivate = false;
+      for (const [name, publishedValue] of Object.entries(publicRead.where)) {
+        const column = fields.get(name);
+        if (column.autoNow) continue;
+        const defaultValue = column.hasDefault ? column.default : column.nullable ? null : void 0;
+        if (defaultValue !== void 0 && defaultValue !== publishedValue) guaranteedPrivate = true;
+      }
+      if (!guaranteedPrivate) {
+        return fail("client.create has no fixed publication-field default that guarantees a private row. Give at least one predicate field a private default, or use a server operation.");
+      }
+    }
     for (const column of columns) {
       if (column.helper !== "id" && !column.nullable && !column.hasDefault && !column.autoNow && !writes.create.includes(column.name)) {
         return fail(`client.create must include required field "${column.name}", or that field needs a declared default.`);
@@ -463,7 +616,14 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (col.nullable === true) entry.nul = 1;
     if (implicitDefault || col.hasDefault === true || col.autoNow === true) entry.d = 1;
     out.push(entry);
-    permissionColumns.push({ name: entry.n, helper: col.helper, nullable: col.nullable === true, hasDefault: col.hasDefault === true, autoNow: col.autoNow === true });
+    permissionColumns.push({
+      name: entry.n,
+      helper: col.helper,
+      nullable: col.nullable === true,
+      hasDefault: col.hasDefault === true,
+      autoNow: col.autoNow === true,
+      ...col.default === null || ["string", "number", "boolean"].includes(typeof col.default) ? { default: col.default } : {}
+    });
     if (col.helper === "id") primaryKeys.push(entry.n);
   }
   const relations = bakedRelationsFromDeclared(shape.relations);
@@ -479,11 +639,13 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (!scope || typeof scope !== "object" || primaryKeys.length !== 1) return null;
     const sc = scope;
     if (typeof sc.kind !== "string") return null;
+    const policyIdentity = sc.kind === "policy" ? declaredPolicyIdentity(sc.policy) : {};
     const parsed = parseClientPermissions(shape.client, permissionColumns, {
       kind: sc.kind,
       ...visitors ? { visitors: true } : {},
       ...typeof sc.column === "string" ? { column: sc.column } : {},
-      ...Array.isArray(sc.group) && sc.group.every((value) => typeof value === "string") ? { group: sc.group } : {}
+      ...Array.isArray(sc.group) && sc.group.every((value) => typeof value === "string") ? { group: sc.group } : {},
+      ...policyIdentity
     });
     if (!parsed.ok) return null;
     if (Array.isArray(parsed.permissions.read) && !parsed.permissions.read.includes(primaryKeys[0])) return null;
@@ -494,9 +656,47 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (!member) return null;
     return relations ? { columns: out, member, relations, ...browser } : { columns: out, member, ...browser };
   }
+  if (scope !== null && typeof scope === "object" && scope.kind === "policy") {
+    const policy = bakedPolicyFromDeclared(scope.policy);
+    if (!policy || policy.k !== "a" && policy.k !== "p") return null;
+    return relations ? { columns: out, policy, relations, ...browser } : { columns: out, policy, ...browser };
+  }
   const author = scope !== null && typeof scope === "object" && scope.kind === "shared" ? SHARED_AUTHOR_COLUMN : void 0;
   if (author) out.push({ n: author, t: "text", nul: 1 });
   return { columns: out, ...relations ? { relations } : {}, ...author ? { author } : {}, ...visitors ? { visitors } : {}, ...browser };
+}
+function declaredPolicyIdentity(value) {
+  if (!value || typeof value !== "object") return {};
+  const node = value;
+  if (node.kind === "owner" && typeof node.column === "string") return { column: node.column };
+  if (node.kind === "member" && Array.isArray(node.group) && node.group.every((entry) => typeof entry === "string")) return { group: node.group };
+  if (node.kind === "any_of" && Array.isArray(node.policies)) {
+    return node.policies.reduce((all, child) => ({ ...all, ...declaredPolicyIdentity(child) }), {});
+  }
+  return {};
+}
+function bakedPolicyFromDeclared(value, depth = 0) {
+  if (depth > 2 || value === null || typeof value !== "object") return null;
+  const node = value;
+  if (node.kind === "owner") {
+    return typeof node.column === "string" && SAFE_SCOPE_IDENTIFIER.test(node.column) ? { k: "o", c: node.column.toLowerCase() } : null;
+  }
+  if (node.kind === "member") {
+    const member = bakedMemberFromDeclared(node);
+    return member ? { k: "m", m: member } : null;
+  }
+  if (node.kind === "any_of" && Array.isArray(node.policies) && node.policies.length === 2) {
+    if (depth > 1 || node.policies[0]?.kind !== "owner" || node.policies[1]?.kind !== "member") return null;
+    const left = bakedPolicyFromDeclared(node.policies[0], depth + 1);
+    const right = bakedPolicyFromDeclared(node.policies[1], depth + 1);
+    return left && right ? { k: "a", p: [left, right] } : null;
+  }
+  if (node.kind === "parent" && typeof node.via === "string" && SAFE_SCOPE_IDENTIFIER.test(node.via) && typeof node.table === "string" && SAFE_SCOPE_IDENTIFIER.test(node.table) && typeof node.parentKey === "string" && SAFE_SCOPE_IDENTIFIER.test(node.parentKey)) {
+    if (depth !== 0 || node.policy?.kind === "parent") return null;
+    const inherited = bakedPolicyFromDeclared(node.policy, depth + 1);
+    return inherited ? { k: "p", v: node.via.toLowerCase(), t: node.table.toLowerCase(), pk: node.parentKey.toLowerCase(), p: inherited } : null;
+  }
+  return null;
 }
 function bakedRelationsFromDeclared(value) {
   if (!Array.isArray(value) || value.length === 0) return void 0;
@@ -536,6 +736,20 @@ function bakedMemberFromDeclared(scope) {
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
+function policyOwner(policy) {
+  if (policy.kind === "owner") return policy;
+  if (policy.kind === "any_of") return policy.policies.map(policyOwner).find((value) => value !== null) ?? null;
+  return null;
+}
+function scopeOwner(scope) {
+  return scope.kind === "owner" ? scope : scope.kind === "policy" ? policyOwner(scope.policy) : null;
+}
+function declaredOwnerColumn(scope) {
+  return scopeOwner(scope)?.column ?? null;
+}
+function declaredScopeIntent(scope) {
+  return scope.kind === "owner" ? "scoped" : scope.kind;
+}
 var COLUMN_HELPERS = /* @__PURE__ */ new Set([
   "id",
   "text",
@@ -546,7 +760,7 @@ var COLUMN_HELPERS = /* @__PURE__ */ new Set([
   "json",
   "blob"
 ]);
-var SCOPE_HELPERS = /* @__PURE__ */ new Set(["owner", "shared", "serverOnly", "member"]);
+var SCOPE_HELPERS = /* @__PURE__ */ new Set(["owner", "shared", "serverOnly", "member", "anyOf", "parent"]);
 var TABLE_MARKER_HELPERS = /* @__PURE__ */ new Set(["removedTable", "exported"]);
 var SAFE_IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 var RESERVED_PREFIXES = ["app_", "sqlite_", "d1_", "__sw_"];
@@ -738,7 +952,15 @@ function readClientPermissions(r) {
     const key = r.readKey("for a client permission");
     if (Object.prototype.hasOwnProperty.call(out, key.name)) r.fail(`client declares "${key.name}" twice.`);
     r.expectPunct(":", `after client permission "${key.name}"`);
-    if (r.tryPunct("[")) {
+    if (key.name === "publicRead" && r.peek().kind === "punct" && r.peek().value === "{") {
+      r.expectPunct("{", "opening client.publicRead");
+      const whereKey = r.readKey("in client.publicRead");
+      if (whereKey.name !== "where") r.fail("client.publicRead only accepts a where object.");
+      r.expectPunct(":", "after client.publicRead.where");
+      out[key.name] = { where: Object.fromEntries([...r.readLiteralObject("for client.publicRead.where")].map(([name, item]) => [name, item.value])) };
+      r.tryPunct(",");
+      r.expectPunct("}", "closing client.publicRead");
+    } else if (r.tryPunct("[")) {
       const fields = [];
       while (!r.tryPunct("]")) {
         fields.push(r.readLiteral(`in client.${key.name}`));
@@ -995,6 +1217,65 @@ function readMemberScope(r, tableName, scopeLine) {
   }
   return { kind: "member", group, membership, memberUser, memberGroup };
 }
+function readPolicyOwner(r, tableName, line) {
+  r.expectPunct("(", 'after "owner"');
+  let column = DEFAULT_OWNER_COLUMN;
+  if (!r.tryPunct(")")) {
+    const opts = r.readLiteralObject(`in owner() inside anyOf() for table "${tableName}"`);
+    for (const [key, { value, line: optionLine }] of opts) {
+      if (key !== "column") {
+        throw new SchemaTsError(`line ${optionLine}: owner() inside anyOf() only allows column. Visitor ownership is not part of policy scope.`);
+      }
+      if (typeof value !== "string" || !SAFE_IDENT.test(value) || value.length > MAX_NAME_LENGTH) {
+        throw new SchemaTsError(`line ${optionLine}: owner({ column }) on table "${tableName}" must be a valid column name.`);
+      }
+      column = value.toLowerCase();
+    }
+    r.tryPunct(",");
+    r.expectPunct(")", "closing owner()");
+  }
+  return { kind: "owner", column };
+}
+function readPolicyMember(r, tableName, line) {
+  r.expectPunct("(", 'after "member"');
+  const scope = readMemberScope(r, tableName, line);
+  r.tryPunct(",");
+  r.expectPunct(")", "closing member()");
+  if (scope.kind !== "member") throw new SchemaTsError(`line ${line}: invalid member() policy.`);
+  return scope;
+}
+function readAnyOfScope(r, tableName, line) {
+  r.expectPunct("(", 'after "anyOf"');
+  const first = r.expectIdent(`for the first policy in anyOf() on table "${tableName}"`);
+  const firstPolicy = first.value === "owner" ? readPolicyOwner(r, tableName, first.line) : first.value === "member" ? readPolicyMember(r, tableName, first.line) : null;
+  if (!firstPolicy) throw new SchemaTsError(`line ${first.line}: anyOf() only accepts owner() and member().`);
+  r.expectPunct(",", `between the two policies in anyOf() on table "${tableName}"`);
+  const second = r.expectIdent(`for the second policy in anyOf() on table "${tableName}"`);
+  const secondPolicy = second.value === "owner" ? readPolicyOwner(r, tableName, second.line) : second.value === "member" ? readPolicyMember(r, tableName, second.line) : null;
+  if (!secondPolicy) throw new SchemaTsError(`line ${second.line}: anyOf() only accepts owner() and member().`);
+  r.tryPunct(",");
+  r.expectPunct(")", "closing anyOf()");
+  if (firstPolicy.kind === secondPolicy.kind) {
+    throw new SchemaTsError(`line ${line}: anyOf() requires exactly one owner() and one member() policy.`);
+  }
+  const owner = firstPolicy.kind === "owner" ? firstPolicy : secondPolicy;
+  const member = firstPolicy.kind === "member" ? firstPolicy : secondPolicy;
+  return { kind: "policy", policy: { kind: "any_of", policies: [owner, member] } };
+}
+function readParentScope(r, tableName, line) {
+  r.expectPunct("(", 'after "parent"');
+  const opts = r.readLiteralObject(`in parent() options for table "${tableName}"`);
+  r.tryPunct(",");
+  r.expectPunct(")", "closing parent()");
+  if (opts.size !== 1 || !opts.has("via")) {
+    throw new SchemaTsError(`line ${line}: parent() on table "${tableName}" needs exactly { via: 'foreign_key' }.`);
+  }
+  const value = opts.get("via").value;
+  if (typeof value !== "string" || !SAFE_IDENT.test(value) || value.length > MAX_NAME_LENGTH) {
+    throw new SchemaTsError(`line ${opts.get("via").line}: parent({ via }) on table "${tableName}" must name a valid declared foreign-key column.`);
+  }
+  return { kind: "policy", policy: { kind: "parent", via: value.toLowerCase(), table: "", parentKey: "", policy: { kind: "owner", column: "" } } };
+}
 function readRelations(r, tableName) {
   r.expectPunct("{", `for "relations" of table "${tableName}"`);
   const out = [];
@@ -1041,9 +1322,11 @@ function readScope(r, tableName) {
   const tok = r.expectIdent(`for the scope of table "${tableName}"`);
   if (!SCOPE_HELPERS.has(tok.value)) {
     throw new SchemaTsError(
-      `line ${tok.line}: unknown scope "${tok.value}" on table "${tableName}". Use owner(), member(), shared(), or serverOnly().`
+      `line ${tok.line}: unknown scope "${tok.value}" on table "${tableName}". Use owner(), member(), anyOf(), parent(), shared(), or serverOnly().`
     );
   }
+  if (tok.value === "anyOf") return readAnyOfScope(r, tableName, tok.line);
+  if (tok.value === "parent") return readParentScope(r, tableName, tok.line);
   if (tok.value === "member") {
     r.expectPunct("(", 'after "member"');
     const scope = readMemberScope(r, tableName, tok.line);
@@ -1215,19 +1498,20 @@ function readTable(r, rawName, nameLine) {
   r.tryPunct(",");
   r.expectPunct(")", `closing table("${rawName}")`);
   scope ??= { kind: "owner", column: DEFAULT_OWNER_COLUMN };
-  if (columns.some((column) => column.name === SHARED_AUTHOR_COLUMN || column.renamedFrom === SHARED_AUTHOR_COLUMN) || removedColumns.includes(SHARED_AUTHOR_COLUMN) || scope.kind === "owner" && scope.column === SHARED_AUTHOR_COLUMN) {
+  const managedOwner = scopeOwner(scope);
+  if (columns.some((column) => column.name === SHARED_AUTHOR_COLUMN || column.renamedFrom === SHARED_AUTHOR_COLUMN) || removedColumns.includes(SHARED_AUTHOR_COLUMN) || managedOwner?.column === SHARED_AUTHOR_COLUMN) {
     throw new SchemaTsError(`line ${nameLine}: "${SHARED_AUTHOR_COLUMN}" is platform-maintained row authorship and cannot be declared, removed, renamed, or used as a custom owner column.`);
   }
-  if (scope.kind === "owner") {
-    const clash = columns.find((c) => c.name === scope.column);
+  if (managedOwner) {
+    const clash = columns.find((c) => c.name === managedOwner.column);
     if (clash) {
       throw new SchemaTsError(
-        `line ${nameLine}: table "${rawName}" declares the column "${scope.column}", but that is its owner column, which the platform creates and manages. Remove it from the columns \u2014 or pick a different owner column with owner({ column: '\u2026' }).`
+        `line ${nameLine}: table "${rawName}" declares the column "${managedOwner.column}", but that is its owner column, which the platform creates and manages. Remove it from the columns \u2014 or pick a different owner column with owner({ column: '\u2026' }).`
       );
     }
-    if (removedColumns.includes(scope.column)) {
+    if (removedColumns.includes(managedOwner.column)) {
       throw new SchemaTsError(
-        `line ${nameLine}: table "${rawName}" marks its owner column "${scope.column}" as removed(). The owner column carries the table's per-user scope and cannot be removed while the scope is owner().`
+        `line ${nameLine}: table "${rawName}" marks its owner column "${managedOwner.column}" as removed(). The owner column carries the table's private scope and cannot be removed while owner() is part of that scope.`
       );
     }
   }
@@ -1240,7 +1524,7 @@ function readTable(r, rawName, nameLine) {
         `line ${nameLine}: "${rawName}"."${c.name}" declares renamedFrom: '${c.renamedFrom}', but "${c.renamedFrom}" is still declared as a column. A rename replaces the old column \u2014 remove its declaration.`
       );
     }
-    if (scope.kind === "owner" && c.renamedFrom === scope.column) {
+    if (managedOwner && c.renamedFrom === managedOwner.column) {
       throw new SchemaTsError(
         `line ${nameLine}: "${rawName}"."${c.name}" declares renamedFrom: '${c.renamedFrom}', but that is the table's owner column, which the platform creates and manages \u2014 it cannot be renamed into an ordinary column.`
       );
@@ -1258,7 +1542,7 @@ function readTable(r, rawName, nameLine) {
     renameSources.add(c.renamedFrom);
   }
   const known = new Set(columns.map((c) => c.name));
-  if (scope.kind === "owner") known.add(scope.column);
+  if (managedOwner) known.add(managedOwner.column);
   const indexes = [];
   for (const entry of indexEntries ?? []) {
     for (const colName of entry.columns) {
@@ -1291,7 +1575,12 @@ function readTable(r, rawName, nameLine) {
     if (columns.filter((column) => column.helper === "id").length !== 1) {
       throw new SchemaTsError(`line ${nameLine}: table "${rawName}": client operations require exactly one id() column.`);
     }
-    const parsed = parseClientPermissions(clientInput, columns, scope);
+    const policyMember = scope.kind === "policy" && scope.policy.kind === "any_of" ? scope.policy.policies.find((node) => node.kind === "member") : void 0;
+    const parsed = parseClientPermissions(clientInput, columns, {
+      ...scope,
+      ...managedOwner ? { column: managedOwner.column } : {},
+      ...policyMember ? { group: policyMember.group } : {}
+    });
     if (!parsed.ok) throw new SchemaTsError(`line ${nameLine}: table "${rawName}": ${parsed.message}`);
     const key = columns.find((column) => column.helper === "id").name;
     if (Array.isArray(parsed.permissions.read) && !parsed.permissions.read.includes(key)) {
@@ -1394,41 +1683,83 @@ function extractSchemaTs(source) {
     const tableByName = new Map(tables.map((t) => [t.name, t]));
     const knownColumns = (t) => {
       const s = new Set(t.columns.map((c) => c.name));
-      if (t.scope.kind === "owner") s.add(t.scope.column);
+      const owner = scopeOwner(t.scope);
+      if (owner) s.add(owner.column);
       return s;
     };
+    const privatePolicy = (scope) => {
+      if (scope.kind === "owner" && !scope.visitors) return { kind: "owner", column: scope.column };
+      if (scope.kind === "member") return scope;
+      if (scope.kind === "policy" && scope.policy.kind !== "parent") return scope.policy;
+      return null;
+    };
     for (const t of tables) {
-      if (t.scope.kind !== "member") continue;
-      const sc = t.scope;
-      const own = knownColumns(t);
-      for (const g of sc.group) {
-        if (!own.has(g)) {
-          errors.push(
-            `Table "${t.name}" is member-scoped on "${g}", but "${g}" is not one of its declared columns. The group-key columns must be real columns on the table.`
-          );
-        }
-      }
-      const membershipTable = tableByName.get(sc.membership);
-      if (!membershipTable) {
-        errors.push(
-          `Table "${t.name}" is member-scoped through the membership table "${sc.membership}", which is not declared in db/schema.ts. The membership table must be a managed table in the same schema.`
-        );
+      if (t.scope.kind !== "policy" || t.scope.policy.kind !== "parent") continue;
+      const pending = t.scope.policy;
+      const fk = t.columns.find((column) => column.name === pending.via);
+      if (!fk || !fk.references) {
+        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but "${pending.via}" is not a declared scalar foreign key.`);
         continue;
       }
-      const membershipCols = knownColumns(membershipTable);
-      if (membershipTable.client && (membershipTable.client.create !== null || membershipTable.client.update !== null || membershipTable.client.delete)) {
-        errors.push(`Table "${sc.membership}" grants membership access to "${t.name}" and cannot allow client writes. Change membership through a server function.`);
+      const parentTable = tableByName.get(fk.references);
+      const parentKey = parentTable?.columns.find((column) => column.helper === "id");
+      const inherited = parentTable ? privatePolicy(parentTable.scope) : null;
+      if (!parentTable || !parentKey || !inherited) {
+        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but its referenced parent must have one id() key and a direct owner(), member(), or anyOf(owner(), member()) private scope.`);
+        continue;
       }
-      if (!membershipCols.has(sc.memberUser)) {
-        errors.push(
-          `The membership table "${sc.membership}" (for member-scoped "${t.name}") has no "${sc.memberUser}" column named in member({ member_user }).`
-        );
+      const compatible = fk.helper === parentKey.helper && (fk.helper !== "id" || fk.uuid === parentKey.uuid) || fk.helper === "integer" && parentKey.helper === "id" && !parentKey.uuid || fk.helper === "text" && parentKey.helper === "id" && parentKey.uuid;
+      if (!compatible) {
+        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but that foreign key does not have the same scalar type as "${parentTable.name}"."${parentKey.name}".`);
+        continue;
       }
-      for (const mg of sc.memberGroup) {
-        if (!membershipCols.has(mg)) {
+      t.scope.policy = { kind: "parent", via: pending.via, table: parentTable.name, parentKey: parentKey.name, policy: inherited };
+      if (t.client?.create && !t.client.create.includes(pending.via)) {
+        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }) and client.create must include "${pending.via}" so every new row explicitly selects an authorized parent.`);
+      }
+    }
+    const memberPolicies = (scope) => {
+      const out = [];
+      const visit = (node) => {
+        if (node.kind === "member") out.push(node);
+        else if (node.kind === "any_of") node.policies.forEach(visit);
+      };
+      if (scope.kind === "member") out.push(scope);
+      else if (scope.kind === "policy") visit(scope.policy);
+      return out;
+    };
+    for (const t of tables) {
+      for (const sc of memberPolicies(t.scope)) {
+        const own = knownColumns(t);
+        for (const g of sc.group) {
+          if (!own.has(g)) {
+            errors.push(
+              `Table "${t.name}" is member-scoped on "${g}", but "${g}" is not one of its declared columns. The group-key columns must be real columns on the table.`
+            );
+          }
+        }
+        const membershipTable = tableByName.get(sc.membership);
+        if (!membershipTable) {
           errors.push(
-            `The membership table "${sc.membership}" (for member-scoped "${t.name}") has no "${mg}" column named in member({ member_group }).`
+            `Table "${t.name}" is member-scoped through the membership table "${sc.membership}", which is not declared in db/schema.ts. The membership table must be a managed table in the same schema.`
           );
+          continue;
+        }
+        const membershipCols = knownColumns(membershipTable);
+        if (membershipTable.client && (membershipTable.client.create !== null || membershipTable.client.update !== null || membershipTable.client.delete)) {
+          errors.push(`Table "${sc.membership}" grants membership access to "${t.name}" and cannot allow client writes. Change membership through a server function.`);
+        }
+        if (!membershipCols.has(sc.memberUser)) {
+          errors.push(
+            `The membership table "${sc.membership}" (for member-scoped "${t.name}") has no "${sc.memberUser}" column named in member({ member_user }).`
+          );
+        }
+        for (const mg of sc.memberGroup) {
+          if (!membershipCols.has(mg)) {
+            errors.push(
+              `The membership table "${sc.membership}" (for member-scoped "${t.name}") has no "${mg}" column named in member({ member_group }).`
+            );
+          }
         }
       }
     }
@@ -1549,8 +1880,9 @@ function schemaAuthorityFromSource(files) {
     const baked = bakedTableSchemaFromDeclared(JSON.stringify(canonicalTableShape(table)));
     if (!baked) throw new Error(`Could not derive the client contract for declared table "${table.name}".`);
     declareEntry(schema, table.name, baked);
-    declareEntry(intents, table.name, table.scope.kind === "owner" ? "scoped" : table.scope.kind);
-    if (table.scope.kind === "owner") declareEntry(scopes, table.name, table.scope.column);
+    declareEntry(intents, table.name, declaredScopeIntent(table.scope));
+    const ownerColumn = declaredOwnerColumn(table.scope);
+    if (declaredScopeIntent(table.scope) === "scoped" && ownerColumn) declareEntry(scopes, table.name, ownerColumn);
   }
   return { schema, intents, scopes };
 }
