@@ -25,10 +25,10 @@ function credentialHome(prefix) {
   return home;
 }
 
-function run(args, env) {
+function run(args, env, cwd = repoRoot) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [distIndex, ...args], {
-      cwd: repoRoot,
+      cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
@@ -166,4 +166,28 @@ test('platform timezone validation errors reach the user unchanged', async () =>
     assert.match(parsed.message, /timezone must be an IANA time zone name/);
     assert.match(parsed.message, /America\/Los_Angeles/);
   });
+});
+
+
+test('cron create uses the linked project and explicit project overrides it', async () => {
+  const home = credentialHome('sw-cron-linked-');
+  const project = mkdtempSync(join(tmpdir(), 'sw-cron-project-'));
+  writeFileSync(join(project, '.somewhere.json'), JSON.stringify({project_id: 'linked-project'}));
+  const calls = [];
+  await withFixture((params) => {
+    calls.push(params.arguments);
+    return toolSuccess({cron_id: 'cron_new'});
+  }, async (url) => {
+    const env = {HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url};
+    const inferred = await run(['cron', 'create', '0 9 * * *', '/api/tick'], env, project);
+    assert.equal(inferred.status, 0, inferred.stderr);
+    const explicit = await run(['cron', 'create', '0 9 * * *', '/api/tick', '-p', 'explicit-project'], env, project);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    const missing = await run(['cron', 'create', '0 9 * * *', '/api/tick'], env, home);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /No project/);
+  });
+  assert.equal(calls.length, 2);
+  assert.equal(calls[0].project_id, 'linked-project');
+  assert.equal(calls[1].project_id, 'explicit-project');
 });

@@ -214,7 +214,8 @@ export function registerCron(program: Command): void {
   cron
     .command('create <schedule> <handler>')
     .description('Create a scheduled trigger (5-field cron expression, read in UTC unless --timezone says otherwise)')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
+    .addHelpText('after', '\nHandler is a deployed route such as /api/tick, not a source filename such as api/tick.js.\n')
+    .option('-p, --project <project>', 'Project slug or ID; defaults to the linked project')
     .option(
       '--timezone <iana>',
       'IANA time zone the schedule is read in, e.g. America/Los_Angeles. Daylight saving is handled for you. Omit for UTC.',
