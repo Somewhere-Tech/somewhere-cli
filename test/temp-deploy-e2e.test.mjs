@@ -307,4 +307,50 @@ test('logged in and linked with NO flag still deploys to the account, unchanged'
   assert.equal(existsSync(join(HOME, '.somewhere', 'temp-session.json')), false);
 });
 
+test('deploy rejects an empty directory locally while static-only and functions-only projects still deploy', async () => {
+  const callsBeforeEmpty = { tempCreateCalls, projectsCalls, deployCalls };
+  const emptyHome = mkdtempSync(join(tmpdir(), 'sw-empty-deploy-home-'));
+  const emptyDir = mkdtempSync(join(tmpdir(), 'sw-empty-deploy-tree-'));
+  const empty = await run(['deploy'], {
+    cwd: emptyDir,
+    env: { HOME: emptyHome, USERPROFILE: emptyHome, SOMEWHERE_API_URL: apiUrl },
+  });
+
+  assert.equal(empty.status, 1);
+  assert.match(empty.stderr, /No deployable source found/);
+  assert.match(empty.stderr, /Create an index\.html or add raw app source files/);
+  assert.match(empty.stderr, /serverless handlers under functions\//);
+  assert.deepEqual(
+    { tempCreateCalls, projectsCalls, deployCalls },
+    callsBeforeEmpty,
+    'empty deploy must not authenticate, provision, or upload',
+  );
+  assert.equal(existsSync(join(emptyHome, '.somewhere', 'config.json')), false);
+
+  for (const fixture of [
+    { name: 'static', path: 'index.html', content: '<html><body>ok</body></html>\n' },
+    {
+      name: 'functions',
+      path: join('functions', 'api', 'ping.ts'),
+      content: 'export default async function () { return Response.json({ ok: true }); }\n',
+    },
+  ]) {
+    const home = mkdtempSync(join(tmpdir(), `sw-${fixture.name}-deploy-home-`));
+    const dir = mkdtempSync(join(tmpdir(), `sw-${fixture.name}-deploy-tree-`));
+    mkdirSync(dirname(join(dir, fixture.path)), { recursive: true });
+    writeFileSync(join(dir, fixture.path), fixture.content);
+    const beforeDeploys = deployCalls;
+    const result = await run(['deploy'], {
+      cwd: dir,
+      env: { HOME: home, USERPROFILE: home, SOMEWHERE_API_URL: apiUrl },
+    });
+    assert.equal(
+      result.status,
+      0,
+      `${fixture.name}-only deploy failed\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
+    );
+    assert.equal(deployCalls, beforeDeploys + 1, `${fixture.name}-only source must reach deploy`);
+  }
+});
+
 test.after(() => server.close());

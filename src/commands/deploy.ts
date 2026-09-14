@@ -393,6 +393,30 @@ export function registerDeploy(program: Command) {
     .option('--timing', 'Print collection, upload, release, activation, and verification timings')
     .action(async (dir: string | undefined, opts) => {
       const targetDir = resolveTargetDir(dir);
+
+      // Reject an empty deploy before authentication, temporary-account minting,
+      // project provisioning, notices, or upload. The API's generic object-shape
+      // error arrives after all of those side effects and gives a first-time
+      // caller no useful next step.
+      const collectionStartedAt = Date.now();
+      const collected = collectFiles(targetDir, {
+        include: (opts.include as string[] | undefined) ?? [],
+      });
+      const collectionMs = Date.now() - collectionStartedAt;
+      const { files, binaryFiles, functions, skipped, excluded } = collected;
+      if (
+        Object.keys(files).length === 0
+        && Object.keys(binaryFiles).length === 0
+        && Object.keys(functions).length === 0
+      ) {
+        const message =
+          'No deployable source found. Create an index.html or add raw app source files, ' +
+          'or add serverless handlers under functions/, then run `somewhere deploy` again.';
+        if (opts.json) printJsonError('NO_DEPLOYABLE_SOURCE', message);
+        else error(message);
+        process.exit(1);
+      }
+
       const storedConfig = loadConfig();
 
       // Anonymous deploy is the default first-touch path. A caller with no
@@ -596,12 +620,6 @@ export function registerDeploy(program: Command) {
       }
 
       const spinner = opts.json ? null : ora('Collecting files...').start();
-
-      const collectionStartedAt = Date.now();
-      const { files, binaryFiles, functions, skipped, excluded } = collectFiles(targetDir, {
-        include: (opts.include as string[] | undefined) ?? [],
-      });
-      const collectionMs = Date.now() - collectionStartedAt;
 
       // Publish surface (tsk_c166924f): a deploy publishes the app, not the
       // folder it was built in. Name every held-back file — a silent exclusion
