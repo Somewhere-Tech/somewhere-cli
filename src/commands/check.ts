@@ -26,7 +26,7 @@ export interface CheckResult {
 
 /** POST /v1/deploy/check/run — compile-then-invoke. Carries `errors` when the
  *  compile failed before the handler could run; otherwise the handler's
- *  response (mirrors `somewhere run` / `exec`). */
+ *  response and logs. */
 export interface CheckRunResult extends CheckResult {
   status?: number;
   body?: unknown;
@@ -118,23 +118,33 @@ export function formatCheckRunResult(r: CheckRunResult): string[] {
   return lines;
 }
 
+/** Human success copy for the compile-only path. Keep the scope explicit: a
+ * clean compile says nothing about requests or user journeys. */
+export function formatCompileOnlySuccess(totalFiles: number, totalBytes: number): string[] {
+  return [
+    `Platform compile passed. ${dim(`(${totalFiles} files, ${formatBytes(totalBytes)})`)}`,
+    dim('Runtime behavior, auth, data access, and user flows were not exercised.'),
+    'Next: deploy, then verify the real flow with `somewhere verify --url https://your-app.somewhere.site --flow flow.json`.',
+    dim('Unsure about a platform contract? Run `somewhere advisor "<question>"`.'),
+  ];
+}
+
 export function registerCheck(program: Command) {
   program
     .command('deploy-check [dir]')
     .description(
-      'SERVER-SIDE pre-deploy oracle: upload the current source and have the REAL platform ' +
-        'compiler dry-compile it (no deploy, no promote, nothing goes live) — the truest ' +
-        '"will this deploy succeed?" gate. Prints structured file:line errors. ' +
-        'With --run <path> it compiles AND invokes one handler against inputs. ' +
-        'Distinct from the LOCAL checks: `somewhere typecheck` runs `tsc --noEmit` on a pulled ' +
-        'tree on your machine. `deploy-check` runs the actual server-side compiler that `deploy` uses, so it ' +
-        'catches what only the platform catches (cross-import resolution, bundling, bundled-deploy ' +
-        'rejects).',
+      'Upload the current source and dry-compile it with the platform compiler ' +
+        '(no deploy, promote, or runtime request). Prints structured file:line errors. ' +
+        'This checks platform compilation and source intake; it does not exercise functions, ' +
+        'auth, data access, or browser flows. With --run <path>, it also invokes that one ' +
+        'handler against the supplied inputs. Distinct from the local `somewhere typecheck`: ' +
+        '`deploy-check` catches platform-only compile issues such as cross-import resolution, ' +
+        'bundling, and bundled-deploy rejects.',
     )
     .option('--project <ref>', 'Project to check against (defaults to the linked project).')
     .option(
       '--run <path>',
-      'Compile, then invoke the handler at this URL path against inputs (e.g. --run /api/hello).',
+      'Compile, then invoke this one handler (default GET). Handler code runs against isolated dev bindings and can write data or call services.',
     )
     .option('-X, --method <method>', 'HTTP method for --run (default GET).')
     .option('-d, --body <json>', 'Request body for --run.')
@@ -239,9 +249,9 @@ export function registerCheck(program: Command) {
           for (const line of r.build_log) info(dim(line));
           console.log('');
         }
-        success(
-          `Server-side check clean (real platform compiler) — safe to deploy. ${dim(`(${totalFiles} files, ${formatBytes(sourceBytes(collected))})`)}`,
-        );
+        const [summary, ...nextSteps] = formatCompileOnlySuccess(totalFiles, sourceBytes(collected));
+        success(summary);
+        for (const line of nextSteps) info(line);
       } catch (err) {
         spinner?.fail(isRun ? 'Check run failed' : 'Check failed');
         // The server may answer a compile failure with a thrown BUILD_ERROR

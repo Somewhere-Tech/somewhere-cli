@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
+import { Command } from 'commander';
 
 // client.ts reads BASE_URL at module load — point it at the mock server before
 // the first import (check.js imports client.js transitively).
@@ -24,7 +25,8 @@ const { port } = server.address();
 process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${port}`;
 
 const { ApiClient, CliApiError } = await import('../dist/lib/client.js');
-const { buildCheckBody, buildCheckRunBody, checkErrorsToCliError, formatCheckRunResult } =
+const { buildCheckBody, buildCheckRunBody, checkErrorsToCliError, formatCheckRunResult,
+  formatCompileOnlySuccess, registerCheck } =
   await import('../dist/commands/check.js');
 
 const collected = (over = {}) => ({ files: {}, binaryFiles: {}, functions: {}, ...over });
@@ -122,6 +124,28 @@ test('formatCheckRunResult: renders logs + status + body', () => {
 test('formatCheckRunResult: a thrown handler is reported, not swallowed', () => {
   const lines = formatCheckRunResult({ error: { name: 'TypeError', message: 'boom' } });
   assert.match(lines.join('\n'), /Handler threw: TypeError: boom/);
+});
+
+test('compile-only success names what passed and points to a real flow check', () => {
+  const output = formatCompileOnlySuccess(3, 2048).join('\n');
+  assert.match(output, /Platform compile passed/);
+  assert.match(output, /Runtime behavior, auth, data access, and user flows were not exercised/);
+  assert.match(output, /somewhere verify --url https:\/\/your-app\.somewhere\.site --flow flow\.json/);
+  assert.match(output, /somewhere advisor "<question>"/);
+  assert.doesNotMatch(output, /safe to deploy|oracle/i);
+});
+
+test('deploy-check help distinguishes compile-only mode from explicit --run execution', () => {
+  const program = new Command();
+  registerCheck(program);
+  const command = program.commands.find((candidate) => candidate.name() === 'deploy-check');
+  assert.ok(command);
+  const help = command.helpInformation();
+  assert.match(help, /no\s+deploy, promote, or runtime request/);
+  assert.match(help, /does not exercise functions,\s+auth, data access, or browser flows/);
+  assert.match(help, /--run <path>[\s\S]+invoke this one handler \(default\s+GET\)/);
+  assert.match(help, /can write data or call services/);
+  assert.doesNotMatch(help, /safe to deploy|oracle/i);
 });
 
 test.after(() => server.close());
