@@ -54,9 +54,11 @@ var require_declared_data_contract = __commonJS({
       if (value.k === "o" && keys === "c,k" && identifier.test(value.c)) return { k: "o", c: value.c };
       if (value.k === "m" && keys === "k,m") {
         record(value.m, label + ".member");
-        const { g, m, u, mg } = value.m;
-        if (Object.keys(value.m).sort().join(",") !== "g,m,mg,u" || !identifier.test(m) || !identifier.test(u) || !Array.isArray(g) || !g.length || !Array.isArray(mg) || g.length !== mg.length || [...g, ...mg].some((field) => typeof field !== "string" || !identifier.test(field))) fail(label);
-        return { k: "m", m: { g: [...g], m, u, mg: [...mg] } };
+        const { g, m, u, mg, o } = value.m;
+        const memberKeys = Object.keys(value.m).sort().join(",");
+        if (!["g,m,mg,u", "g,m,mg,o,u"].includes(memberKeys) || !identifier.test(m) || !identifier.test(u) || !Array.isArray(g) || !g.length || !Array.isArray(mg) || g.length !== mg.length || [...g, ...mg].some((field) => typeof field !== "string" || !identifier.test(field)) || o !== void 0 && (!Array.isArray(o) || JSON.stringify(o) !== JSON.stringify(["read", "create", "update", "delete"].filter((operation) => o.includes(operation))) || !o.includes("read") && (o.includes("update") || o.includes("delete")))) fail(label);
+        const normalizedOperations = o?.length === 4 ? void 0 : o;
+        return { k: "m", m: { g: [...g], m, u, mg: [...mg], ...normalizedOperations !== void 0 ? { o: [...normalizedOperations] } : {} } };
       }
       if (value.k === "a" && keys === "k,p" && Array.isArray(value.p) && value.p.length === 2) {
         const left = policy(value.p[0], label), right = policy(value.p[1], label);
@@ -146,12 +148,14 @@ var require_declared_data_contract = __commonJS({
         let member = null;
         if (intent === "member") {
           record(table.member, `${name}.member`);
-          const { g, m, u, mg } = table.member;
+          const { g, m, u, mg, o } = table.member;
           if (typeof m !== "string" || typeof u !== "string" || !identifier.test(m) || !identifier.test(u) || !Array.isArray(mg) || mg.some((field) => typeof field !== "string" || !identifier.test(field))) fail(`${name}.member`);
           fields(g, seen, `${name}.member.g`);
           if (g.length !== mg.length || new Set(mg).size !== mg.length) fail(`${name}.member`);
           if ((update || []).some((field) => g.includes(field))) fail(`${name} membership writes`);
-          member = { g: [...g], m, u, mg: [...mg] };
+          if (o !== void 0 && (!Array.isArray(o) || JSON.stringify(o) !== JSON.stringify(["read", "create", "update", "delete"].filter((operation) => o.includes(operation))) || !o.includes("read") && (o.includes("update") || o.includes("delete")))) fail(`${name}.member operations`);
+          const normalizedOperations = o?.length === 4 ? void 0 : o;
+          member = { g: [...g], m, u, mg: [...mg], ...normalizedOperations !== void 0 ? { o: [...normalizedOperations] } : {} };
         }
         const normalizedPolicy = intent === "policy" ? policy(table.policy, `${name}.policy`) : null;
         if (normalizedPolicy && !["a", "p"].includes(normalizedPolicy.k)) fail(`${name}.policy root`);
@@ -346,7 +350,7 @@ function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): Somewh
 function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
 function shared(): SomewhereSchemaDeclaration.Scope;
 function serverOnly(): SomewhereSchemaDeclaration.Scope;
-function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[] }): SomewhereSchemaDeclaration.MemberScope;
+function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete'> }): SomewhereSchemaDeclaration.MemberScope;
 function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
 function removed(): SomewhereSchemaDeclaration.ColumnMarker;
 function removedTable(): SomewhereSchemaDeclaration.TableMarker;
@@ -732,7 +736,15 @@ function bakedMemberFromDeclared(scope) {
   if (!g || !mg || g.length !== mg.length) return null;
   if (typeof s.membership !== "string" || !SAFE_SCOPE_IDENTIFIER.test(s.membership)) return null;
   if (typeof s.memberUser !== "string" || !SAFE_SCOPE_IDENTIFIER.test(s.memberUser)) return null;
-  return { g, m: s.membership.toLowerCase(), u: s.memberUser.toLowerCase(), mg };
+  let o;
+  if (s.operations !== void 0) {
+    if (!Array.isArray(s.operations)) return null;
+    const operations = s.operations;
+    const allowed = ["read", "create", "update", "delete"];
+    if (JSON.stringify(operations) !== JSON.stringify(allowed.filter((operation) => operations.includes(operation))) || !operations.includes("read") && (operations.includes("update") || operations.includes("delete"))) return null;
+    o = operations.length === allowed.length ? void 0 : operations;
+  }
+  return { g, m: s.membership.toLowerCase(), u: s.memberUser.toLowerCase(), mg, ...o !== void 0 ? { o } : {} };
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
@@ -771,6 +783,7 @@ var MAX_INDEX_COLUMNS = 8;
 var MAX_NAME_LENGTH = 64;
 var MAX_SOURCE_BYTES = 256 * 1024;
 var DEFAULT_OWNER_COLUMN = "user_id";
+var MEMBER_OPERATIONS = ["read", "create", "update", "delete"];
 var SchemaTsError = class extends Error {
 };
 function tokenize(source) {
@@ -1166,12 +1179,33 @@ function validateMemberColumns(names, optionLabel, tableName, line) {
     seen.add(name);
   }
 }
+function readMemberOperations(r, tableName) {
+  r.expectPunct("[", `for member({ operations }) on table "${tableName}"`);
+  const seen = /* @__PURE__ */ new Set();
+  while (!r.tryPunct("]")) {
+    const token = r.next();
+    if (token.kind !== "string" || !MEMBER_OPERATIONS.includes(token.value)) {
+      throw new SchemaTsError(`line ${token.line}: member({ operations }) on table "${tableName}" only accepts 'read', 'create', 'update', and 'delete'.`);
+    }
+    seen.add(token.value);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("]", `closing member({ operations }) on table "${tableName}"`);
+      break;
+    }
+  }
+  const normalized = MEMBER_OPERATIONS.filter((operation) => seen.has(operation));
+  if (!seen.has("read") && (seen.has("update") || seen.has("delete"))) {
+    throw new SchemaTsError(`member({ operations }) on table "${tableName}" must include 'read' when it includes 'update' or 'delete', because mutations return the affected row.`);
+  }
+  return normalized.length === MEMBER_OPERATIONS.length ? void 0 : normalized;
+}
 function readMemberScope(r, tableName, scopeLine) {
   r.expectPunct("{", `in member() options for table "${tableName}" \u2014 member() needs { group, membership, member_user, member_group }`);
   let group = null;
   let membership = null;
   let memberUser = null;
   let memberGroup = null;
+  let operations, operationsSeen = false;
   while (!r.tryPunct("}")) {
     const key = r.readKey(`for a member() option of table "${tableName}"`);
     r.expectPunct(":", `after "${key.name}" in member() for table "${tableName}"`);
@@ -1183,9 +1217,13 @@ function readMemberScope(r, tableName, scopeLine) {
       memberUser = readSingleColumn(r, `member({ member_user }) on table "${tableName}"`);
     } else if (key.name === "member_group") {
       memberGroup = readColumnOrColumnList(r, `member({ member_group }) on table "${tableName}"`);
+    } else if (key.name === "operations") {
+      if (operationsSeen) throw new SchemaTsError(`line ${key.line}: member() on table "${tableName}" declares operations more than once.`);
+      operationsSeen = true;
+      operations = readMemberOperations(r, tableName);
     } else {
       throw new SchemaTsError(
-        `line ${key.line}: member() on table "${tableName}" has an unknown option "${key.name}". Allowed: group, membership, member_user, member_group.`
+        `line ${key.line}: member() on table "${tableName}" has an unknown option "${key.name}". Allowed: group, membership, member_user, member_group, operations.`
       );
     }
     if (!r.tryPunct(",")) {
@@ -1215,7 +1253,7 @@ function readMemberScope(r, tableName, scopeLine) {
       `line ${scopeLine}: member() on table "${tableName}" has a ${group.length}-column group but a ${memberGroup.length}-column member_group. The group key must have the same number of columns on both sides.`
     );
   }
-  return { kind: "member", group, membership, memberUser, memberGroup };
+  return { kind: "member", group, membership, memberUser, memberGroup, ...operations !== void 0 ? { operations } : {} };
 }
 function readPolicyOwner(r, tableName, line) {
   r.expectPunct("(", 'after "owner"');

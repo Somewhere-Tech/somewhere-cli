@@ -1,15 +1,15 @@
 {
   "esbuild": "0.24.0",
   "source_files": {
-    "worker/containers/compile/declared-data-contract.cjs": "7a2c20ddddd912ae513f3fff2614829b18c3e19954f9c48314ca96f1ce3143a1",
+    "worker/containers/compile/declared-data-contract.cjs": "b91609429f4e54d54a80848db8cf13b5e1965625c45f423f56e51e941c5daf9c",
     "worker/containers/compile/runtime-types.cjs": "a458232f605ac60202b58c6cae725a813d22479498f436668b8ad553678576ef",
-    "worker/containers/compile/schema-types.cjs": "c16fa8cabc8f5cff50777623f94f8cb009fee3ac47d53b471894be9c698d614a",
+    "worker/containers/compile/schema-types.cjs": "d6985d40a1f4462615eb65e0350fdd23d53de7c4beaa3ff574e45a036fbdec3e",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
-    "worker/src/utils/authority/scope-enforcement.ts": "98c242359240b8918c1b71af73f17b6b4200559a896f47f6032ef771f543201f",
+    "worker/src/utils/authority/scope-enforcement.ts": "25c4aa81f0d2dd4b58784c0ada03c041ce48b66728b52cfee3790a841aba766c",
     "worker/src/utils/db-schema-deploy/client-contract-source.ts": "fc37a8d18affc0d814f40357884e1764eb4bcc9af446626933729b7021fa3c6d",
     "worker/src/utils/db-schema-deploy/client-permissions.ts": "05b1d68afae151569abfa16b452834a96b3c0a2bf4b04f63d322f05548827222",
-    "worker/src/utils/db-schema-deploy/extract-schema-ts.ts": "b092afe7c271405126da9e204084fc5528a42025b5583eba25da3907f995a25b",
+    "worker/src/utils/db-schema-deploy/extract-schema-ts.ts": "0da51e6884afbbf9b04104f9bf669f0d0163d7cb2b5723a6e9df05b661115a1e",
     "worker/src/utils/db-schema-deploy/schema-ownership.ts": "e6c811a87bc657707be3518dfe547c6d97718ac073108b126eb7f791c9c08202"
   },
-  "sha256": "80171af94d110f5caf717eb7ad6abd95b15ed4125af1cc848151561d67462b8d"
+  "sha256": "b9f9cf5b17aa489ddc8ba9937a268a369ec73c91769f90eb20ab38ebc750f4c9"
 }
