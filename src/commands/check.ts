@@ -11,7 +11,7 @@ import { bold, dim, error, green, info, red, success, warn, yellow } from '../li
 /** A single diagnostic from the server-side dry compile. Same file:line shape
  *  the /deploy BUILD_ERROR payload uses (so it renders through the same code
  *  frame), plus an optional `code` (e.g. TS2304 / esbuild). */
-export type CheckErrorDetail = BuildErrorDetail & { code?: string };
+export type CheckErrorDetail = BuildErrorDetail & { code?: string; stack?: string | null };
 
 /** POST /v1/deploy/check — the dry-compile verdict. A checker reports problems
  *  as DATA (ok:false + errors), so finding errors is a successful call, not an
@@ -28,12 +28,17 @@ export interface CheckResult {
  *  compile failed before the handler could run; otherwise the handler's
  *  response and logs. */
 export interface CheckRunResult extends CheckResult {
-  status?: number;
-  body?: unknown;
-  headers?: Record<string, string>;
+  response?: {
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+    body_truncated?: boolean;
+  } | null;
   logs?: Array<{ level?: string; message?: string } | string>;
-  error?: { name?: string; message?: string; stack?: string } | string;
+  served?: 'function' | 'static';
+  isolated_db?: boolean;
   duration_ms?: number;
+  logs_truncated?: boolean;
 }
 
 interface CheckOptions {
@@ -43,6 +48,12 @@ interface CheckOptions {
   body?: string;
   query?: string;
   json?: boolean;
+}
+
+export interface CheckRunRequest {
+  path: string;
+  method: string;
+  body?: string;
 }
 
 /** The dry-compile body: the same collected source tree `somewhere deploy`
@@ -57,14 +68,26 @@ export function buildCheckBody(
   return body;
 }
 
-/** The compile-then-run body: the dry-compile tree plus the synthetic request
- *  to drive one handler against. */
+/** The handler-check body accepted by POST /deploy/check/run. That worker
+ * endpoint accepts inline function source and a top-level request spec; static
+ * client files are outside this mode's contract. */
 export function buildCheckRunBody(
   collected: CollectedFiles,
   projectId: string,
-  target: Record<string, unknown>,
+  request: CheckRunRequest,
 ): Record<string, unknown> {
-  return { ...buildCheckBody(collected, projectId), target };
+  return { project_id: projectId, functions: collected.functions, ...request };
+}
+
+/** validateInvokeInput treats `path` as the complete URL path. Preserve the
+ * caller's query string byte-for-byte by appending it there, rather than
+ * sending an unsupported sibling `query` property. */
+export function checkRunPath(path: string, query?: string): string {
+  const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+  if (query === undefined || query === '') return normalizedPath;
+  const normalizedQuery = query.startsWith('?') ? query.slice(1) : query;
+  if (normalizedQuery === '') return normalizedPath;
+  return `${normalizedPath}${normalizedPath.includes('?') ? '&' : '?'}${normalizedQuery}`;
 }
 
 /**
@@ -99,23 +122,34 @@ export function formatCheckRunResult(r: CheckRunResult): string[] {
     lines.push('');
   }
 
-  if (r.error) {
-    const e = r.error;
-    const msg = typeof e === 'string' ? e : `${e.name ? `${e.name}: ` : ''}${e.message ?? ''}`;
-    lines.push(red(`Handler threw: ${msg}`));
-    if (typeof e !== 'string' && e.stack) lines.push(dim(e.stack));
+  for (const handlerError of r.errors ?? []) {
+    const code = handlerError.code ? `${handlerError.code}: ` : '';
+    lines.push(red(`Handler error: ${code}${handlerError.message ?? 'Unknown error'}`));
+    if (handlerError.stack) lines.push(dim(handlerError.stack));
+  }
+
+  const response = r.response;
+  if (!response) {
+    if (r.duration_ms !== undefined) lines.push(dim(`${r.duration_ms}ms`));
     return lines;
   }
 
-  const status = r.status ?? 0;
+  const status = response.status;
   const color = status >= 500 ? red : status >= 400 ? yellow : green;
   lines.push(`${color(String(status || '—'))} ${dim(r.duration_ms !== undefined ? `${r.duration_ms}ms` : '')}`.trimEnd());
-  try {
-    lines.push(JSON.stringify(r.body, null, 2));
-  } catch {
-    lines.push(String(r.body));
-  }
+  lines.push(response.body);
+  if (response.body_truncated) lines.push(dim('Response body truncated.'));
   return lines;
+}
+
+/** One verdict for both terminal and --json modes. An explicit handler check
+ * passes only when handler preparation and invocation completed with an HTTP response
+ * below 400 and no captured handler error. */
+export function checkRunExitCode(r: CheckRunResult): number {
+  if (r.ok === false) return 1;
+  if ((r.errors?.length ?? 0) > 0) return 1;
+  if (!r.response) return 1;
+  return r.response.status >= 400 ? 1 : 0;
 }
 
 /** Human success copy for the compile-only path. Keep the scope explicit: a
@@ -136,15 +170,16 @@ export function registerCheck(program: Command) {
       'Upload the current source and dry-compile it with the platform compiler ' +
         '(no deploy, promote, or runtime request). Prints structured file:line errors. ' +
         'This checks platform compilation and source intake; it does not exercise functions, ' +
-        'auth, data access, or browser flows. With --run <path>, it also invokes that one ' +
-        'handler against the supplied inputs. Distinct from the local `somewhere typecheck`: ' +
+        'auth, data access, or browser flows. With --run <path>, it instead invokes one ' +
+        'handler from the collected function source; static/client files are not checked in that mode. ' +
+        'Distinct from the local `somewhere typecheck`: ' +
         '`deploy-check` catches platform-only compile issues such as cross-import resolution, ' +
         'bundling, and bundled-deploy rejects.',
     )
     .option('--project <ref>', 'Project to check against (defaults to the linked project).')
     .option(
       '--run <path>',
-      'Compile, then invoke this one handler (default GET). Handler code runs against isolated dev bindings and can write data or call services.',
+      'Check one handler from collected function source (default GET). Handler code runs against isolated dev bindings and can write data or call services. Static/client files are not checked. Exits nonzero for handler preparation errors, handler errors, and HTTP 4xx/5xx.',
     )
     .option('-X, --method <method>', 'HTTP method for --run (default GET).')
     .option('-d, --body <json>', 'Request body for --run.')
@@ -181,31 +216,31 @@ export function registerCheck(program: Command) {
         ? null
         : ora(
           isRun
-            ? `Compiling ${totalFiles} files + running ${opts.run} (server-side)...`
+            ? `Checking handler ${opts.run} (server-side)...`
             : `Dry-compiling ${totalFiles} files on the platform...`,
         ).start();
 
       try {
         if (isRun) {
-          const target: Record<string, unknown> = {
-            path: opts.run!.startsWith('/') ? opts.run : `/${opts.run}`,
+          const request: CheckRunRequest = {
+            path: checkRunPath(opts.run!, opts.query),
             method: (opts.method ?? 'GET').toUpperCase(),
           };
-          if (opts.body !== undefined) target.body = opts.body;
-          if (opts.query !== undefined) target.query = opts.query;
+          if (opts.body !== undefined) request.body = opts.body;
 
           const r = await client.call<CheckRunResult>(
             'POST',
             '/deploy/check/run',
-            buildCheckRunBody(collected, projectId, target),
+            buildCheckRunBody(collected, projectId, request),
             undefined,
             { timeoutMs: LONG_CALL_TIMEOUT_MS },
           );
           spinner?.stop();
+          const exitCode = checkRunExitCode(r);
 
           if (opts.json) {
             console.log(JSON.stringify(r, null, 2));
-            process.exit(r.ok === false || r.error ? 1 : 0);
+            process.exit(exitCode);
           }
 
           // Compile failed before the handler ran — render the build errors.
@@ -215,9 +250,9 @@ export function registerCheck(program: Command) {
             process.exit(1);
           }
 
-          console.log(`${bold(opts.method?.toUpperCase() ?? 'GET')} ${target.path}`);
+          console.log(`${bold(request.method)} ${request.path}`);
           for (const line of formatCheckRunResult(r)) console.log(line);
-          process.exit(r.error || (r.status ?? 0) >= 500 ? 1 : 0);
+          process.exit(exitCode);
         }
 
         const r = await client.call<CheckResult>(

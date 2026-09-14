@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { Command } from 'commander';
+import { validateCheckRunInput } from './fixtures/check-run-server-contract.mjs';
 
 // client.ts reads BASE_URL at module load — point it at the mock server before
 // the first import (check.js imports client.js transitively).
@@ -25,7 +26,7 @@ const { port } = server.address();
 process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${port}`;
 
 const { ApiClient, CliApiError } = await import('../dist/lib/client.js');
-const { buildCheckBody, buildCheckRunBody, checkErrorsToCliError, formatCheckRunResult,
+const { buildCheckBody, buildCheckRunBody, checkErrorsToCliError, checkRunExitCode, checkRunPath, formatCheckRunResult,
   formatCompileOnlySuccess, registerCheck } =
   await import('../dist/commands/check.js');
 
@@ -56,13 +57,34 @@ test('buildCheckBody: includes functions/binary_files only when non-empty', () =
   assert.equal('binary_files' in bare, false);
 });
 
-test('buildCheckRunBody: appends the synthetic request target', () => {
-  const body = buildCheckRunBody(collected({ files: { 'a.html': 'x' } }), 'p1', {
-    path: '/api/hello',
+test('buildCheckRunBody: matches the captured worker validator contract', () => {
+  const body = buildCheckRunBody(collected({
+    files: { 'a.html': 'x' },
+    functions: { 'api/hello.ts': 'export default () => new Response()' },
+  }), 'p1', {
+    path: '/api/hello?mode=full',
     method: 'POST',
+    body: '{"name":"Ada"}',
   });
-  assert.equal(body.project_id, 'p1');
-  assert.deepEqual(body.target, { path: '/api/hello', method: 'POST' });
+  const parsed = validateCheckRunInput(body);
+  assert.equal(parsed.ok, true);
+  assert.deepEqual(parsed.value, {
+    project_id: 'p1',
+    functions: { 'api/hello.ts': 'export default () => new Response()' },
+    path: '/api/hello?mode=full',
+    method: 'POST',
+    headers: undefined,
+    body: '{"name":"Ada"}',
+    timeout_ms: 10_000,
+  });
+  assert.equal('target' in body, false);
+  assert.equal('files' in body, false);
+});
+
+test('checkRunPath: places -q in the path consumed by validateInvokeInput', () => {
+  assert.equal(checkRunPath('api/hello', 'a=1&b=two'), '/api/hello?a=1&b=two');
+  assert.equal(checkRunPath('/api/hello?existing=1', '?a=2'), '/api/hello?existing=1&a=2');
+  assert.equal(checkRunPath('/api/hello', ''), '/api/hello');
 });
 
 test('request shape: dry compile POSTs /deploy/check with the source tree', async () => {
@@ -76,17 +98,27 @@ test('request shape: dry compile POSTs /deploy/check with the source tree', asyn
   assert.deepEqual(lastRequest.body, { project_id: 'p1', files: { 'a.html': 'x' } });
 });
 
-test('request shape: --run POSTs /deploy/check/run with the target', async () => {
+test('request shape: --run POSTs the top-level worker contract', async () => {
   lastRequest = null;
   const client = new ApiClient('smt_test_key');
   await client.call(
     'POST',
     '/deploy/check/run',
-    buildCheckRunBody(collected({ files: { 'a.html': 'x' } }), 'p1', { path: '/api/hello', method: 'GET' }),
+    buildCheckRunBody(
+      collected({ files: { 'a.html': 'x' }, functions: { 'api/hello.ts': 'export default () => new Response()' } }),
+      'p1',
+      { path: '/api/hello?a=1', method: 'POST', body: '{"ok":true}' },
+    ),
   );
 
   assert.equal(lastRequest.url, '/deploy/check/run');
-  assert.deepEqual(lastRequest.body.target, { path: '/api/hello', method: 'GET' });
+  assert.deepEqual(lastRequest.body, {
+    project_id: 'p1',
+    functions: { 'api/hello.ts': 'export default () => new Response()' },
+    path: '/api/hello?a=1',
+    method: 'POST',
+    body: '{"ok":true}',
+  });
 });
 
 test('checkErrorsToCliError: errors-as-data maps to a renderable BUILD_ERROR', () => {
@@ -109,8 +141,11 @@ test('checkErrorsToCliError: a clean (or empty) verdict returns null', () => {
 
 test('formatCheckRunResult: renders logs + status + body', () => {
   const lines = formatCheckRunResult({
-    status: 200,
-    body: { ok: true },
+    response: {
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: '{"ok":true}',
+    },
     logs: [{ level: 'log', message: 'hi' }],
     duration_ms: 12,
   });
@@ -118,12 +153,62 @@ test('formatCheckRunResult: renders logs + status + body', () => {
   assert.match(out, /Logs/);
   assert.match(out, /\[log\] hi/);
   assert.match(out, /200/);
-  assert.match(out, /"ok": true/);
+  assert.match(out, /\{"ok":true\}/);
 });
 
 test('formatCheckRunResult: a thrown handler is reported, not swallowed', () => {
-  const lines = formatCheckRunResult({ error: { name: 'TypeError', message: 'boom' } });
-  assert.match(lines.join('\n'), /Handler threw: TypeError: boom/);
+  const lines = formatCheckRunResult({
+    response: null,
+    errors: [{ code: 'TypeError', message: 'boom', stack: 'stack fixture' }],
+    duration_ms: 9,
+  });
+  assert.match(lines.join('\n'), /Handler error: TypeError: boom/);
+  assert.match(lines.join('\n'), /stack fixture/);
+  assert.match(lines.join('\n'), /9ms/);
+});
+
+test('authentic nested --run fixtures share one human/JSON exit verdict', () => {
+  const response = (status) => ({
+    response: {
+      status,
+      headers: { 'content-type': 'application/json', 'x-fixture': String(status) },
+      body: JSON.stringify({ status }),
+    },
+    logs: [{ level: 'log', message: `status ${status}` }],
+    errors: status >= 500 ? [{ message: `Draft handler returned HTTP ${status}.` }] : [],
+    served: 'function',
+    isolated_db: true,
+    duration_ms: 7,
+  });
+  const fixtures = [
+    { name: 'nested 200', result: response(200), exit: 0 },
+    { name: 'nested 401', result: response(401), exit: 1 },
+    { name: 'nested 403', result: response(403), exit: 1 },
+    { name: 'nested 500', result: response(500), exit: 1 },
+    {
+      name: 'handler throw',
+      result: { response: null, errors: [{ code: 'HANDLER_ERROR', message: 'boom' }], logs: [], duration_ms: 4 },
+      exit: 1,
+    },
+    {
+      name: 'compile failure',
+      result: { ok: false, errors: [{ file: 'api/a.ts', line: 1, message: 'bad syntax' }] },
+      exit: 1,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const humanExit = checkRunExitCode(fixture.result);
+    const jsonExit = checkRunExitCode(JSON.parse(JSON.stringify(fixture.result)));
+    assert.equal(humanExit, fixture.exit, `${fixture.name} human exit`);
+    assert.equal(jsonExit, fixture.exit, `${fixture.name} JSON exit`);
+  }
+
+  const ok = fixtures[0].result;
+  assert.equal(ok.response.headers['x-fixture'], '200');
+  assert.equal(ok.response.body, '{"status":200}');
+  assert.equal(ok.logs[0].message, 'status 200');
+  assert.equal(ok.duration_ms, 7);
 });
 
 test('compile-only success names what passed and points to a real flow check', () => {
@@ -143,8 +228,10 @@ test('deploy-check help distinguishes compile-only mode from explicit --run exec
   const help = command.helpInformation();
   assert.match(help, /no\s+deploy, promote, or runtime request/);
   assert.match(help, /does not exercise functions,\s+auth, data access, or browser flows/);
-  assert.match(help, /--run <path>[\s\S]+invoke this one handler \(default\s+GET\)/);
+  assert.match(help, /--run <path>[\s\S]+Check one handler from collected function source\s+\(default\s+GET\)/);
+  assert.match(help, /static\/client files are not checked/i);
   assert.match(help, /can write data or call services/);
+  assert.match(help, /Exits nonzero\s+for handler preparation errors, handler errors,\s+and HTTP 4xx\/5xx/);
   assert.doesNotMatch(help, /safe to deploy|oracle/i);
 });
 
