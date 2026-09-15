@@ -19,7 +19,7 @@ const distIndex = join(repoRoot, 'dist', 'index.js');
 const sourceIndex = join(repoRoot, 'src', 'index.ts');
 const syntheticHash = '$2b$12$012345678901234567890u0123456789012345678901234567890';
 
-function run(args, { env, input = '' }) {
+function run(args, { env, input = '', inputAfter }) {
   return new Promise((resolvePromise) => {
     const sourceRunner = process.env.SOMEWHERE_TEST_SOURCE_RUNNER;
     const child = spawn(sourceRunner ?? process.execPath, sourceRunner ? [sourceIndex, ...args] : [distIndex, ...args], {
@@ -36,7 +36,11 @@ function run(args, { env, input = '' }) {
     let stderr = '';
     child.stdout.on('data', (chunk) => (stdout += chunk));
     child.stderr.on('data', (chunk) => (stderr += chunk));
-    child.stdin.end(input);
+    if (inputAfter) {
+      inputAfter.then(() => setTimeout(() => child.stdin.end(input), 50));
+    } else {
+      child.stdin.end(input);
+    }
     child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
   });
 }
@@ -117,6 +121,53 @@ test('auth export writes credentials only to a new mode-0600 file', async () => 
       body: { project_id: 'project-a', code: '482917' },
     },
   ]);
+});
+
+test('auth export awaits code supplied through piped stdin after approval completes', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-auth-export-delayed-stdin-home-'));
+  const output = join(home, 'auth-export.json');
+  writeConfig(home);
+  let resolveApproval;
+  const approvalCompleted = new Promise((resolvePromise) => {
+    resolveApproval = resolvePromise;
+  });
+
+  await withServer((req, res) => collectRequest(req, (body) => {
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/v1/auth/export/request') {
+      assert.deepEqual(body, { project_id: 'project-a' });
+      res.end(
+        JSON.stringify({ ok: true, data: { status: 'approval_sent', expires_in_seconds: 600 } }),
+        resolveApproval,
+      );
+      return;
+    }
+    assert.deepEqual(body, { project_id: 'project-a', code: '482917' });
+    res.end(JSON.stringify({
+      ok: true,
+      data: {
+        format: 'somewhere.auth-password-export.v1',
+        users: [{
+          email: 'delayed@example.test',
+          password_hash: syntheticHash,
+          hash_algorithm: 'bcrypt',
+          display_name: 'Delayed',
+          email_verified: true,
+        }],
+      },
+    }));
+  }), async (apiUrl) => {
+    const result = await run(['auth', 'export', 'project-a', '--output', output], {
+      env: { HOME: home, USERPROFILE: home, SOMEWHERE_API_URL: apiUrl },
+      input: '482917\n',
+      inputAfter: approvalCompleted,
+    });
+    assert.equal(result.status, 0, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+    assert.doesNotMatch(result.stdout + result.stderr, /\$2b\$|delayed@example/);
+  });
+
+  assert.equal(statSync(output).mode & 0o777, 0o600);
+  assert.equal(JSON.parse(readFileSync(output, 'utf8')).data.users[0].password_hash, syntheticHash);
 });
 
 test('auth export refuses overwrite before requesting approval', async () => {

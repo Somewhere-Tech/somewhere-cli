@@ -52,7 +52,12 @@ async function readAuthToken(): Promise<string> {
 }
 
 async function readPasswordExportCode(): Promise<string> {
-  if (!process.stdin.isTTY) return readFileSync(0, 'utf8').trim();
+  if (!process.stdin.isTTY) {
+    process.stdin.setEncoding('utf8');
+    let input = '';
+    for await (const chunk of process.stdin) input += chunk;
+    return input.trim();
+  }
   const response = await prompts({
     type: 'password',
     name: 'code',
