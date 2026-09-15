@@ -1,5 +1,15 @@
 import { Command } from 'commander';
-import { readFileSync } from 'node:fs';
+import {
+  closeSync,
+  constants as fsConstants,
+  createWriteStream,
+  fchmodSync,
+  openSync,
+  readFileSync,
+  unlinkSync,
+} from 'node:fs';
+import { resolve } from 'node:path';
+import { pipeline } from 'node:stream/promises';
 import prompts from 'prompts';
 import open from '../lib/open.js';
 import ora, { type Ora } from '../lib/spinner.js';
@@ -23,6 +33,7 @@ import {
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
 import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import { resolveProjectRef } from '../lib/platform-command.js';
 
 async function readAuthToken(): Promise<string> {
   const envToken = process.env.SOMEWHERE_TOKEN?.trim();
@@ -38,6 +49,42 @@ async function readAuthToken(): Promise<string> {
     message: 'Token',
   });
   return typeof response.token === 'string' ? response.token.trim() : '';
+}
+
+async function readPasswordExportCode(): Promise<string> {
+  if (!process.stdin.isTTY) return readFileSync(0, 'utf8').trim();
+  const response = await prompts({
+    type: 'password',
+    name: 'code',
+    message: 'Approval code from the verified owner email',
+  });
+  return typeof response.code === 'string' ? response.code.trim() : '';
+}
+
+function createProtectedOutput(path: string): number {
+  const noFollow = fsConstants.O_NOFOLLOW ?? 0;
+  let fd: number;
+  try {
+    fd = openSync(
+      path,
+      fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | noFollow,
+      0o600,
+    );
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    if (code === 'EEXIST' || code === 'ELOOP') {
+      throw new Error(`Refusing to overwrite existing path: ${path}`);
+    }
+    throw err;
+  }
+  try {
+    fchmodSync(fd, 0o600);
+    return fd;
+  } catch (err) {
+    try { closeSync(fd); } catch { /* best effort */ }
+    try { unlinkSync(path); } catch { /* best effort */ }
+    throw err;
+  }
 }
 
 /** The account-creation page. `login` sends an existing user through the OAuth
@@ -277,6 +324,100 @@ export function registerAuth(program: Command) {
       info(`Device ID:  ${deviceId}`);
       info(`Key name:   ${keyName}`);
       info(`Token:      ${config.token.slice(0, 8)}…${config.token.slice(-4)}`);
+    });
+
+  auth
+    .command('export [project]')
+    .description('Export portable end-user password credentials after verified-owner email approval')
+    .option('--project <ref>', 'Project ID, name, slug, or subdomain (defaults to the linked project)')
+    .requiredOption('--output <path>', 'New local JSON file to create (existing paths are never overwritten)')
+    .allowExcessArguments(false)
+    .showHelpAfterError('The approval code is read from a hidden prompt or stdin; never pass it as an argument.')
+    .action(async (
+      project: string | undefined,
+      opts: { project?: string; output: string },
+    ) => {
+      let outputFd: number | null = null;
+      let outputCreated = false;
+      let wroteOutput = false;
+      const destination = resolve(opts.output);
+      try {
+        if (project && opts.project && project.trim() !== opts.project.trim()) {
+          throw new Error(`Two different projects named in one command: \`${project}\` and --project ${opts.project}. Pass one.`);
+        }
+        const projectRef = resolveProjectRef(opts.project ?? project);
+
+        // Reserve the exact destination before sending an approval email. The
+        // exclusive, no-follow open makes overwrite and symlink races fail.
+        outputFd = createProtectedOutput(destination);
+        outputCreated = true;
+
+        const client = new ApiClient(getToken());
+        const request = await client.call<{ status: string; expires_in_seconds: number }>(
+          'POST',
+          '/auth/export/request',
+          { project_id: projectRef },
+        );
+        const approvalState = request.status === 'pending'
+          ? 'Approval email queued; delivery is still pending.'
+          : 'Approval sent to the verified project-owner email.';
+        info(`${approvalState} It expires in ${Math.ceil(request.expires_in_seconds / 60)} minutes.`);
+
+        const code = await readPasswordExportCode();
+        if (!/^\d{6}$/.test(code)) throw new Error('Approval code must be exactly 6 digits.');
+
+        const body = JSON.stringify({ project_id: projectRef, code });
+        let response: Awaited<ReturnType<ApiClient['callStream']>>;
+        try {
+          response = await client.callStream(
+            'POST',
+            '/auth/export/download',
+            () => body,
+            {
+              headers: {
+                'Content-Type': 'application/json',
+                'Content-Length': String(Buffer.byteLength(body)),
+              },
+              // A dropped response may have spent the one-time approval. Even
+              // this in-memory body must never be retried automatically.
+              replayableBody: false,
+            },
+          );
+        } catch (err) {
+          if (err instanceof CliApiError && ['NETWORK_ERROR', 'TIMEOUT', 'RETRY_REQUIRED'].includes(err.code)) {
+            throw new Error(
+              'The password export download outcome could not be confirmed. ' +
+              'The local file was removed; run the command again to request a new approval code.',
+            );
+          }
+          throw err;
+        }
+        if (!response.ok) {
+          let failure: { error?: string; message?: string } = {};
+          try { failure = await response.json() as { error?: string; message?: string }; } catch { /* generic below */ }
+          throw new CliApiError(
+            failure.error ?? 'AUTH_EXPORT_FAILED',
+            failure.message ?? `Password export failed (HTTP ${response.status}).`,
+            response.status,
+          );
+        }
+        if (!response.body) throw new Error('The server returned an empty password export.');
+
+        await pipeline(response.body, createWriteStream(destination, { fd: outputFd, autoClose: true }));
+        outputFd = null;
+        wroteOutput = true;
+        success(`Password credentials written to ${destination}`);
+      } catch (err) {
+        if (outputFd !== null) {
+          try { closeSync(outputFd); } catch { /* best effort */ }
+          outputFd = null;
+        }
+        if (outputCreated && !wroteOutput) {
+          try { unlinkSync(destination); } catch { /* best effort */ }
+        }
+        error(err instanceof Error ? err.message : String(err));
+        process.exitCode = 1;
+      }
     });
 
   auth
