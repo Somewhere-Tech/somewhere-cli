@@ -50,152 +50,40 @@ const ALIASES: Record<string, string> = {
   all: 'llms',
 };
 
-/** The public corpus that carries every manual topic, served unauthenticated.
- *  This is the same material the platform `docs` tool returns, so an anonymous
- *  read is a real answer and not a downgraded one. */
-const PUBLIC_CORPUS_PATH = '/llms-full.txt';
+/** Generated from PLATFORM_HELP_TOPICS and served without credentials. Each
+ * page carries its actual canonical body; do not reconstruct topics from
+ * references in the long-form corpus. */
+const PUBLIC_MANIFEST_PATH = '/docs-manifest.json';
 
-// Keep the structured-write shapes at the top of `somewhere docs sw.db` even
-// when the public corpus is long or an older server has not yet reordered its
-// topic. This is a CLI read-time lead, not a second docs corpus.
-const SW_DB_WRITE_SIGNATURES = `## Exact \`sw.db\` structured-write signatures
-
-\`\`\`ts
-sw.db.insert(table, values, options?: { onConflict?: 'ignore' | 'update' })
-sw.db.update(table, { set, where? })
-sw.db.remove(table, { where? }) // sw.db.delete is an alias
-\`\`\`
-
-One call example:
-
-\`\`\`ts
-await sw.db.update('notes', {
-  set: { done: true },
-  where: { id: 42 },
-})
-\`\`\``;
-
-/** A manual topic heading in the corpus ends with its key in parentheses:
- *  `## Setup — Install the CLI and connect MCP (setup)`. Method-call headings
- *  (`## sw.fs.versions(path)`) also end in parentheses, so a heading only counts
- *  as a topic boundary when the corpus separator `---` sits right above it. */
-const TOPIC_HEADING = /^#{1,3} .*\(([^()]+)\)\s*$/;
-
-export interface PublicTopicSection {
-  key: string;
+export interface PublicDocsPage {
+  id: string;
   title: string;
+  section: string | null;
   body: string;
 }
 
-interface PublicTopicEntry {
-  key: string;
-  sectionKey: string;
-}
-
-export function leadManualTopic(topic: string, content: string): string {
-  if (topic.trim().toLowerCase() !== 'sw.db' || content.startsWith(SW_DB_WRITE_SIGNATURES)) {
-    return content;
+export function parsePublicDocsManifest(value: unknown): PublicDocsPage[] {
+  if (!value || typeof value !== 'object' || !Array.isArray((value as { pages?: unknown }).pages)) {
+    throw new Error('Public docs manifest is missing its pages array.');
   }
-  return `${SW_DB_WRITE_SIGNATURES}\n\n${content}`;
-}
-
-function headingKey(line: string): string | null {
-  const match = TOPIC_HEADING.exec(line);
-  if (!match) return null;
-  const key = match[1].trim();
-  // Keys are single tokens. `(collaborated projects)` is prose, not a key.
-  if (key.length === 0 || key.length > 48 || /\s/.test(key)) return null;
-  return key;
-}
-
-/** True when `lines[i]` opens a topic: the corpus puts a `---` rule (then at
- *  most a blank line) above every topic heading after the first. */
-function isTopicBoundary(lines: readonly string[], i: number): boolean {
-  for (let back = i - 1; back >= 0 && back >= i - 2; back--) {
-    if (lines[back].trim() === '') continue;
-    return lines[back].trim() === '---';
-  }
-  return false;
-}
-
-/** Where each manual topic starts, in document order. */
-function topicStarts(lines: readonly string[]): { key: string; index: number }[] {
-  const starts: { key: string; index: number }[] = [];
-  let seenLibrary = false;
-  for (let i = 0; i < lines.length; i++) {
-    if (/^#{1,2} Topic library\s*$/.test(lines[i])) {
-      seenLibrary = true;
-      continue;
+  return (value as { pages: unknown[] }).pages.map((page, index) => {
+    if (!page || typeof page !== 'object') {
+      throw new Error(`Public docs manifest page ${index} is not an object.`);
     }
-    const key = headingKey(lines[i]);
-    if (key === null) continue;
-    // The first topic follows the library header directly, with no rule above.
-    if (!isTopicBoundary(lines, i) && !(seenLibrary && starts.length === 0)) continue;
-    starts.push({ key, index: i });
-  }
-  return starts;
-}
-
-function topicSections(corpus: string): PublicTopicSection[] {
-  const lines = corpus.split('\n');
-  const starts = topicStarts(lines);
-  return starts.map(({ key, index }, at) => {
-    const end = at + 1 < starts.length ? starts[at + 1].index : lines.length;
-    const title = lines[index].replace(/^#{1,3}\s*/, '').trim();
-    const body = lines.slice(index, end).join('\n').replace(/\s*\n---\s*$/, '').replace(/\s+$/, '');
-    return { key, title, body };
+    const candidate = page as Record<string, unknown>;
+    if (typeof candidate.id !== 'string' || !candidate.id
+        || typeof candidate.title !== 'string' || !candidate.title
+        || (candidate.section !== null && (typeof candidate.section !== 'string' || !candidate.section))
+        || typeof candidate.body !== 'string' || !candidate.body) {
+      throw new Error(`Public docs manifest page ${index} is missing id, title, section, or body.`);
+    }
+    return {
+      id: candidate.id,
+      title: candidate.title,
+      section: candidate.section,
+      body: candidate.body,
+    };
   });
-}
-
-function referencedTopicKeys(body: string): string[] {
-  const keys: string[] = [];
-  const pattern = /docs\(\{\s*topic:\s*['"]([^'"]+)['"]\s*\}\)/g;
-  for (const match of body.matchAll(pattern)) {
-    const key = match[1].trim();
-    if (/^[a-z][a-z0-9._-]{0,47}$/i.test(key) && !keys.includes(key)) keys.push(key);
-  }
-  return keys;
-}
-
-/** Public sections plus canonical topic keys explicitly linked from each
- * section. Some generated corpus topics (including declared-data and
- * auth-client) are folded into a parent section rather than emitted under
- * their own heading; the in-section canonical link is their public index. */
-function publicTopicEntries(corpus: string): PublicTopicEntry[] {
-  const entries: PublicTopicEntry[] = [];
-  const sections = topicSections(corpus);
-  const exactKeys = new Set(sections.map(({ key }) => key.toLowerCase()));
-  for (const section of sections) {
-    for (const key of [section.key, ...referencedTopicKeys(section.body)]) {
-      if (key !== section.key && exactKeys.has(key.toLowerCase())) continue;
-      if (!entries.some((entry) => entry.key.toLowerCase() === key.toLowerCase())) {
-        entries.push({ key, sectionKey: section.key });
-      }
-    }
-  }
-  return entries;
-}
-
-/** Every manual topic key the public corpus carries, in document order. */
-export function publicTopicKeys(corpus: string): string[] {
-  return publicTopicEntries(corpus).map(({ key }) => key);
-}
-
-/** Pull one manual topic out of the public corpus. Matching is on the key in
- *  the heading, case-insensitively, so `docs SETUP` and `docs setup` agree. */
-export function findPublicTopicSection(
-  corpus: string,
-  requested: string,
-): PublicTopicSection | null {
-  const wanted = requested.trim().toLowerCase();
-  if (!wanted) return null;
-  const sections = topicSections(corpus);
-  const exact = sections.find(({ key }) => key.toLowerCase() === wanted);
-  if (exact) return exact;
-  const entry = publicTopicEntries(corpus).find(({ key }) => key.toLowerCase() === wanted);
-  if (!entry) return null;
-  const parent = sections.find(({ key }) => key === entry.sectionKey);
-  return parent ? { ...parent, key: entry.key } : null;
 }
 
 /** A stored credential the platform would accept — read WITHOUT `getToken()`,
@@ -211,12 +99,22 @@ export function hasUsableCredential(): boolean {
   return true;
 }
 
-async function fetchPublicCorpus(): Promise<string> {
-  const res = await fetch(DOCS_BASE + PUBLIC_CORPUS_PATH);
+async function fetchPublicManifest(): Promise<PublicDocsPage[]> {
+  const res = await fetch(DOCS_BASE + PUBLIC_MANIFEST_PATH, {
+    headers: { 'User-Agent': 'somewhere-cli' },
+  });
   if (!res.ok) {
-    throw new Error(`Could not fetch ${DOCS_BASE}${PUBLIC_CORPUS_PATH} (HTTP ${res.status}).`);
+    throw new Error(`Could not fetch ${DOCS_BASE}${PUBLIC_MANIFEST_PATH} (HTTP ${res.status}).`);
   }
-  return res.text();
+  try {
+    return parsePublicDocsManifest(await res.json());
+  } catch (cause) {
+    throw new Error(`Could not read ${DOCS_BASE}${PUBLIC_MANIFEST_PATH}: ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+}
+
+function renderPublicPage(page: PublicDocsPage): string {
+  return `# ${page.title}\n\n${page.body.trimEnd()}\n`;
 }
 
 export async function writeResponseBodyToStdout(res: Pick<Response, 'body'>): Promise<void> {
@@ -249,8 +147,7 @@ export function registerDocs(program: Command) {
     .action(async (topic: string | undefined, opts: { list?: boolean; json?: boolean }) => {
       if (opts.list) {
         try {
-          const corpus = await fetchPublicCorpus();
-          const topics = publicTopicEntries(corpus);
+          const pages = await fetchPublicManifest();
           const quickLinks = Object.entries(TOPICS).map(([name, entry]) => ({
             name,
             path: entry.path,
@@ -258,10 +155,11 @@ export function registerDocs(program: Command) {
           }));
           if (opts.json) {
             printJson({
-              topics: topics.map(({ key, sectionKey }) => ({
-                name: key,
-                source: PUBLIC_CORPUS_PATH,
-                ...(key !== sectionKey ? { section: sectionKey } : {}),
+              topics: pages.map(({ id, title, section }) => ({
+                name: id,
+                title,
+                section,
+                source: PUBLIC_MANIFEST_PATH,
               })),
               quick_links: quickLinks,
             });
@@ -269,8 +167,9 @@ export function registerDocs(program: Command) {
           }
           console.log('Platform docs — no login needed. Usage: somewhere docs <topic>\n');
           console.log('Public topics:');
-          for (const { key, sectionKey } of topics) {
-            console.log(`  ${key}${key === sectionKey ? '' : dim(` (covered in ${sectionKey})`)}`);
+          const width = Math.max(...pages.map(({ id }) => id.length));
+          for (const { id, title } of pages) {
+            console.log(`  ${id.padEnd(width)}  ${title}`);
           }
           console.log('\nQuick links:');
           for (const { name, description } of quickLinks) {
@@ -290,18 +189,15 @@ export function registerDocs(program: Command) {
       const entry = key ? TOPICS[key] : undefined;
       if (!entry) {
         // Manual topics (tsk_926fbf8e). The platform tool gives the signed-in
-        // read; the SAME material is served unauthenticated in the public
-        // corpus. So: use the credential when there is one, and otherwise —
-        // or when the authenticated read fails for any reason, auth included —
-        // answer from the public corpus. A docs read never says "Not logged
-        // in": the docs are public.
+        // read; the generated public manifest carries each canonical page body
+        // for anonymous reads. Never reconstruct a topic from cross-references
+        // in another document.
         let authenticatedFailure: string | null = null;
         if (hasUsableCredential()) {
           try {
             const content = await callPlatformHelpTool('docs', { topic: requestedTopic });
-            const ledContent = leadManualTopic(requestedTopic, content);
-            if (opts.json) printJson({ topic: requestedTopic, content: ledContent });
-            else process.stdout.write(ledContent.endsWith('\n') ? ledContent : `${ledContent}\n`);
+            if (opts.json) printJson({ topic: requestedTopic, content });
+            else process.stdout.write(content.endsWith('\n') ? content : `${content}\n`);
             return;
           } catch (e) {
             authenticatedFailure = e instanceof Error ? e.message : String(e);
@@ -309,22 +205,23 @@ export function registerDocs(program: Command) {
         }
 
         try {
-          const corpus = await fetchPublicCorpus();
-          const section = findPublicTopicSection(corpus, requestedTopic);
-          if (section) {
+          const pages = await fetchPublicManifest();
+          const page = pages.find(({ id }) => id.toLowerCase() === requestedTopic.toLowerCase());
+          if (page) {
+            const content = renderPublicPage(page);
             if (opts.json) {
               printJson({
-                topic: section.key,
-                url: DOCS_BASE + PUBLIC_CORPUS_PATH,
+                topic: page.id,
+                url: DOCS_BASE + PUBLIC_MANIFEST_PATH,
                 source: 'public',
-                content: `${leadManualTopic(section.key, section.body)}\n`,
+                content,
               });
             } else {
-              process.stdout.write(`${leadManualTopic(section.key, section.body)}\n`);
+              process.stdout.write(content);
             }
             return;
           }
-          const known = publicTopicKeys(corpus);
+          const known = pages.map(({ id }) => id);
           error(
             `No documentation topic named "${requestedTopic}".`
             + (known.length ? ` Topics: ${known.join(', ')}.` : '')
@@ -332,7 +229,12 @@ export function registerDocs(program: Command) {
           );
           process.exitCode = 1;
         } catch (e) {
-          error(authenticatedFailure ?? (e instanceof Error ? e.message : String(e)));
+          const publicFailure = e instanceof Error ? e.message : String(e);
+          error(
+            authenticatedFailure
+              ? `${publicFailure} Authenticated docs also failed: ${authenticatedFailure}`
+              : publicFailure,
+          );
           process.exitCode = 1;
         }
         return;

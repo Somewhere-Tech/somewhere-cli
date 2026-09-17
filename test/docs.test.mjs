@@ -6,10 +6,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import {
-  findPublicTopicSection,
-  publicTopicKeys,
-} from '../dist/commands/docs.js';
+import { parsePublicDocsManifest } from '../dist/commands/docs.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
@@ -31,6 +28,66 @@ function run(args, env) {
     child.stderr.on('data', (c) => (stderr += c));
     child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
   });
+}
+
+const MANIFEST = {
+  version: 1,
+  pages: [
+    {
+      id: 'sw.db', title: 'Database', section: 'data-identity',
+      body: 'Canonical database body.\n', anchors: [], provenance: { authored: 'hand' },
+    },
+    {
+      id: 'declared-data', title: 'Declared data — the schema file is the contract', section: 'data-identity',
+      body: "Generated client API:\n\n```ts\nimport { data, DataError } from 'somewhere:data'\nawait data.notes.list()\n```\n",
+      anchors: [], provenance: { authored: 'hand' },
+    },
+    {
+      id: 'auth-client', title: 'Auth on the client — the correct session code', section: 'data-identity',
+      body: "```js\nreturn json(await sw.auth.loginWithCookie(req, b.email, b.password))\n```\n",
+      anchors: [], provenance: { authored: 'hand' },
+    },
+    {
+      id: 'setup', title: 'Setup — Install the CLI and connect MCP', section: 'start',
+      body: 'Install the CLI, then connect it.\n', anchors: [], provenance: { authored: 'hand' },
+    },
+    {
+      id: 'troubleshooting', title: 'Troubleshooting', section: 'operate',
+      body: 'What to do when a deploy fails.\n', anchors: [], provenance: { authored: 'hand' },
+    },
+    {
+      id: 'verify-before-deploy', title: 'Verify before deploy', section: 'start',
+      body: 'Flow schema and examples.\n', anchors: [], provenance: { authored: 'hand' },
+    },
+  ],
+};
+
+function manifestServer() {
+  return createServer((req, res) => {
+    if (req.url === '/docs-manifest.json') {
+      assert.match(req.headers['user-agent'] ?? '', /somewhere-cli/);
+      res.setHeader('Content-Type', 'application/json');
+      res.end(JSON.stringify(MANIFEST));
+      return;
+    }
+    if (req.url === '/start.txt') {
+      res.end('quickstart body\n');
+      return;
+    }
+    res.statusCode = 404;
+    res.end('missing');
+  });
+}
+
+async function withManifest(fn) {
+  const server = manifestServer();
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  try {
+    return await fn(`http://127.0.0.1:${port}`);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
 }
 
 test('docs docs streams the full document to stdout', async () => {
@@ -87,11 +144,7 @@ test('bare docs streams the full platform reference', async () => {
 });
 
 test('docs --list discovers public topics and keeps quick links separate', async () => {
-  const server = createServer((req, res) => {
-    if (req.url === '/llms-full.txt') res.end(CORPUS);
-    else if (req.url === '/start.txt') res.end('quickstart body\n');
-    else { res.statusCode = 404; res.end('missing'); }
-  });
+  const server = manifestServer();
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const { port } = server.address();
   try {
@@ -102,8 +155,9 @@ test('docs --list discovers public topics and keeps quick links separate', async
     });
     assert.equal(list.status, 0);
     assert.match(list.stdout, /Public topics:/);
-    assert.match(list.stdout, /declared-data \(covered in sw\.db\)/);
-    assert.match(list.stdout, /auth-client \(covered in sw\.auth\)/);
+    assert.match(list.stdout, /declared-data\s+Declared data/);
+    assert.match(list.stdout, /auth-client\s+Auth on the client/);
+    assert.match(list.stdout, /verify-before-deploy\s+Verify before deploy/);
     assert.match(list.stdout, /Quick links:/);
     assert.match(list.stdout, /start\s+Anonymous quickstart/);
 
@@ -113,7 +167,8 @@ test('docs --list discovers public topics and keeps quick links separate', async
       CI: '1',
     });
     const listPayload = JSON.parse(listedJson.stdout);
-    assert.ok(listPayload.topics.some((topic) => topic.name === 'declared-data' && topic.section === 'sw.db'));
+    assert.ok(listPayload.topics.some((topic) => topic.name === 'declared-data'
+      && topic.section === 'data-identity' && topic.source === '/docs-manifest.json'));
     assert.ok(listPayload.quick_links.some((topic) => topic.name === 'start' && topic.path === '/start.txt'));
 
     const result = await run(['docs', 'start', '--json'], {
@@ -132,109 +187,18 @@ test('docs --list discovers public topics and keeps quick links separate', async
   }
 });
 
-// tsk_926fbf8e — `somewhere docs <topic>` was login-gated for every topic that
-// is not one of the six whole-document shortcuts: the unknown-topic branch went
-// straight to the authenticated platform tool, whose token read exits the
-// process with "Not logged in". The docs are public, so the front door must
-// answer with no credential at all.
-
-/** The public corpus shape: a topic library where `---` separates topics and
- *  each topic heading ends with its key in parentheses. */
-const CORPUS = [
-  '# somewhere.tech — llms-full.txt',
-  '',
-  '# Topic library',
-  '',
-  '## sw.db — Database (sw.db)',
-  '',
-  'Database body.',
-  '',
-  "For the declaration contract, call `docs({ topic: 'declared-data' })`.",
-  '',
-  '## sw.fs.versions(path)',
-  '',
-  'A method heading, not a topic.',
-  '',
-  '---',
-  '',
-  '## Auth — End-user authentication (sw.auth)',
-  '',
-  'Cookie session body.',
-  '',
-  "For browser setup, call `docs({ topic: 'auth-client' })`.",
-  '',
-  '---',
-  '',
-  '## Setup — Install the CLI and connect MCP (setup)',
-  '',
-  'Install the CLI, then connect it.',
-  '',
-  "Use `docs({ topic: '<name>' })` with a real topic name; see `docs({ topic: 'troubleshooting' })` for failures.",
-  '',
-  '---',
-  '',
-  '## Conflict check (collaborated projects)',
-  '',
-  'Prose parentheses, not a topic key — a subsection of setup.',
-  '',
-  '---',
-  '',
-  '## Troubleshooting — Common errors (troubleshooting)',
-  '',
-  'What to do when a deploy fails.',
-  '',
-].join('\n');
-
-function corpusServer() {
-  const server = createServer((req, res) => {
-    if (req.url === '/llms-full.txt') {
-      res.setHeader('Content-Type', 'text/plain; charset=utf-8');
-      res.end(CORPUS);
-      return;
-    }
-    res.statusCode = 404;
-    res.end('missing');
-  });
-  return server;
-}
-
-async function withCorpus(fn) {
-  const server = corpusServer();
-  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
-  const { port } = server.address();
-  try {
-    return await fn(`http://127.0.0.1:${port}`);
-  } finally {
-    await new Promise((resolvePromise) => server.close(resolvePromise));
-  }
-}
+// tsk_926fbf8e — manual topics are public through the generated manifest.
+// A topic response must use that page's own body, never prose from a page that
+// merely links to it.
 
 /** A HOME with no ~/.somewhere/config.json — the blind-run starting state. */
 function emptyCredentialHome() {
   return mkdtempSync(join(tmpdir(), 'sw-docs-nocreds-home-'));
 }
 
-test('docs <topic> answers from the public corpus with NO credential present', async () => {
+test('docs <topic> returns exact manifest pages with NO credential present', async () => {
   const home = emptyCredentialHome();
-  await withCorpus(async (base) => {
-    for (const topic of ['setup', 'troubleshooting', 'sw.db']) {
-      const result = await run(['docs', topic], {
-        HOME: home,
-        USERPROFILE: home,
-        SOMEWHERE_DOCS_BASE: base,
-        SOMEWHERE_NO_NOTIFICATIONS: '1',
-        NO_COLOR: '1',
-        CI: '1',
-      });
-      assert.equal(
-        result.status,
-        0,
-        `docs ${topic} exited ${result.status}\nstdout:\n${result.stdout}\nstderr:\n${result.stderr}`,
-      );
-      assert.doesNotMatch(result.stderr, /Not logged in/);
-      assert.doesNotMatch(result.stdout, /Not logged in/);
-      assert.ok(result.stdout.includes(`(${topic})`), `topic heading missing:\n${result.stdout}`);
-    }
+  await withManifest(async (base) => {
     const declared = await run(['docs', 'declared-data'], {
       HOME: home,
       USERPROFILE: home,
@@ -244,7 +208,11 @@ test('docs <topic> answers from the public corpus with NO credential present', a
       CI: '1',
     });
     assert.equal(declared.status, 0, declared.stderr);
-    assert.match(declared.stdout, /Database body/);
+    assert.match(declared.stdout, /^# Declared data — the schema file is the contract/);
+    assert.match(declared.stdout, /import \{ data, DataError \} from 'somewhere:data'/);
+    assert.match(declared.stdout, /await data\.notes\.list\(\)/);
+    assert.doesNotMatch(declared.stdout, /Canonical database body/);
+
     const authClient = await run(['docs', 'auth-client'], {
       HOME: home,
       USERPROFILE: home,
@@ -254,13 +222,15 @@ test('docs <topic> answers from the public corpus with NO credential present', a
       CI: '1',
     });
     assert.equal(authClient.status, 0, authClient.stderr);
-    assert.match(authClient.stdout, /Cookie session body/);
+    assert.match(authClient.stdout, /^# Auth on the client — the correct session code/);
+    assert.match(authClient.stdout, /json\(await sw\.auth\.loginWithCookie\(req, b\.email, b\.password\)\)/);
+    assert.doesNotMatch(authClient.stdout, /Canonical database body/);
   });
 });
 
-test('docs <topic> --json returns the public section in an envelope, unauthenticated', async () => {
+test('docs <topic> --json returns the exact public manifest page in an envelope', async () => {
   const home = emptyCredentialHome();
-  await withCorpus(async (base) => {
+  await withManifest(async (base) => {
     const result = await run(['docs', 'setup', '--json'], {
       HOME: home,
       USERPROFILE: home,
@@ -270,36 +240,18 @@ test('docs <topic> --json returns the public section in an envelope, unauthentic
       CI: '1',
     });
     assert.equal(result.status, 0, `stderr:\n${result.stderr}`);
-    const parsed = JSON.parse(result.stdout);
-    assert.equal(parsed.topic, 'setup');
-    assert.equal(parsed.source, 'public');
-    assert.match(parsed.content, /Install the CLI, then connect it\./);
-  });
-});
-
-test('docs sw.db leads with every structured-write signature and one call example', async () => {
-  const home = emptyCredentialHome();
-  await withCorpus(async (base) => {
-    const result = await run(['docs', 'sw.db'], {
-      HOME: home,
-      USERPROFILE: home,
-      SOMEWHERE_DOCS_BASE: base,
-      SOMEWHERE_NO_NOTIFICATIONS: '1',
-      NO_COLOR: '1',
-      CI: '1',
+    assert.deepEqual(JSON.parse(result.stdout), {
+      topic: 'setup',
+      url: `${base}/docs-manifest.json`,
+      source: 'public',
+      content: '# Setup — Install the CLI and connect MCP\n\nInstall the CLI, then connect it.\n',
     });
-    assert.equal(result.status, 0, result.stderr);
-    const first120 = result.stdout.split('\n').slice(0, 120).join('\n');
-    assert.match(first120, /sw\.db\.insert\(table, values/);
-    assert.match(first120, /sw\.db\.update\(table, \{ set, where\? \}\)/);
-    assert.match(first120, /sw\.db\.remove\(table, \{ where\? \}\)/);
-    assert.match(first120, /await sw\.db\.update\('notes'/);
   });
 });
 
-test('an unknown topic names the public topics instead of demanding a login', async () => {
+test('an unknown topic names manifest topics instead of demanding a login', async () => {
   const home = emptyCredentialHome();
-  await withCorpus(async (base) => {
+  await withManifest(async (base) => {
     const result = await run(['docs', 'no-such-topic'], {
       HOME: home,
       USERPROFILE: home,
@@ -311,32 +263,45 @@ test('an unknown topic names the public topics instead of demanding a login', as
     assert.equal(result.status, 1);
     assert.doesNotMatch(result.stderr, /Not logged in/);
     assert.match(result.stderr, /No documentation topic named "no-such-topic"/);
-    assert.match(result.stderr, /setup/);
-    assert.match(result.stderr, /troubleshooting/);
+    assert.match(result.stderr, /declared-data/);
+    assert.match(result.stderr, /auth-client/);
+    assert.match(result.stderr, /verify-before-deploy/);
   });
 });
 
-test('topic sections are cut on the corpus separator, not on method headings', () => {
-  const setup = findPublicTopicSection(CORPUS, 'setup');
-  assert.ok(setup);
-  assert.equal(setup.key, 'setup');
-  assert.match(setup.body, /Install the CLI, then connect it\./);
-  // A `---` rule only ends a topic when a real topic heading follows it, so a
-  // prose-parenthesis subsection stays inside the topic that owns it.
-  assert.match(setup.body, /Prose parentheses/);
-  assert.doesNotMatch(setup.body, /What to do when a deploy fails/);
+test('manifest parsing requires actual page bodies', () => {
+  assert.deepEqual(parsePublicDocsManifest(MANIFEST).map(({ id }) => id), MANIFEST.pages.map(({ id }) => id));
+  assert.throws(
+    () => parsePublicDocsManifest({ pages: [{ id: 'auth-client', title: 'Auth', section: 'data' }] }),
+    /missing id, title, section, or body/,
+  );
+  assert.throws(() => parsePublicDocsManifest({}), /missing its pages array/);
+});
 
-  const db = findPublicTopicSection(CORPUS, 'SW.DB');
-  assert.ok(db, 'topic lookup is case-insensitive');
-  assert.equal(db.key, 'sw.db');
-  assert.match(db.body, /Database body\./);
-
-  assert.equal(findPublicTopicSection(CORPUS, 'path'), null, 'a method heading is not a topic');
-  assert.deepEqual(publicTopicKeys(CORPUS), [
-    'sw.db', 'declared-data', 'sw.auth', 'auth-client', 'setup', 'troubleshooting',
-  ]);
-  assert.equal(findPublicTopicSection(CORPUS, 'declared-data')?.key, 'declared-data');
-  assert.match(findPublicTopicSection(CORPUS, 'declared-data')?.body ?? '', /Database body/);
-  assert.equal(findPublicTopicSection(CORPUS, 'auth-client')?.key, 'auth-client');
-  assert.match(findPublicTopicSection(CORPUS, 'auth-client')?.body ?? '', /Cookie session body/);
+test('a manifest page without a body fails precisely instead of substituting another topic', async () => {
+  const home = emptyCredentialHome();
+  const server = createServer((req, res) => {
+    assert.equal(req.url, '/docs-manifest.json');
+    res.setHeader('Content-Type', 'application/json');
+    res.end(JSON.stringify({
+      pages: [{ id: 'auth-client', title: 'Auth on the client', section: 'data-identity' }],
+    }));
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  try {
+    const result = await run(['docs', 'auth-client'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      NO_COLOR: '1',
+      CI: '1',
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /page 0 is missing id, title, section, or body/);
+    assert.doesNotMatch(result.stdout + result.stderr, /Canonical database body/);
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
 });

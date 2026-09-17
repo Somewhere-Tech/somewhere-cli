@@ -448,7 +448,7 @@ Minimal --flow JSON:
   }
 
 Save that object as flow.json, then pass --flow flow.json.
-For the complete flow and action schema, run: somewhere docs verify-before-deploy
+For the complete flow and action schema, run: somewhere docs browser
 `)
     .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean }) => {
       try {

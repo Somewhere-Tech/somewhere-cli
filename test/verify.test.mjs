@@ -43,7 +43,7 @@ test('verify --help includes a parser-valid flow and the full-schema command', (
     visible_only: false,
     viewports: ['desktop', 'mobile'],
   });
-  assert.match(result.stdout, /somewhere docs verify-before-deploy/);
+  assert.match(result.stdout, /somewhere docs browser/);
   rmSync(home, { recursive: true, force: true });
 });
 
