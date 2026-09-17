@@ -436,6 +436,20 @@ export function registerVerify(program: Command): void {
     .option('--session <session-id>', 'Existing app session value to seed as localStorage sw_auth in every viewport.')
     .option('--cookie <name=value>', 'Existing app cookie to seed in every viewport. Repeatable.', collectCookie)
     .option('--json', 'Print the structured verification report as JSON.')
+    .addHelpText('after', `
+Minimal --flow JSON:
+  {
+    "actions": [
+      { "click": "#save" },
+      { "expect": { "selector": "#status", "text": "Saved" } }
+    ],
+    "expect_requests": [{ "path": "/api/save", "status": 200 }],
+    "viewports": ["desktop", "mobile"]
+  }
+
+Save that object as flow.json, then pass --flow flow.json.
+For the complete flow and action schema, run: somewhere docs verify-before-deploy
+`)
     .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean }) => {
       try {
         const url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);

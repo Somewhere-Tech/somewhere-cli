@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -17,6 +17,35 @@ const actions = [
   { click: '#save' },
   { expect: { selector: '#status', text: 'Saved' } },
 ];
+
+test('verify --help includes a parser-valid flow and the full-schema command', () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-verify-help-home-'));
+  const result = spawnSync(process.execPath, [join(process.cwd(), 'dist/index.js'), 'verify', '--help'], {
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      HOME: home,
+      USERPROFILE: home,
+      CI: '1',
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+    },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  const match = result.stdout.match(/Minimal --flow JSON:\n([\s\S]*?)\n\nSave that object/);
+  assert.ok(match, result.stdout);
+  const example = JSON.parse(match[1].replace(/^  /gm, ''));
+  assert.deepEqual(normalizeVerifyFlow(example), {
+    actions: [
+      { click: '#save' },
+      { expect: { selector: '#status', text: 'Saved' } },
+    ],
+    expect_requests: [{ path: '/api/save', status: 200 }],
+    visible_only: false,
+    viewports: ['desktop', 'mobile'],
+  });
+  assert.match(result.stdout, /somewhere docs verify-before-deploy/);
+  rmSync(home, { recursive: true, force: true });
+});
 
 function browserReport(overrides = {}) {
   return {
