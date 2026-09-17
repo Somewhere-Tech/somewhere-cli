@@ -152,7 +152,7 @@ function referencedTopicKeys(body: string): string[] {
   const pattern = /docs\(\{\s*topic:\s*['"]([^'"]+)['"]\s*\}\)/g;
   for (const match of body.matchAll(pattern)) {
     const key = match[1].trim();
-    if (key && !keys.includes(key)) keys.push(key);
+    if (/^[a-z][a-z0-9._-]{0,47}$/i.test(key) && !keys.includes(key)) keys.push(key);
   }
   return keys;
 }
@@ -163,8 +163,11 @@ function referencedTopicKeys(body: string): string[] {
  * their own heading; the in-section canonical link is their public index. */
 function publicTopicEntries(corpus: string): PublicTopicEntry[] {
   const entries: PublicTopicEntry[] = [];
-  for (const section of topicSections(corpus)) {
+  const sections = topicSections(corpus);
+  const exactKeys = new Set(sections.map(({ key }) => key.toLowerCase()));
+  for (const section of sections) {
     for (const key of [section.key, ...referencedTopicKeys(section.body)]) {
+      if (key !== section.key && exactKeys.has(key.toLowerCase())) continue;
       if (!entries.some((entry) => entry.key.toLowerCase() === key.toLowerCase())) {
         entries.push({ key, sectionKey: section.key });
       }

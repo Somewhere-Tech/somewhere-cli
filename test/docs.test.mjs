@@ -169,6 +169,8 @@ const CORPUS = [
   '',
   'Install the CLI, then connect it.',
   '',
+  "Use `docs({ topic: '<name>' })` with a real topic name; see `docs({ topic: 'troubleshooting' })` for failures.",
+  '',
   '---',
   '',
   '## Conflict check (collaborated projects)',
