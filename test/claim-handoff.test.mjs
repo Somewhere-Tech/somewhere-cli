@@ -14,6 +14,10 @@ const configPath = join(configDir, 'config.json');
 const tempSidecarPath = join(configDir, 'temp-session.json');
 let exchangeMode = 'ready';
 let ackOk = true;
+let exchangeGate;
+let exchangeStarted;
+let ackGate;
+let ackStarted;
 let calls = [];
 let delivered;
 const server = createServer(async (req, res) => {
@@ -23,6 +27,8 @@ const server = createServer(async (req, res) => {
   calls.push({ url: req.url, body: parsed });
   res.setHeader('content-type', 'application/json');
   if (req.url === '/v1/auth/temp-handoff/exchange') {
+    exchangeStarted?.();
+    if (exchangeGate) await exchangeGate;
     if (exchangeMode === 'expired') {
       res.statusCode = 410;
       return res.end(JSON.stringify({ ok: false, error: 'CLAIM_CLI_HANDOFF_EXPIRED', message: 'Run `somewhere login` in this directory. Keep the existing project link and do not redeploy.' }));
@@ -30,6 +36,8 @@ const server = createServer(async (req, res) => {
     return res.end(JSON.stringify({ ok: true, data: delivered }));
   }
   if (req.url === '/v1/auth/temp-handoff/ack') {
+    ackStarted?.();
+    if (ackGate) await ackGate;
     if (!ackOk) {
       res.statusCode = 503;
       return res.end(JSON.stringify({ ok: false, error: 'TEMPORARY' }));
@@ -109,6 +117,70 @@ test('permanent login and --temporary sidecar are never overwritten by handoff r
   assert.equal(readConfig().token, 'smt_permanent');
   assert.equal(JSON.parse(readFileSync(tempSidecarPath, 'utf8')).token, 'smt_temp_sidecar');
   assert.deepEqual(calls, []);
+});
+
+test('exchange response cannot overwrite a newer permanent login', async () => {
+  calls = [];
+  let releaseExchange;
+  exchangeGate = new Promise((resolve) => { releaseExchange = resolve; });
+  const started = new Promise((resolve) => { exchangeStarted = resolve; });
+  writeConfig({ token: 'smt_temp_racing', user: { email: 'temporary', username: '' }, temporary: true, claim_handoff: { project_id: projectId, verifier, handoff_id: handoffId } });
+  const recovery = recoverClaimHandoff();
+  await started;
+  writeConfig({ token: 'smt_new_permanent', refresh_token: 'smtr_new_permanent', user: { email: 'new@example.com', username: '' } });
+  releaseExchange();
+  assert.equal((await recovery).kind, 'none');
+  assert.equal(readConfig().token, 'smt_new_permanent');
+  assert.equal(readConfig().refresh_token, 'smtr_new_permanent');
+  assert.deepEqual(calls.map((call) => call.url), ['/v1/auth/temp-handoff/exchange']);
+  exchangeGate = undefined;
+  exchangeStarted = undefined;
+});
+
+test('acknowledgement cleanup cannot overwrite a newer permanent login', async () => {
+  calls = [];
+  let releaseAck;
+  ackGate = new Promise((resolve) => { releaseAck = resolve; });
+  const started = new Promise((resolve) => { ackStarted = resolve; });
+  writeConfig({
+    token: 'smt_delivered_old',
+    refresh_token: 'smtr_delivered_old',
+    user: { email: 'old@example.com', username: '' },
+    claim_handoff_ack: { handoff_id: handoffId, verifier },
+  });
+  const recovery = recoverClaimHandoff();
+  await started;
+  writeConfig({ token: 'smt_newer_login', refresh_token: 'smtr_newer_login', user: { email: 'newer@example.com', username: '' } });
+  releaseAck();
+  assert.equal((await recovery).kind, 'none');
+  assert.equal(readConfig().token, 'smt_newer_login');
+  assert.equal(readConfig().refresh_token, 'smtr_newer_login');
+  assert.equal(readConfig().claim_handoff_ack, undefined);
+  assert.deepEqual(calls.map((call) => call.url), ['/v1/auth/temp-handoff/ack']);
+  ackGate = undefined;
+  ackStarted = undefined;
+});
+
+test('fresh exchange acknowledgement cannot overwrite a login made after installation', async () => {
+  calls = [];
+  let releaseAck;
+  ackGate = new Promise((resolve) => { releaseAck = resolve; });
+  const started = new Promise((resolve) => { ackStarted = resolve; });
+  writeConfig({ token: 'smt_temp_before_ack', user: { email: 'temporary', username: '' }, temporary: true, claim_handoff: { project_id: projectId, verifier, handoff_id: handoffId } });
+  const recovery = recoverClaimHandoff();
+  await started;
+  assert.equal(readConfig().token, 'smt_project_bound', 'delivered credential installed before ACK');
+  writeConfig({ token: 'smt_login_during_ack', refresh_token: 'smtr_login_during_ack', user: { email: 'during-ack@example.com', username: '' } });
+  releaseAck();
+  assert.equal((await recovery).kind, 'recovered');
+  assert.equal(readConfig().token, 'smt_login_during_ack');
+  assert.equal(readConfig().refresh_token, 'smtr_login_during_ack');
+  assert.deepEqual(calls.map((call) => call.url), [
+    '/v1/auth/temp-handoff/exchange',
+    '/v1/auth/temp-handoff/ack',
+  ]);
+  ackGate = undefined;
+  ackStarted = undefined;
 });
 
 test.after(async () => { await new Promise((resolve) => server.close(resolve)); });

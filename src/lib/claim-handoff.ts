@@ -1,5 +1,5 @@
 import { createDecipheriv, createHash, randomBytes } from 'node:crypto';
-import type { ClaimCliHandoff, CliConfig } from '../types.js';
+import type { ClaimCliHandoff, ClaimCliHandoffAck, CliConfig } from '../types.js';
 import { loadConfig, saveConfig } from './config.js';
 import { getDeviceKeyName } from './device.js';
 import { describeThisDevice } from './device-login.js';
@@ -121,6 +121,20 @@ async function acknowledge(handoffId: string, verifier: string): Promise<boolean
   }
 }
 
+/** Remove only the acknowledgement we actually sent, from the config that is
+ * current after the network wait. A concurrent login must win this race. */
+function clearCurrentAcknowledgement(expected: ClaimCliHandoffAck): CliConfig | null {
+  const current = loadConfig();
+  if (!current) return null;
+  if (
+    current.claim_handoff_ack?.handoff_id !== expected.handoff_id
+    || current.claim_handoff_ack.verifier !== expected.verifier
+  ) return current;
+  const { claim_handoff_ack: _removed, ...clean } = current;
+  saveConfig(clean as CliConfig);
+  return clean as CliConfig;
+}
+
 export async function recoverClaimHandoff(): Promise<ClaimHandoffRecovery> {
   let config = loadConfig();
   if (!config) return { kind: 'none' };
@@ -128,9 +142,8 @@ export async function recoverClaimHandoff(): Promise<ClaimHandoffRecovery> {
   if (config.claim_handoff_ack) {
     const ack = config.claim_handoff_ack;
     if (await acknowledge(ack.handoff_id, ack.verifier)) {
-      const { claim_handoff_ack: _removed, ...clean } = config;
-      saveConfig(clean as CliConfig);
-      config = clean as CliConfig;
+      config = clearCurrentAcknowledgement(ack);
+      if (!config) return { kind: 'none' };
     }
   }
 
@@ -161,6 +174,16 @@ export async function recoverClaimHandoff(): Promise<ClaimHandoffRecovery> {
   }
 
   const delivered = decodeCredentials(state, envelope.data);
+  const current = loadConfig();
+  if (
+    !current?.temporary
+    || current.token !== config.token
+    || current.claim_handoff?.project_id !== state.project_id
+    || current.claim_handoff.verifier !== state.verifier
+    || current.claim_handoff.handoff_id !== state.handoff_id
+  ) {
+    return { kind: 'none' };
+  }
   const next: CliConfig = {
     token: delivered.token,
     refresh_token: delivered.refresh_token,
@@ -172,8 +195,7 @@ export async function recoverClaimHandoff(): Promise<ClaimHandoffRecovery> {
   // keeps the same encrypted delivery retrievable and never mints a second key.
   saveConfig(next);
   if (await acknowledge(state.handoff_id, state.verifier)) {
-    const { claim_handoff_ack: _removed, ...clean } = next;
-    saveConfig(clean as CliConfig);
+    clearCurrentAcknowledgement(next.claim_handoff_ack!);
   }
   return {
     kind: 'recovered',
