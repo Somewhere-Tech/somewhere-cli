@@ -33,7 +33,7 @@ function run(args, env, cwd = repoRoot) {
   });
 }
 
-test('anonymous advisor uses the public HTTP contract without project identity', async () => {
+test('no-config and temporary advisor use the public HTTP contract without project identity', async () => {
   const home = mkdtempSync(join(tmpdir(), 'sw-public-advisor-home-'));
   const project = mkdtempSync(join(tmpdir(), 'sw-public-advisor-project-'));
   const calls = [];
@@ -88,19 +88,66 @@ test('anonymous advisor uses the public HTTP contract without project identity',
     assert.match(noContext.stderr, /Advisor context not attached/);
 
     writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
-      token: 'smt_expired_fixture',
+      token: 'smt_temporary_fixture',
       temporary: true,
-      temp_expires_at: '2020-01-01T00:00:00.000Z',
-      user: { email: 'expired@example.test', username: 'expired' },
+      temp_expires_at: '2030-01-01T00:00:00.000Z',
+      user: { email: 'temporary', username: '' },
     }));
-    const expired = await run(['advisor', 'Do not replay me', '--file', contextFile], env, project);
-    assert.equal(expired.status, 1);
-    assert.match(expired.stderr, /Temporary session expired/);
-    assert.equal(calls.length, 2, 'expired authenticated context must not fall back to /advisor');
+    const temporary = await run(['advisor', 'Help after deploy', '--file', contextFile], env, project);
+    assert.equal(temporary.status, 0, temporary.stderr);
+    assert.equal(calls[2].url, '/advisor');
+    assert.equal(calls[2].authorization, undefined);
+    assert.equal(calls[2].body.context.project_ref, undefined);
+    assert.doesNotMatch(JSON.stringify(calls[2]), /private-project-id|smt_temporary_fixture/);
+    assert.match(temporary.stderr, /Advisor context attached: last run, file/);
+
+    const temporaryNoContext = await run(['advisor', 'No temporary context', '--no-context'], env, project);
+    assert.equal(temporaryNoContext.status, 0, temporaryNoContext.stderr);
+    assert.deepEqual(calls[3].body, { question: 'No temporary context' });
+    assert.match(temporaryNoContext.stderr, /Advisor context not attached/);
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
     rmSync(home, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
+  }
+});
+
+test('rejected permanent credential stays on authenticated MCP without anonymous fallback', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-permanent-advisor-home-'));
+  const requests = [];
+  writeConfig(home, 'smt_rejected_permanent');
+  const configPath = join(home, '.somewhere', 'config.json');
+  const config = JSON.parse(readFileSync(configPath, 'utf8'));
+  writeFileSync(configPath, JSON.stringify({
+    ...config,
+    access_expires_at: '2020-01-01T00:00:00.000Z',
+  }));
+  const server = createServer((req, res) => {
+    requests.push({ url: req.url, authorization: req.headers.authorization });
+    res.statusCode = req.url === '/advisor' ? 200 : 403;
+    res.setHeader('content-type', 'application/json');
+    res.end(req.url === '/advisor'
+      ? JSON.stringify({ ok: true, data: { answer: 'Public fallback must not run.' } })
+      : JSON.stringify({ error: 'FORBIDDEN', message: 'credential rejected' }));
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  try {
+    const result = await run(['advisor', 'Keep this authenticated', '--no-context'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_MCP_URL: `http://127.0.0.1:${port}/mcp`,
+    });
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /403|Forbidden|credential rejected/i);
+    assert.ok(requests.length >= 1);
+    assert.ok(requests.every((request) => request.url !== '/advisor'));
+    assert.ok(requests.every((request) => request.authorization === 'Bearer smt_rejected_permanent'));
+    assert.match(result.stderr, /Advisor context not attached/);
+  } finally {
+    server.closeAllConnections();
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    rmSync(home, { recursive: true, force: true });
   }
 });
 

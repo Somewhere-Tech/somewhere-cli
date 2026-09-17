@@ -74,14 +74,15 @@ export function registerAdvisor(program: Command): void {
     .option('--no-context', 'Do not attach the linked project, previous run, or file')
     .action(async (question: string, opts: { json?: boolean; file?: string; context?: boolean }) => {
       try {
-        const storedCredential = !!loadConfig()?.token;
+        const config = loadConfig();
+        const permanentCredential = !!config?.token && config.temporary !== true;
         const localContext = opts.context === false ? undefined : buildAdvisorContext(opts.file);
-        const context = storedCredential ? localContext : anonymousAdvisorContext(localContext);
+        const context = permanentCredential ? localContext : anonymousAdvisorContext(localContext);
         process.stderr.write(`${contextNotice(context)}\n`);
-        // A configured credential always stays on the authenticated MCP path.
-        // If it is expired or rejected, surface that failure instead of
-        // replaying private context through the anonymous endpoint.
-        const answer = storedCredential
+        // Only permanent credentials authorize the authenticated MCP path.
+        // Temporary deploy credentials use the public advisor's IP gate, while
+        // an expired or rejected permanent credential still fails closed here.
+        const answer = permanentCredential
           ? await callPlatformHelpTool('advisor', {
             question,
             ...(context ? { context } : {}),
