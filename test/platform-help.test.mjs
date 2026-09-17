@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -18,11 +18,11 @@ function cliInvocation(args) {
     : { command: process.execPath, args: [distIndex, ...args] };
 }
 
-function run(args, env) {
+function run(args, env, cwd = repoRoot) {
   return new Promise((resolvePromise) => {
     const invocation = cliInvocation(args);
     const child = spawn(invocation.command, invocation.args, {
-      cwd: repoRoot,
+      cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
@@ -32,6 +32,77 @@ function run(args, env) {
     child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
   });
 }
+
+test('anonymous advisor uses the public HTTP contract without project identity', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-public-advisor-home-'));
+  const project = mkdtempSync(join(tmpdir(), 'sw-public-advisor-project-'));
+  const calls = [];
+  writeFileSync(join(project, '.somewhere.json'), JSON.stringify({
+    project_id: 'private-project-id', name: 'private', subdomain: 'private',
+  }));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'last-run.json'), JSON.stringify({
+    command: 'somewhere deploy',
+    args: ['--token', 'smt_private_fixture'],
+    exit_code: 1,
+    stdout_tail: '',
+    stderr_tail: 'Bearer smt_private_fixture failed',
+    timestamp: '2026-09-16T00:00:00.000Z',
+  }));
+  const contextFile = join(project, '.env');
+  writeFileSync(contextFile, 'APP_SECRET=sk_private_fixture\n');
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => { body += chunk; });
+    req.on('end', () => {
+      calls.push({ url: req.url, authorization: req.headers.authorization, body: JSON.parse(body) });
+      sendJson(res, {
+        ok: true,
+        data: { answer: 'Anonymous answer.\n\n---\nLog in for faster answers.' },
+      });
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  const env = {
+    HOME: home,
+    USERPROFILE: home,
+    SOMEWHERE_MCP_URL: `http://127.0.0.1:${port}/mcp`,
+  };
+  try {
+    const answer = await run(['advisor', 'How do I deploy?', '--file', contextFile, '--json'], env, project);
+    assert.equal(answer.status, 0, answer.stderr);
+    assert.equal(JSON.parse(answer.stdout).answer, 'Anonymous answer.\n\n---\nLog in for faster answers.');
+    assert.match(answer.stderr, /Advisor context attached: last run, file/);
+    assert.equal(calls[0].url, '/advisor');
+    assert.equal(calls[0].authorization, undefined);
+    assert.equal(calls[0].body.project_id, undefined);
+    assert.equal(calls[0].body.context.project_ref, undefined);
+    assert.equal(calls[0].body.context.last_run.stderr_tail, 'Bearer [REDACTED] failed');
+    assert.equal(calls[0].body.context.file.content, 'APP_SECRET=[REDACTED]\n');
+    assert.doesNotMatch(JSON.stringify(calls[0]), /private-project-id|smt_private_fixture|sk_private_fixture/);
+
+    const noContext = await run(['advisor', 'No context', '--no-context'], env, project);
+    assert.equal(noContext.status, 0, noContext.stderr);
+    assert.deepEqual(calls[1].body, { question: 'No context' });
+    assert.match(noContext.stderr, /Advisor context not attached/);
+
+    writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({
+      token: 'smt_expired_fixture',
+      temporary: true,
+      temp_expires_at: '2020-01-01T00:00:00.000Z',
+      user: { email: 'expired@example.test', username: 'expired' },
+    }));
+    const expired = await run(['advisor', 'Do not replay me', '--file', contextFile], env, project);
+    assert.equal(expired.status, 1);
+    assert.match(expired.stderr, /Temporary session expired/);
+    assert.equal(calls.length, 2, 'expired authenticated context must not fall back to /advisor');
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    rmSync(home, { recursive: true, force: true });
+    rmSync(project, { recursive: true, force: true });
+  }
+});
 
 function writeConfig(home, token = 'smt_platform_help_test', refreshToken) {
   mkdirSync(join(home, '.somewhere'), { recursive: true });

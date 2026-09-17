@@ -71,7 +71,7 @@ The CLI needs no MCP setup: every command works from the shell, and `somewhere r
 | `somewhere open` | Open project URL in browser |
 | `somewhere open --dashboard` | Open the dashboard |
 | `somewhere api GET /v1/projects` | Raw API call with auto-auth |
-| `somewhere advisor "<question>"` | Ask the authenticated platform advisor (`--json` for automation) |
+| `somewhere advisor "<question>"` | Ask the platform advisor anonymously; login adds linked-project context (`--json` for automation) |
 | `somewhere docs [topic]` | Read public text docs or an MCP manual topic such as `sw.db` (`--json` supported) |
 | `somewhere catalog` | Browse the live platform tool catalog (`--json` for the raw catalog) |
 | `somewhere mcp` | Run MCP server over stdio (proxies to mcp.somewhere.tech) |

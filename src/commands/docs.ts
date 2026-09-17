@@ -87,6 +87,11 @@ export interface PublicTopicSection {
   body: string;
 }
 
+interface PublicTopicEntry {
+  key: string;
+  sectionKey: string;
+}
+
 export function leadManualTopic(topic: string, content: string): string {
   if (topic.trim().toLowerCase() !== 'sw.db' || content.startsWith(SW_DB_WRITE_SIGNATURES)) {
     return content;
@@ -131,13 +136,46 @@ function topicStarts(lines: readonly string[]): { key: string; index: number }[]
   return starts;
 }
 
-/** Every manual topic key the public corpus carries, in document order. */
-export function publicTopicKeys(corpus: string): string[] {
+function topicSections(corpus: string): PublicTopicSection[] {
+  const lines = corpus.split('\n');
+  const starts = topicStarts(lines);
+  return starts.map(({ key, index }, at) => {
+    const end = at + 1 < starts.length ? starts[at + 1].index : lines.length;
+    const title = lines[index].replace(/^#{1,3}\s*/, '').trim();
+    const body = lines.slice(index, end).join('\n').replace(/\s*\n---\s*$/, '').replace(/\s+$/, '');
+    return { key, title, body };
+  });
+}
+
+function referencedTopicKeys(body: string): string[] {
   const keys: string[] = [];
-  for (const { key } of topicStarts(corpus.split('\n'))) {
-    if (!keys.includes(key)) keys.push(key);
+  const pattern = /docs\(\{\s*topic:\s*['"]([^'"]+)['"]\s*\}\)/g;
+  for (const match of body.matchAll(pattern)) {
+    const key = match[1].trim();
+    if (key && !keys.includes(key)) keys.push(key);
   }
   return keys;
+}
+
+/** Public sections plus canonical topic keys explicitly linked from each
+ * section. Some generated corpus topics (including declared-data and
+ * auth-client) are folded into a parent section rather than emitted under
+ * their own heading; the in-section canonical link is their public index. */
+function publicTopicEntries(corpus: string): PublicTopicEntry[] {
+  const entries: PublicTopicEntry[] = [];
+  for (const section of topicSections(corpus)) {
+    for (const key of [section.key, ...referencedTopicKeys(section.body)]) {
+      if (!entries.some((entry) => entry.key.toLowerCase() === key.toLowerCase())) {
+        entries.push({ key, sectionKey: section.key });
+      }
+    }
+  }
+  return entries;
+}
+
+/** Every manual topic key the public corpus carries, in document order. */
+export function publicTopicKeys(corpus: string): string[] {
+  return publicTopicEntries(corpus).map(({ key }) => key);
 }
 
 /** Pull one manual topic out of the public corpus. Matching is on the key in
@@ -148,17 +186,13 @@ export function findPublicTopicSection(
 ): PublicTopicSection | null {
   const wanted = requested.trim().toLowerCase();
   if (!wanted) return null;
-  const lines = corpus.split('\n');
-  const starts = topicStarts(lines);
-  const at = starts.findIndex(({ key }) => key.toLowerCase() === wanted);
-  if (at === -1) return null;
-
-  const { key, index } = starts[at];
-  const end = at + 1 < starts.length ? starts[at + 1].index : lines.length;
-  const title = lines[index].replace(/^#{1,3}\s*/, '').trim();
-  // Drop the `---` rule that introduces the next topic.
-  const body = lines.slice(index, end).join('\n').replace(/\s*\n---\s*$/, '').replace(/\s+$/, '');
-  return { key, title, body };
+  const sections = topicSections(corpus);
+  const exact = sections.find(({ key }) => key.toLowerCase() === wanted);
+  if (exact) return exact;
+  const entry = publicTopicEntries(corpus).find(({ key }) => key.toLowerCase() === wanted);
+  if (!entry) return null;
+  const parent = sections.find(({ key }) => key === entry.sectionKey);
+  return parent ? { ...parent, key: entry.key } : null;
 }
 
 /** A stored credential the platform would accept — read WITHOUT `getToken()`,
@@ -211,21 +245,39 @@ export function registerDocs(program: Command) {
     .option('--json', 'Print the selected document in a JSON envelope')
     .action(async (topic: string | undefined, opts: { list?: boolean; json?: boolean }) => {
       if (opts.list) {
-        if (opts.json) {
-          printJson({
-            topics: Object.entries(TOPICS).map(([name, entry]) => ({
-              name,
-              path: entry.path,
-              description: entry.blurb,
-            })),
-          });
-          return;
+        try {
+          const corpus = await fetchPublicCorpus();
+          const topics = publicTopicEntries(corpus);
+          const quickLinks = Object.entries(TOPICS).map(([name, entry]) => ({
+            name,
+            path: entry.path,
+            description: entry.blurb,
+          }));
+          if (opts.json) {
+            printJson({
+              topics: topics.map(({ key, sectionKey }) => ({
+                name: key,
+                source: PUBLIC_CORPUS_PATH,
+                ...(key !== sectionKey ? { section: sectionKey } : {}),
+              })),
+              quick_links: quickLinks,
+            });
+            return;
+          }
+          console.log('Platform docs — no login needed. Usage: somewhere docs <topic>\n');
+          console.log('Public topics:');
+          for (const { key, sectionKey } of topics) {
+            console.log(`  ${key}${key === sectionKey ? '' : dim(` (covered in ${sectionKey})`)}`);
+          }
+          console.log('\nQuick links:');
+          for (const { name, description } of quickLinks) {
+            console.log(`  ${name.padEnd(10)} ${description}`);
+          }
+          console.log(`\n${dim('No account yet? Start with: somewhere docs start')}`);
+        } catch (e) {
+          error(e instanceof Error ? e.message : String(e));
+          process.exitCode = 1;
         }
-        console.log('Platform docs — no login needed. Usage: somewhere docs <topic>\n');
-        for (const [name, t] of Object.entries(TOPICS)) {
-          console.log(`  ${name.padEnd(10)} ${t.blurb}`);
-        }
-        console.log(`\n${dim('No account yet? Start with: somewhere docs start')}`);
         return;
       }
       const requestedTopic = topic ?? 'docs';

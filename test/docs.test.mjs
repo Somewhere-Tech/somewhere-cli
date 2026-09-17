@@ -86,22 +86,36 @@ test('bare docs streams the full platform reference', async () => {
   }
 });
 
-test('docs --list keeps the topic menu and docs --json returns an envelope', async () => {
-  const list = await run(['docs', '--list'], {
-    SOMEWHERE_NO_NOTIFICATIONS: '1',
-    CI: '1',
-  });
-  assert.equal(list.status, 0);
-  assert.match(list.stdout, /start\s+Anonymous quickstart/);
-  assert.match(list.stdout, /docs\s+Full platform reference/);
-
+test('docs --list discovers public topics and keeps quick links separate', async () => {
   const server = createServer((req, res) => {
-    assert.equal(req.url, '/start.txt');
-    res.end('quickstart body\n');
+    if (req.url === '/llms-full.txt') res.end(CORPUS);
+    else if (req.url === '/start.txt') res.end('quickstart body\n');
+    else { res.statusCode = 404; res.end('missing'); }
   });
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const { port } = server.address();
   try {
+    const list = await run(['docs', '--list'], {
+      SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      CI: '1',
+    });
+    assert.equal(list.status, 0);
+    assert.match(list.stdout, /Public topics:/);
+    assert.match(list.stdout, /declared-data \(covered in sw\.db\)/);
+    assert.match(list.stdout, /auth-client \(covered in sw\.auth\)/);
+    assert.match(list.stdout, /Quick links:/);
+    assert.match(list.stdout, /start\s+Anonymous quickstart/);
+
+    const listedJson = await run(['docs', '--list', '--json'], {
+      SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      CI: '1',
+    });
+    const listPayload = JSON.parse(listedJson.stdout);
+    assert.ok(listPayload.topics.some((topic) => topic.name === 'declared-data' && topic.section === 'sw.db'));
+    assert.ok(listPayload.quick_links.some((topic) => topic.name === 'start' && topic.path === '/start.txt'));
+
     const result = await run(['docs', 'start', '--json'], {
       SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
       SOMEWHERE_NO_NOTIFICATIONS: '1',
@@ -135,9 +149,19 @@ const CORPUS = [
   '',
   'Database body.',
   '',
+  "For the declaration contract, call `docs({ topic: 'declared-data' })`.",
+  '',
   '## sw.fs.versions(path)',
   '',
   'A method heading, not a topic.',
+  '',
+  '---',
+  '',
+  '## Auth — End-user authentication (sw.auth)',
+  '',
+  'Cookie session body.',
+  '',
+  "For browser setup, call `docs({ topic: 'auth-client' })`.",
   '',
   '---',
   '',
@@ -209,6 +233,26 @@ test('docs <topic> answers from the public corpus with NO credential present', a
       assert.doesNotMatch(result.stdout, /Not logged in/);
       assert.ok(result.stdout.includes(`(${topic})`), `topic heading missing:\n${result.stdout}`);
     }
+    const declared = await run(['docs', 'declared-data'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_DOCS_BASE: base,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      NO_COLOR: '1',
+      CI: '1',
+    });
+    assert.equal(declared.status, 0, declared.stderr);
+    assert.match(declared.stdout, /Database body/);
+    const authClient = await run(['docs', 'auth-client'], {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_DOCS_BASE: base,
+      SOMEWHERE_NO_NOTIFICATIONS: '1',
+      NO_COLOR: '1',
+      CI: '1',
+    });
+    assert.equal(authClient.status, 0, authClient.stderr);
+    assert.match(authClient.stdout, /Cookie session body/);
   });
 });
 
@@ -286,5 +330,11 @@ test('topic sections are cut on the corpus separator, not on method headings', (
   assert.match(db.body, /Database body\./);
 
   assert.equal(findPublicTopicSection(CORPUS, 'path'), null, 'a method heading is not a topic');
-  assert.deepEqual(publicTopicKeys(CORPUS), ['sw.db', 'setup', 'troubleshooting']);
+  assert.deepEqual(publicTopicKeys(CORPUS), [
+    'sw.db', 'declared-data', 'sw.auth', 'auth-client', 'setup', 'troubleshooting',
+  ]);
+  assert.equal(findPublicTopicSection(CORPUS, 'declared-data')?.key, 'declared-data');
+  assert.match(findPublicTopicSection(CORPUS, 'declared-data')?.body ?? '', /Database body/);
+  assert.equal(findPublicTopicSection(CORPUS, 'auth-client')?.key, 'auth-client');
+  assert.match(findPublicTopicSection(CORPUS, 'auth-client')?.body ?? '', /Cookie session body/);
 });
