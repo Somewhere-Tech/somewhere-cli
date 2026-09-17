@@ -24,6 +24,22 @@ export interface CliConfig {
   /** Where claiming a temporary workspace happens — printed on every temp
    *  deploy so the dev can convert it into a real account. */
   claim_url?: string;
+  /** Proof held only by the originating CLI. The claim URL cannot exchange it. */
+  claim_handoff?: ClaimCliHandoff;
+  /** Kept until the server confirms it cleared the encrypted delivery. */
+  claim_handoff_ack?: ClaimCliHandoffAck;
+}
+
+export interface ClaimCliHandoff {
+  project_id: string;
+  verifier: string;
+  handoff_id?: string;
+  expires_at?: string;
+}
+
+export interface ClaimCliHandoffAck {
+  handoff_id: string;
+  verifier: string;
 }
 
 export interface ProjectConfig {

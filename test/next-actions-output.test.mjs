@@ -57,6 +57,12 @@ async function withStubPlatform(deployData, fn) {
         sendJson(res, 200, { ok: true, data: deployData });
         return;
       }
+      if (req.method === 'POST' && req.url === '/v1/auth/temp-handoff/register') {
+        sendJson(res, 201, { ok: true, data: {
+          handoff_id: 'cch_temp_out', expires_at: new Date(Date.now() + 10_800_000).toISOString(),
+        } });
+        return;
+      }
       sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
     });
   });
@@ -221,6 +227,12 @@ async function withStubTempPlatform(fn) {
         });
         return;
       }
+      if (req.method === 'POST' && req.url === '/v1/auth/temp-handoff/register') {
+        sendJson(res, 201, { ok: true, data: {
+          handoff_id: 'cch_temp_out', expires_at: new Date(Date.now() + 10_800_000).toISOString(),
+        } });
+        return;
+      }
       sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: `${req.method} ${req.url}` });
     });
   });
@@ -249,7 +261,7 @@ test('an anonymous temporary deploy gets the same browser guidance, addressed by
     assert.match(result.stdout, /Live URL:/);
     assert.match(result.stdout, /Claim URL: https:\/\/somewhere\.tech\/claim\?token=swtc_temp_out/);
     assert.match(result.stdout, /Expires at:/);
-    assert.match(result.stdout, /Next step: somewhere login to keep it\./);
+    assert.match(result.stdout, /approve CLI continuation.*next command will reconnect/i);
 
     // By URL, not the bare project form: the throwaway project is not always
     // the directory's linked project.

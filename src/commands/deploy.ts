@@ -23,6 +23,7 @@ import {
 } from '../lib/config.js';
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
+import { ensureClaimHandoff } from '../lib/claim-handoff.js';
 import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
@@ -335,6 +336,7 @@ interface TempSession {
   ttlSeconds?: number;
   expiresAt?: string;
   reused: boolean;
+  handoffReady?: boolean;
 }
 
 export function registerDeploy(program: Command) {
@@ -588,6 +590,19 @@ export function registerDeploy(program: Command) {
         }
       } else if (linkedProjectEntry && projectConfigMatchesRef(linkedProjectEntry.config, projectId)) {
         deployStateEntry = linkedProjectEntry;
+      }
+
+      if (tempSession && projectId) {
+        if (besideRealLogin) {
+          tempSession.handoffReady = false;
+        } else {
+          try {
+            tempSession.handoffReady = Boolean(await ensureClaimHandoff(projectId));
+          } catch (err) {
+            tempSession.handoffReady = false;
+            if (!opts.json) warn(`Automatic CLI continuation is unavailable: ${err instanceof Error ? err.message : String(err)}`);
+          }
+        }
       }
 
       await showProjectNotices(client, projectId);
@@ -878,8 +893,10 @@ export function registerDeploy(program: Command) {
           }
           info(
             besideRealLogin
-              ? `Your account login is untouched. Open the claim URL to move this app into it; drop ${teal('--temporary')} to deploy to your account instead.`
-              : `Next step: ${teal('somewhere login')} to keep it.`,
+              ? `Your permanent login is untouched. After claiming, keep this project and run ${teal(`somewhere init --link --project ${projectId}`)} only if this directory has no link. Do not unlink, create a replacement, or redeploy to recover it.`
+              : tempSession.handoffReady
+                ? 'If you approve CLI continuation on the claim page, the next command will reconnect this CLI to this project only.'
+                : `After claiming, run ${teal('somewhere login')} in this directory. Keep the existing project link; do not unlink or redeploy.`,
           );
         } else {
           if (formatted.liveUrl) {

@@ -39,8 +39,9 @@ import { registerCron } from './commands/cron.js';
 import { registerEmail } from './commands/email.js';
 import { collectNotices } from './lib/notify/index.js';
 import { startupNotice } from './lib/startup-notice.js';
-import { error, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
+import { error, info, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
 import { recordLastRun } from './lib/last-run.js';
+import { recoverClaimHandoff } from './lib/claim-handoff.js';
 
 const pkg = JSON.parse(
   readFileSync(join(dirname(fileURLToPath(import.meta.url)), '..', 'package.json'), 'utf8'),
@@ -119,6 +120,13 @@ collectNotices(process.argv)
   })
   .catch(() => {});
 try {
+  const command = process.argv[2] || '';
+  const skipRecovery = ['login', 'signup', 'logout', 'docs', '--help', '-h', '--version', '-V'].includes(command);
+  const recovery = skipRecovery ? { kind: 'none' as const } : await recoverClaimHandoff();
+  if (recovery.kind === 'recovered' && recovery.message && !jsonOutputRequested) info(recovery.message);
+  if (recovery.kind === 'manual' && recovery.message && !['login', 'signup', 'logout', 'docs'].includes(command)) {
+    throw new Error(recovery.message);
+  }
   await program.parseAsync();
 } catch (err) {
   if (jsonOutputRequested && err instanceof CommanderError) {

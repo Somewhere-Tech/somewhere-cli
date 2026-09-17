@@ -102,6 +102,11 @@ const server = createServer((req, res) => {
       return;
     }
 
+    if (req.method === 'POST' && req.url === '/v1/auth/temp-handoff/register') {
+      send(201, { ok: true, data: { handoff_id: 'cch_e2e', expires_at: new Date(Date.now() + 10_800_000).toISOString() } });
+      return;
+    }
+
     send(404, { ok: false, error: 'NOT_FOUND', message: `no stub route for ${req.method} ${req.url}` });
   });
 });
@@ -140,7 +145,7 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   assert.match(first.stdout, /Live URL:/);
   assert.match(first.stdout, /Claim URL:/);
   assert.match(first.stdout, /Expires at:/);
-  assert.match(first.stdout, /Next step: somewhere login to keep it\./);
+  assert.match(first.stdout, /approve CLI continuation.*next command will reconnect/i);
   assert.ok(first.stdout.includes('https://somewhere.tech/claim?token=swtc_e2e'), 'claim URL present in stdout');
 
   const configPath = join(HOME, '.somewhere', 'config.json');
@@ -149,6 +154,9 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   assert.equal(config.temporary, true);
   assert.equal(config.token, 'smt_e2e_temp');
   assert.equal(config.claim_url, 'https://somewhere.tech/claim?token=swtc_e2e');
+  assert.equal(config.claim_handoff.handoff_id, 'cch_e2e');
+  assert.equal(config.claim_handoff.project_id, 'proj_e2e_1');
+  assert.notEqual(config.claim_handoff.verifier, config.claim_url, 'CLI proof is distinct from the browser claim URL');
 
   const projectFilePath = join(fixtureDir, '.somewhere.json');
   assert.ok(existsSync(projectFilePath), '.somewhere.json written in the fixture dir');
@@ -167,7 +175,7 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   assert.match(second.stdout, /Live URL:/);
   assert.match(second.stdout, /Expires at: .* \(\d+h \d+m remaining\)/);
   assert.match(second.stdout, /Claim URL:/);
-  assert.match(second.stdout, /Next step: somewhere login to keep it\./);
+  assert.match(second.stdout, /approve CLI continuation.*next command will reconnect/i);
 
   assert.equal(tempCreateCalls, 1, 'still exactly ONE temp-create total — silent reuse');
   assert.equal(projectsCalls, 1, 'still exactly ONE project create total — .somewhere.json was reused');
@@ -260,7 +268,7 @@ test('--temporary while logged in and unlinked takes the temporary path, no link
   assert.match(first.stdout, /Live URL:/);
   assert.match(first.stdout, /Claim URL:/);
   assert.match(first.stdout, /Expires at:/);
-  assert.match(first.stdout, /Your account login is untouched/);
+  assert.match(first.stdout, /Your permanent login is untouched/);
   assert.equal(tempCreateCalls, beforeTempCreate + 1, 'one temporary session minted');
   assert.equal(projectsCalls, beforeProjects + 1, 'the throwaway project was auto-created');
 
