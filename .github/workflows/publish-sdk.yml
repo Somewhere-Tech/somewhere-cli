@@ -1,0 +1,36 @@
+name: Publish SDK (workaround)
+
+# One-off path for @somewhere-tech/sdk while the SDK repo has no NPM_TOKEN
+# secret of its own (pfb_102d72391549). Checks out the SDK at a given ref and
+# publishes it with this repo's token. No --provenance here: npm's provenance
+# check requires the publishing workflow's repository to match the package's
+# repository field, which it cannot from this repo. Remove once the SDK repo
+# carries NPM_TOKEN and publishes from its own workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'somewhere-sdk-js git ref to publish (tag or sha)'
+        required: true
+        default: 'v0.8.0'
+
+permissions:
+  contents: read
+
+jobs:
+  publish-sdk:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          repository: Somewhere-Tech/somewhere-sdk-js
+          ref: ${{ inputs.ref }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://registry.npmjs.org'
+      - run: npm ci
+      - run: npm test
+      - run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
