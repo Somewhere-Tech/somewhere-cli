@@ -15,102 +15,117 @@ import { dim, error, info, printJson, printJsonError, success, teal, warn } from
  * `@neondatabase/serverless` driver callable — this CLI never describes it as
  * anything else and never adds a query surface of its own.
  *
+ * Field names mirror `worker/src/routes/postgres.ts` exactly
+ * (`provider_project_id`, `branch_id`, `database`, `role`, `requires_redeploy`,
+ * `note`). The CLI publishes no aliases of its own: an alias here is a second
+ * name for the same thing that drifts the first time the route changes.
+ *
  * Two rules shape every command below:
  *
- *  1. The Neon MANAGEMENT key can delete the developer's databases. It is read
+ *  1. The Neon management key can delete the developer's databases. It is read
  *     from the environment, from stdin, or from a hidden prompt — never from
  *     argv, where it would be visible in the process table and in shell
  *     history. It is sent once and never written to the CLI config.
  *  2. Nothing that could carry a connection string or a key is printed. Human
- *     output reads an explicit allowlist of fields; the route contract already
- *     redacts the host and never returns either credential.
+ *     output reads an explicit allowlist of fields; the route already redacts
+ *     the host and never returns either credential.
+ *
+ * Connection is by API key. There is no browser account-connect flow to offer
+ * because Neon restricts OAuth to registered commercial partners — a design
+ * constraint worth recording here, and not worth spending a customer's help
+ * text on.
  */
 
 /** The env var `connect` reads the Neon management key from, mirroring
  *  SOMEWHERE_TOKEN for `somewhere auth set`. */
 const NEON_KEY_ENV = 'SOMEWHERE_NEON_API_KEY';
 
+const NEON_KEY_DOCS = 'https://neon.com/docs/manage/api-keys';
+
 const KEY_SOURCE_HELP =
   `The Neon API key is read from ${NEON_KEY_ENV}, from stdin, or from a hidden prompt — ` +
   'never from an argument, where it would be visible in the process table. ' +
   'It is stored encrypted by the platform and never saved in your CLI config.';
 
-/**
- * Why `connect` takes a key and not a browser sign-in.
- *
- * Neon's OAuth integration is restricted to active commercial partners
- * (https://neon.com/docs/guides/oauth-integration), and we are not registered.
- * Saying "for now" would imply a date nobody has committed to.
- */
-const OAUTH_LIMITATION =
-  'Setup is by Neon API key. Connecting a Neon account through the browser is not available — ' +
-  "Neon restricts OAuth to registered commercial partners, which Somewhere isn't.";
-
-/** What `attach`/`create` bind is baked into the bundle a release is BUILT
- *  from, so a database only reaches functions in the next deploy. */
+/** Fallback for a route that reports `requires_redeploy` without a `note`.
+ *  When the route sends its own note, that text wins — one sentence, written
+ *  once, server-side, so the CLI cannot drift from it. */
 const REDEPLOY_NOTICE =
-  'Deploy again for sw.postgres to reach your functions — a release built before now does not have the binding.';
+  'Takes effect on the next deploy. Releases already deployed keep the connection details they were built with.';
+
+/**
+ * Reconciliation, not retry.
+ *
+ * Neon's POST /projects takes no idempotency key and does not enforce name
+ * uniqueness, so a second attempt spends the developer's money again and
+ * leaves an orphan project behind. This is the guidance for both ways an
+ * outcome can be unknown: the route answering POSTGRES_CREATE_UNCERTAIN, and
+ * no HTTP answer arriving at all.
+ */
+const CREATE_RECONCILE_GUIDANCE = [
+  'Do NOT run create again — Neon does not de-duplicate project creation, so a second attempt can bill you twice and leave a database you never asked for.',
+  'Run `somewhere postgres status` to see what the platform recorded.',
+  'Check your Neon account for a project matching this request; if one exists, bind it with `somewhere postgres attach <neon-project-id>`.',
+];
+
+const CREATE_UNCERTAIN = 'POSTGRES_CREATE_UNCERTAIN';
 
 interface ConnectResult {
-  project_id?: unknown;
   connected?: unknown;
-  account?: unknown;
   requires_redeploy?: unknown;
+  note?: unknown;
 }
 
 interface AttachResult {
-  project_id?: unknown;
   attached?: unknown;
-  neon_project_id?: unknown;
+  provider_project_id?: unknown;
+  branch_id?: unknown;
+  database?: unknown;
+  role?: unknown;
   host?: unknown;
   requires_redeploy?: unknown;
+  note?: unknown;
 }
 
 interface CreateResult {
-  project_id?: unknown;
   created?: unknown;
-  neon_project_id?: unknown;
+  attached?: unknown;
+  provider_project_id?: unknown;
+  region?: unknown;
   host?: unknown;
   requires_redeploy?: unknown;
+  note?: unknown;
 }
 
 interface StatusResult {
-  project_id?: unknown;
   connected?: unknown;
   attached?: unknown;
-  neon_project_id?: unknown;
-  host?: unknown;
   status?: unknown;
-  error?: unknown;
+  auth_kind?: unknown;
+  provider?: unknown;
+  provider_project_id?: unknown;
+  branch_id?: unknown;
+  database?: unknown;
+  role?: unknown;
+  host?: unknown;
+  last_error?: unknown;
+  attached_at?: unknown;
   updated_at?: unknown;
-  requires_redeploy?: unknown;
 }
 
 interface DisconnectResult {
-  project_id?: unknown;
   disconnected?: unknown;
+  detached?: unknown;
+  key_removed?: unknown;
+  database_deleted?: unknown;
+  requires_redeploy?: unknown;
+  note?: unknown;
 }
 
 interface ProjectOptions {
   project?: string;
   json?: boolean;
 }
-
-/**
- * A create whose outcome the platform could not read.
- *
- * Neon's POST /projects takes no idempotency key and does not enforce name
- * uniqueness, so a second attempt spends the developer's money again and
- * leaves an orphan project behind. The CLI surfaces this verdict and stops; it
- * never retries, and it never suggests retrying.
- */
-const CREATE_UNCERTAIN = 'POSTGRES_CREATE_UNCERTAIN';
-
-const CREATE_UNCERTAIN_GUIDANCE = [
-  'Do NOT run create again — Neon does not de-duplicate project creation, so a second attempt can bill you twice and leave an orphan database.',
-  'Run `somewhere postgres status` to see what the platform recorded.',
-  'Check your Neon console for a project matching this request; if one exists, bind it with `somewhere postgres attach <neon-project-id>`.',
-];
 
 function str(value: unknown): string | null {
   return typeof value === 'string' && value.length > 0 ? value : null;
@@ -134,33 +149,25 @@ async function readNeonApiKey(): Promise<string> {
   return typeof response.key === 'string' ? response.key.trim() : '';
 }
 
-/**
- * The account line for `connect`, from whatever identifying field the route
- * put in its already-redacted `account` object. Reads named fields only — an
- * unexpected field never reaches the terminal through here.
- */
-function accountLabel(account: unknown): string | null {
-  if (typeof account !== 'object' || account === null) return null;
-  const record = account as Record<string, unknown>;
-  return str(record.email) ?? str(record.name) ?? str(record.id);
+/** A padded `label  value` line, matching the alignment `auth status` uses. */
+function field(label: string, value: string): void {
+  info(`${label.padEnd(14)}${value}`);
 }
 
 /**
- * Whether to print the redeploy notice.
+ * Say what happens next, in the route's own words when it supplies them.
  *
- * `requires_redeploy: false` is the platform saying the binding is already
- * live, and it wins. Otherwise the notice stands: for attach/create it is true
- * by construction, and for connect (which stores a key and binds nothing) the
- * caller only asks when the platform said so explicitly.
+ * `note` is the single sentence the routes share for "existing releases keep
+ * what they were built with". Printing it rather than a local paraphrase is
+ * what keeps the CLI from making a revocation claim the platform does not.
  */
-function shouldPrintRedeploy(value: unknown, whenAbsent: boolean): boolean {
-  if (value === false) return false;
-  if (value === true) return true;
-  return whenAbsent;
-}
-
-function printRedeployNotice(requiresRedeploy: unknown, whenAbsent: boolean): void {
-  if (shouldPrintRedeploy(requiresRedeploy, whenAbsent)) warn(REDEPLOY_NOTICE);
+function printNote(result: { requires_redeploy?: unknown; note?: unknown }): void {
+  const note = str(result.note);
+  if (note) {
+    warn(note);
+    return;
+  }
+  if (result.requires_redeploy === true) warn(REDEPLOY_NOTICE);
 }
 
 function reportError(err: unknown, json: boolean | undefined): void {
@@ -169,19 +176,59 @@ function reportError(err: unknown, json: boolean | undefined): void {
     if (json) {
       printJsonError(err.code, err.message, {
         ...(err.hint ? { hint: err.hint } : {}),
-        // Carried in the envelope too: an agent reading --json must be able to
-        // see "do not retry" without parsing prose.
-        ...(uncertain ? { guidance: CREATE_UNCERTAIN_GUIDANCE } : {}),
+        // An agent reading --json must see "do not retry" without parsing prose.
+        ...(uncertain ? { outcome: 'unknown', guidance: CREATE_RECONCILE_GUIDANCE } : {}),
       });
     } else {
       error(`${err.code}: ${err.message}`);
       if (err.hint) info(dim(err.hint));
-      if (uncertain) for (const line of CREATE_UNCERTAIN_GUIDANCE) info(dim(line));
+      if (uncertain) for (const line of CREATE_RECONCILE_GUIDANCE) info(dim(line));
     }
   } else {
     const message = err instanceof Error ? err.message : String(err);
     if (json) printJsonError('CLI_ERROR', message);
     else error(message);
+  }
+  process.exitCode = 1;
+}
+
+/**
+ * The first sentence of a transport failure — what happened, without the advice.
+ *
+ * The client's NETWORK_ERROR/TIMEOUT/SERVER_SLOW messages all open by naming
+ * the endpoint and the cause and then close by telling the caller to retry.
+ * That tail is correct for a read and wrong for provisioning, so the create
+ * path keeps the diagnosis and drops the advice rather than printing both and
+ * contradicting itself.
+ */
+function transportDetail(message: string): string {
+  return /^(.*?\.)\s/.exec(message)?.[1] ?? message;
+}
+
+/**
+ * A create that got no HTTP answer at all.
+ *
+ * `CliApiError.statusCode === 0` is the client's marker for "no response was
+ * received" — a timeout, a dropped connection, a slow server. Everywhere else
+ * that means "safe to try again", and the generic message says so. For create
+ * it means the opposite: the request may have reached Neon and provisioned a
+ * database nobody can see yet. The transport code is kept rather than
+ * relabelled as the route's POSTGRES_CREATE_UNCERTAIN — the route never
+ * answered, so asserting its verdict would be an invention — but the outcome
+ * is reported as unknown and the guidance is reconciliation, not retry.
+ *
+ * Errors that DID get an HTTP status (validation, auth, provider refusals) are
+ * untouched: they are definite answers and are never called uncertain.
+ */
+function reportUncertainCreateTransport(err: CliApiError, json: boolean | undefined): void {
+  const message =
+    'The create request got no response, so a Neon database may or may not have been created. ' +
+    `The outcome is unknown, not failed. (${transportDetail(err.message)})`;
+  if (json) {
+    printJsonError(err.code, message, { outcome: 'unknown', guidance: CREATE_RECONCILE_GUIDANCE });
+  } else {
+    error(`${err.code}: ${message}`);
+    for (const line of CREATE_RECONCILE_GUIDANCE) info(dim(line));
   }
   process.exitCode = 1;
 }
@@ -202,10 +249,10 @@ export function registerPostgres(program: Command): void {
       'after',
       '\nYou own the Neon account and pay Neon directly. Somewhere passes the connection through:\n' +
         'in a deployed function, sw.postgres is the official @neondatabase/serverless driver callable,\n' +
-        'with the driver\'s own behavior and errors.\n' +
-        `\n${OAUTH_LIMITATION}\n` +
+        "with the driver's own behavior and errors.\n" +
+        `\nConnect using a Neon API key: ${NEON_KEY_DOCS}\n` +
         '\nExamples:\n' +
-        `  printf %s "$NEON_API_KEY" | somewhere postgres connect --project my-app\n` +
+        '  printf %s "$NEON_API_KEY" | somewhere postgres connect --project my-app\n' +
         '  somewhere postgres attach <neon-project-id> --project my-app\n' +
         '  somewhere postgres status --project my-app\n',
     );
@@ -214,38 +261,42 @@ export function registerPostgres(program: Command): void {
     .command('connect')
     .description('Store your Neon API key for a project (the key is never passed as an argument)')
     .option('-p, --project <id-or-slug>', 'Project ID or slug; defaults to the linked project')
+    .option(
+      '--neon-project <id>',
+      'Verify the key against this Neon project instead of the whole account — required for a project-scoped key',
+    )
     .option('--json', 'Print the complete response as JSON')
     .allowExcessArguments(false)
-    .addHelpText('after', `\n${KEY_SOURCE_HELP}\n\n${OAUTH_LIMITATION}\n`)
+    .addHelpText(
+      'after',
+      `\n${KEY_SOURCE_HELP}\n` +
+        `\nCreate a Neon API key: ${NEON_KEY_DOCS}\n` +
+        '\nThe key is checked against the work it will do. An account-scoped key is verified by\n' +
+        'listing your Neon projects; a project-scoped key cannot list them, so pass --neon-project\n' +
+        '<id> and it is verified by reading that project instead.\n',
+    )
     .showHelpAfterError(
       'Do not pass the Neon API key as an argument — it is visible in the process table. ' +
         `Use \`printf %s "$NEON_API_KEY" | somewhere postgres connect\` or set ${NEON_KEY_ENV}.`,
     )
-    .action(async (opts: ProjectOptions) => {
+    .action(async (opts: ProjectOptions & { neonProject?: string }) => {
       try {
         const projectId = resolveProjectRef(opts.project);
         const apiKey = await readNeonApiKey();
-        if (!apiKey) {
-          throw new Error(
-            `No Neon API key supplied. ${KEY_SOURCE_HELP}`,
-          );
-        }
+        if (!apiKey) throw new Error(`No Neon API key supplied. ${KEY_SOURCE_HELP}`);
         const client = new ApiClient(getToken());
         const result = await client.call<ConnectResult>('POST', '/postgres/connect', {
           project_id: projectId,
           api_key: apiKey,
+          ...(opts.neonProject === undefined ? {} : { provider_project_id: opts.neonProject }),
         });
         if (opts.json) {
           printJson(result);
           return;
         }
-        success(`Neon account connected to ${teal(str(result.project_id) ?? projectId)}.`);
-        const account = accountLabel(result.account);
-        if (account) info(`Neon account: ${account}`);
+        success(`Neon account connected to ${teal(projectId)}.`);
         info(dim('The key is stored encrypted by the platform. It is not saved in your CLI config.'));
-        // connect stores a key; it binds no database, so it needs a redeploy
-        // only if the platform says it does.
-        printRedeployNotice(result.requires_redeploy, false);
+        printNote(result);
         info(
           dim(
             'Next: `somewhere postgres attach <neon-project-id>` for a database you already have, ' +
@@ -261,10 +312,16 @@ export function registerPostgres(program: Command): void {
     .command('attach <neon-project-id>')
     .description('Bind an existing Neon project to this project (never creates one)')
     .option('-p, --project <id-or-slug>', 'Project ID or slug; defaults to the linked project')
-    .option('--database <name>', 'Database inside the Neon project')
-    .option('--role <name>', 'Neon role to connect as')
-    .option('--branch <name-or-id>', 'Neon branch to connect to')
+    .option('--database <name>', 'Database to connect to; required when the branch has more than one')
+    .option('--role <name>', 'Neon role to connect as; required when the branch has more than one')
+    .option('--branch <id>', 'Neon branch ID; defaults to the branch Neon marks default')
     .option('--json', 'Print the complete response as JSON')
+    .addHelpText(
+      'after',
+      '\nBranch, database and role are chosen explicitly. When Neon offers several and you named\n' +
+        'none, the platform refuses and lists them rather than binding whichever sorted first.\n' +
+        'Attaching never resets a role password, because that would break anything else using it.\n',
+    )
     .action(async (
       neonProjectId: string,
       opts: ProjectOptions & { database?: string; role?: string; branch?: string },
@@ -274,22 +331,25 @@ export function registerPostgres(program: Command): void {
         const client = new ApiClient(getToken());
         const result = await client.call<AttachResult>('POST', '/postgres/attach', {
           project_id: projectId,
-          neon_project_id: neonProjectId,
+          provider_project_id: neonProjectId,
           ...(opts.database === undefined ? {} : { database: opts.database }),
           ...(opts.role === undefined ? {} : { role: opts.role }),
-          ...(opts.branch === undefined ? {} : { branch: opts.branch }),
+          ...(opts.branch === undefined ? {} : { branch_id: opts.branch }),
         });
         if (opts.json) {
           printJson(result);
           return;
         }
-        success(
-          `Attached Neon project ${teal(str(result.neon_project_id) ?? neonProjectId)} to ` +
-            `${str(result.project_id) ?? projectId}.`,
-        );
+        success(`Attached Neon project ${teal(str(result.provider_project_id) ?? neonProjectId)} to ${projectId}.`);
+        const database = str(result.database);
+        if (database) field('Database:', database);
+        const role = str(result.role);
+        if (role) field('Role:', role);
+        const branchId = str(result.branch_id);
+        if (branchId) field('Branch:', branchId);
         const host = str(result.host);
-        if (host) info(`Host: ${host}`);
-        printRedeployNotice(result.requires_redeploy, true);
+        if (host) field('Host:', host);
+        printNote(result);
       } catch (err) {
         // A failed attach stops here. It never becomes a create: creating a
         // database the developer did not ask for spends their money.
@@ -309,8 +369,8 @@ export function registerPostgres(program: Command): void {
       'after',
       '\nThis creates a real database in your own Neon account and Neon bills you for it.\n' +
         'Creation is never automatic: a failed `attach` does not fall back to this command.\n' +
-        'If the outcome is reported as uncertain, do NOT run it again — Neon does not de-duplicate\n' +
-        'project creation. Run `somewhere postgres status` and check your Neon console instead.\n',
+        'If the outcome is reported as unknown, do NOT run it again — Neon does not de-duplicate\n' +
+        'project creation. Run `somewhere postgres status` and check your Neon account instead.\n',
     )
     .action(async (opts: ProjectOptions & { name?: string; region?: string; yes?: boolean }) => {
       try {
@@ -334,13 +394,20 @@ export function registerPostgres(program: Command): void {
           printJson(result);
           return;
         }
-        success(`Created Neon project ${teal(str(result.neon_project_id) ?? '(id not reported)')} in your Neon account.`);
+        success(`Created Neon project ${teal(str(result.provider_project_id) ?? '(id not reported)')} in your Neon account.`);
+        const region = str(result.region);
+        if (region) field('Region:', region);
         const host = str(result.host);
-        if (host) info(`Host: ${host}`);
+        if (host) field('Host:', host);
         info(dim('This database belongs to your Neon account and Neon bills you for it.'));
-        printRedeployNotice(result.requires_redeploy, true);
+        printNote(result);
       } catch (err) {
-        // Deliberately no retry, not even on a timeout: see CREATE_UNCERTAIN.
+        // Never retried, and a lost response is reported as unknown rather
+        // than as the generic "safe to try again" transport failure.
+        if (err instanceof CliApiError && err.statusCode === 0) {
+          reportUncertainCreateTransport(err, opts.json);
+          return;
+        }
         reportError(err, opts.json);
       }
     });
@@ -363,23 +430,27 @@ export function registerPostgres(program: Command): void {
         }
         const connected = result.connected === true;
         const attached = result.attached === true;
-        info(`Project:    ${str(result.project_id) ?? projectId}`);
-        info(`Connected:  ${connected ? 'yes' : 'no'}${connected ? '' : dim('  (no Neon API key stored)')}`);
-        info(`Attached:   ${attached ? 'yes' : 'no'}`);
-        const neonProjectId = str(result.neon_project_id);
-        if (neonProjectId) info(`Neon project: ${neonProjectId}`);
-        const host = str(result.host);
-        if (host) info(`Host:       ${host}`);
-        const state = str(result.status);
-        if (state) info(`Status:     ${state}`);
-        const lastError = str(result.error);
-        if (lastError) info(`Error:      ${lastError}`);
-        const updatedAt = str(result.updated_at);
-        if (updatedAt) info(`Updated:    ${updatedAt}`);
-        printRedeployNotice(result.requires_redeploy, false);
+        field('Project:', projectId);
+        field('Connected:', connected ? 'yes' : `no${dim('  (no Neon API key stored)')}`);
+        field('Attached:', attached ? 'yes' : 'no');
+        for (const [label, value] of [
+          ['Provider:', result.provider],
+          ['Neon project:', result.provider_project_id],
+          ['Branch:', result.branch_id],
+          ['Database:', result.database],
+          ['Role:', result.role],
+          ['Host:', result.host],
+          ['State:', result.status],
+          ['Auth:', result.auth_kind],
+          ['Last error:', result.last_error],
+          ['Attached at:', result.attached_at],
+          ['Updated:', result.updated_at],
+        ] as Array<[string, unknown]>) {
+          const text = str(value);
+          if (text) field(label, text);
+        }
         if (!connected) {
-          info(dim('Run `somewhere postgres connect` to store your Neon API key.'));
-          info(dim(OAUTH_LIMITATION));
+          info(dim(`Run \`somewhere postgres connect\` to store your Neon API key: ${NEON_KEY_DOCS}`));
         } else if (!attached) {
           info(dim('Run `somewhere postgres attach <neon-project-id>` or `somewhere postgres create`.'));
         }
@@ -396,10 +467,10 @@ export function registerPostgres(program: Command): void {
     .option('--json', 'Print the complete response as JSON')
     .addHelpText(
       'after',
-      '\nThis removes the attachment and the stored credentials on our side. It never calls\n' +
-        "Neon's delete: your database, its data and its Neon billing continue.\n" +
-        'It is also not an immediate cut-off — a release that is already deployed can keep using\n' +
-        'the connection it was built with until you redeploy or revoke the credential in Neon.\n',
+      '\nThis removes the attachment on our side. It never calls Neon\'s delete: your database,\n' +
+        'its data and its Neon billing continue.\n' +
+        'It is also not an immediate cut-off — a release that is already deployed keeps the\n' +
+        'connection details it was built with. Rotate the credential in Neon to cut those off.\n',
     )
     .action(async (opts: ProjectOptions & { yes?: boolean }) => {
       try {
@@ -421,13 +492,12 @@ export function registerPostgres(program: Command): void {
           printJson(result);
           return;
         }
-        success(`Postgres attachment removed for ${teal(str(result.project_id) ?? projectId)}.`);
+        success(`Postgres attachment removed for ${teal(projectId)}.`);
         info('Your Neon database was NOT deleted — it and its Neon billing continue.');
-        // Never claim an immediate cut-off we do not perform.
-        warn(
-          'Not an immediate revocation: a release deployed before now can keep using its existing ' +
-            'connection until you redeploy, or revoke the credential in Neon.',
-        );
+        if (result.key_removed === true) info('The stored Neon API key was removed too.');
+        // The route's own sentence about already-deployed releases; never a
+        // local paraphrase that could harden into a revocation claim.
+        printNote(result);
       } catch (err) {
         reportError(err, opts.json);
       }

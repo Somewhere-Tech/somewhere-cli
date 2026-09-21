@@ -53,6 +53,7 @@ test('postgres is registered and its group help names all five subcommands', asy
     assert.match(help.stdout, new RegExp(`^Usage: somewhere postgres ${sub}\\b`), sub);
     assert.match(help.stdout, /--json\b/, sub);
     assert.match(help.stdout, /-p, --project <id-or-slug>/, sub);
+    assert.doesNotMatch(help.stdout, /neon_project_id|provider_project_id/, `${sub} must not leak wire field names into help`);
   }
 });
 
@@ -62,23 +63,44 @@ test('group help describes pass-through and sw.postgres without inventing a plat
   assert.equal(group.status, 0, group.stderr);
 
   assert.match(group.stdout, /You own the Neon account and pay Neon directly/);
+  assert.match(group.stdout, /Connect using a Neon API key: https:\/\/neon\.com\/docs\/manage\/api-keys/);
   assert.match(group.stdout, /sw\.postgres is the official @neondatabase\/serverless driver callable/);
   // No managed-database overlay may be implied.
   assert.doesNotMatch(group.stdout, /managed (?:database|Postgres)/i);
 });
 
-test('connect help is honest that setup is an API key and that OAuth is unavailable', async () => {
-  const home = mkdtempSync(join(tmpdir(), 'sw-postgres-help-oauth-'));
+test('connect help points at Neon key setup and promises no other path', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-postgres-help-key-'));
   const help = await run(['postgres', 'connect', '--help'], home);
   assert.equal(help.status, 0, help.stderr);
 
-  assert.match(help.stdout, /Setup is by Neon API key/);
-  assert.match(help.stdout, /Neon restricts OAuth to registered commercial partners/);
-  // Nothing may promise a browser sign-in we cannot ship.
-  assert.doesNotMatch(help.stdout, /coming soon|for now, |will soon/i);
+  assert.match(help.stdout, /Create a Neon API key: https:\/\/neon\.com\/docs\/manage\/api-keys/);
+  // A connection method we do not offer is not a customer's concern, and a
+  // date nobody has committed to is worse than silence.
+  assert.doesNotMatch(help.stdout, /OAuth|commercial partner|registration/i);
+  assert.doesNotMatch(help.stdout, /coming soon|for now, |will soon|not yet available/i);
   // The key's accepted sources are stated, and argv is not one of them.
   assert.match(help.stdout, /read from SOMEWHERE_NEON_API_KEY, from stdin, or from a hidden prompt/);
   assert.doesNotMatch(help.stdout, /<api-key>|--api-key/);
+  // A project-scoped key cannot list projects, so setup must offer the id.
+  assert.match(help.stdout, /--neon-project <id>/);
+  assert.match(help.stdout, /project-scoped key/);
+});
+
+test('no help text discusses the provider relationship instead of the task', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-postgres-help-scope-'));
+  for (const args of [
+    ['postgres', '--help'],
+    ['postgres', 'connect', '--help'],
+    ['postgres', 'attach', '--help'],
+    ['postgres', 'create', '--help'],
+    ['postgres', 'status', '--help'],
+    ['postgres', 'disconnect', '--help'],
+  ]) {
+    const help = await run(args, home);
+    assert.equal(help.status, 0, `${args[1]}: ${help.stderr}`);
+    assert.doesNotMatch(help.stdout, /OAuth|commercial partner/i, args[1]);
+  }
 });
 
 test('create help warns about real Neon billing and forbids retrying an uncertain create', async () => {
@@ -89,6 +111,7 @@ test('create help warns about real Neon billing and forbids retrying an uncertai
   assert.match(help.stdout, /Neon bills you for it/);
   assert.match(help.stdout, /a failed `attach` does not fall back to this command/);
   assert.match(help.stdout, /do NOT run it again/);
+  assert.match(help.stdout, /Neon does not de-duplicate/);
   assert.match(help.stdout, /-y, --yes\b/);
 });
 
@@ -98,9 +121,10 @@ test('disconnect help says the Neon database survives and access is not cut off 
   assert.equal(help.status, 0, help.stderr);
 
   assert.match(help.stdout, /your Neon database is NOT deleted/i);
-  assert.match(help.stdout, /It never calls\n?Neon's delete/);
+  assert.match(help.stdout, /It never calls Neon's delete/);
   assert.match(help.stdout, /not an immediate cut-off/i);
-  assert.match(help.stdout, /until you redeploy or revoke the credential in Neon/);
+  assert.match(help.stdout, /keeps the\n?connection details it was built with/);
+  assert.match(help.stdout, /Rotate the credential in Neon/);
 });
 
 test('an unknown postgres subcommand fails instead of guessing', async () => {

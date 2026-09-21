@@ -8,13 +8,21 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 // `somewhere postgres` against a local HTTP server standing in for /v1/postgres/*.
-// No paid network call is ever made: the Neon account is reached only by the
-// platform, and the platform here is this fixture server.
+// Every fixture reply is copied from worker/src/routes/postgres.ts — the same
+// field names, the same status codes, the same `note` sentence — so this file
+// fails if the CLI drifts from the route rather than agreeing with a paraphrase
+// of it. No paid network call is ever made: only the platform reaches Neon, and
+// the platform here is this fixture server.
 
 const NEON_KEY = 'napi_fixture_secret_value';
 const repoRoot = fileURLToPath(new URL('..', import.meta.url));
 const postgresModule = new URL('../dist/commands/postgres.js', import.meta.url).href;
 const configModule = new URL('../dist/lib/config.js', import.meta.url).href;
+
+/** routes/postgres.ts RETAINED_RELEASE_NOTE, verbatim. */
+const RETAINED_RELEASE_NOTE =
+  'Takes effect on the next deploy. Releases already deployed keep the connection details they were built with — ' +
+  'this does not revoke access for them. Rotate the credential in your provider account if you need existing releases cut off.';
 
 function harness(t) {
   const home = mkdtempSync(join(tmpdir(), 'cli-postgres-contract-'));
@@ -29,6 +37,12 @@ function harness(t) {
       auth: req.headers.authorization,
       body: raw ? JSON.parse(raw) : undefined,
     });
+    if (reply.drop) {
+      // The request arrived and the answer never did — the create case where
+      // the database may already exist.
+      req.socket.destroy();
+      return;
+    }
     res.writeHead(reply.status ?? 200, { 'content-type': 'application/json' });
     res.end(JSON.stringify(reply.body));
   });
@@ -87,21 +101,21 @@ function harness(t) {
     home,
     requests,
     run,
-    setReply(next) {
-      reply = next;
-    },
-    ok(data) {
-      reply = { status: 200, body: { ok: true, data } };
+    ok(data, status = 200) {
+      reply = { status, body: { ok: true, data } };
     },
     fail(status, error, message) {
       reply = { status, body: { ok: false, error, message } };
+    },
+    drop() {
+      reply = { drop: true };
     },
   };
 }
 
 test('connect posts {project_id, api_key} and never echoes the key', async (t) => {
   const h = harness(t);
-  h.ok({ project_id: 'fixture-project', connected: true, account: { email: 'dev@example.test' } });
+  h.ok({ connected: true }, 201);
 
   const result = await h.run(['connect', '--project', 'fixture-project'], {
     env: { SOMEWHERE_NEON_API_KEY: NEON_KEY },
@@ -114,15 +128,30 @@ test('connect posts {project_id, api_key} and never echoes the key', async (t) =
     body: { project_id: 'fixture-project', api_key: NEON_KEY },
   });
   assert.match(result.stdout, /Neon account connected to fixture-project/);
-  assert.match(result.stdout, /dev@example\.test/);
   assert.doesNotMatch(result.output, /napi_/, 'the key must never reach the terminal');
-  // connect stores a key and binds no database — it must not claim a redeploy is due.
-  assert.doesNotMatch(result.stdout, /Deploy again/);
+  // connect stores a key and binds no database — the route sends no note and
+  // no requires_redeploy, so the CLI must not invent one.
+  assert.doesNotMatch(result.stdout, /next deploy/i);
+});
+
+test('connect sends provider_project_id for a project-scoped key', async (t) => {
+  const h = harness(t);
+  h.ok({ connected: true }, 201);
+
+  const result = await h.run(['connect', '--project', 'fixture-project', '--neon-project', 'np_scoped'], {
+    env: { SOMEWHERE_NEON_API_KEY: NEON_KEY },
+  });
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(h.requests.at(-1).body, {
+    project_id: 'fixture-project',
+    api_key: NEON_KEY,
+    provider_project_id: 'np_scoped',
+  });
 });
 
 test('connect reads the key from stdin when the environment has none', async (t) => {
   const h = harness(t);
-  h.ok({ project_id: 'fixture-project', connected: true });
+  h.ok({ connected: true }, 201);
 
   const result = await h.run(['connect', '--project', 'fixture-project'], { stdin: `${NEON_KEY}\n` });
   assert.equal(result.status, 0, result.stderr);
@@ -138,7 +167,7 @@ test('connect refuses the key as an argument and sends nothing', async (t) => {
   assert.equal(h.requests.length, 0, 'an argv key must never be sent');
 });
 
-test('connect with no key anywhere explains the three accepted sources and sends nothing', async (t) => {
+test('connect with no key anywhere names the accepted sources and sends nothing', async (t) => {
   const h = harness(t);
   const result = await h.run(['connect', '--project', 'fixture-project']);
   assert.equal(result.status, 1);
@@ -147,54 +176,72 @@ test('connect with no key anywhere explains the three accepted sources and sends
   assert.equal(h.requests.length, 0);
 });
 
-test('attach binds an existing project, forwards its options, and asks for a redeploy', async (t) => {
+test('attach maps the positional to provider_project_id and --branch to branch_id', async (t) => {
   const h = harness(t);
   h.ok({
-    project_id: 'fixture-project',
     attached: true,
-    neon_project_id: 'np_fixture',
-    host: 'ep-…redacted….us-east-2.aws.neon.tech',
+    provider_project_id: 'np_fixture',
+    branch_id: 'br_fixture',
+    database: 'appdb',
+    role: 'app_user',
+    host: 'ep-redacted.us-east-2.aws.neon.tech',
     requires_redeploy: true,
-  });
+    note: RETAINED_RELEASE_NOTE,
+  }, 201);
 
   const result = await h.run([
     'attach', 'np_fixture',
     '--project', 'fixture-project',
     '--database', 'appdb',
     '--role', 'app_user',
-    '--branch', 'main',
+    '--branch', 'br_fixture',
   ]);
   assert.equal(result.status, 0, result.stderr);
+  assert.equal(h.requests.at(-1).path, '/v1/postgres/attach');
   assert.deepEqual(h.requests.at(-1).body, {
     project_id: 'fixture-project',
-    neon_project_id: 'np_fixture',
+    provider_project_id: 'np_fixture',
     database: 'appdb',
     role: 'app_user',
-    branch: 'main',
+    branch_id: 'br_fixture',
   });
-  assert.equal(h.requests.at(-1).path, '/v1/postgres/attach');
   assert.match(result.stdout, /Attached Neon project np_fixture/);
-  assert.match(result.stdout, /ep-…redacted…/);
-  assert.match(result.stdout, /Deploy again for sw\.postgres/);
+  assert.match(result.stdout, /appdb/);
+  assert.match(result.stdout, /app_user/);
+  assert.match(result.stdout, /br_fixture/);
+  assert.match(result.stdout, /ep-redacted\.us-east-2\.aws\.neon\.tech/);
+  // The route's own sentence, not a local paraphrase of it.
+  assert.match(result.stdout, /Releases already deployed keep the connection details they were built with/);
 });
 
-test('attach omits unset options and honors requires_redeploy:false', async (t) => {
+test('attach omits unset options so the platform resolves them', async (t) => {
   const h = harness(t);
-  h.ok({ project_id: 'fixture-project', attached: true, neon_project_id: 'np_fixture', requires_redeploy: false });
+  h.ok({ attached: true, provider_project_id: 'np_fixture', requires_redeploy: true, note: RETAINED_RELEASE_NOTE }, 201);
 
   const result = await h.run(['attach', 'np_fixture', '--project', 'fixture-project']);
   assert.equal(result.status, 0, result.stderr);
-  assert.deepEqual(h.requests.at(-1).body, { project_id: 'fixture-project', neon_project_id: 'np_fixture' });
-  assert.doesNotMatch(result.stdout, /Deploy again/);
+  assert.deepEqual(h.requests.at(-1).body, {
+    project_id: 'fixture-project',
+    provider_project_id: 'np_fixture',
+  });
+});
+
+test('attach surfaces an ambiguous target instead of choosing one', async (t) => {
+  const h = harness(t);
+  h.fail(409, 'POSTGRES_DATABASE_AMBIGUOUS', 'That branch has 2 databases (appdb, analytics). Pass database to choose one.');
+
+  const result = await h.run(['attach', 'np_fixture', '--project', 'fixture-project']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /POSTGRES_DATABASE_AMBIGUOUS: That branch has 2 databases \(appdb, analytics\)/);
 });
 
 test('a failed attach never becomes a create', async (t) => {
   const h = harness(t);
-  h.fail(404, 'PROJECT_NOT_FOUND', 'No Neon project np_missing in the connected account.');
+  h.fail(409, 'POSTGRES_NOT_CONNECTED', 'Connect a database provider account first.');
 
   const result = await h.run(['attach', 'np_missing', '--project', 'fixture-project']);
   assert.equal(result.status, 1);
-  assert.match(result.stderr, /PROJECT_NOT_FOUND: No Neon project np_missing/);
+  assert.match(result.stderr, /POSTGRES_NOT_CONNECTED: Connect a database provider account first\./);
   assert.equal(h.requests.length, 1, 'exactly one call — no fallback');
   assert.equal(h.requests[0].path, '/v1/postgres/attach');
 });
@@ -211,12 +258,14 @@ test('create refuses to spend money unattended without --yes', async (t) => {
 test('create posts {project_id, name, region} and names who is billed', async (t) => {
   const h = harness(t);
   h.ok({
-    project_id: 'fixture-project',
     created: true,
-    neon_project_id: 'np_created',
-    host: 'ep-…redacted….us-east-2.aws.neon.tech',
+    attached: true,
+    provider_project_id: 'np_created',
+    region: 'aws-us-east-2',
+    host: 'ep-redacted.us-east-2.aws.neon.tech',
     requires_redeploy: true,
-  });
+    note: RETAINED_RELEASE_NOTE,
+  }, 201);
 
   const result = await h.run(['create', '--project', 'fixture-project', '--name', 'my-db', '--region', 'aws-us-east-2', '--yes']);
   assert.equal(result.status, 0, result.stderr);
@@ -227,18 +276,24 @@ test('create posts {project_id, name, region} and names who is billed', async (t
     body: { project_id: 'fixture-project', name: 'my-db', region: 'aws-us-east-2' },
   });
   assert.match(result.stdout, /Created Neon project np_created/);
+  assert.match(result.stdout, /aws-us-east-2/);
   assert.match(result.stdout, /Neon bills you for it/);
-  assert.match(result.stdout, /Deploy again for sw\.postgres/);
+  assert.match(result.stdout, /Releases already deployed keep the connection details/);
 });
 
 test('POSTGRES_CREATE_UNCERTAIN is preserved, never retried, and says do not retry', async (t) => {
   const h = harness(t);
-  h.fail(409, 'POSTGRES_CREATE_UNCERTAIN', 'Neon did not return a readable result for this create.');
+  h.fail(
+    409,
+    'POSTGRES_CREATE_UNCERTAIN',
+    'The create request did not return a readable result, so a database may or may not have been created. ' +
+      'Check the provider account before trying again — this will not be retried automatically.',
+  );
 
   const human = await h.run(['create', '--project', 'fixture-project', '--yes']);
   assert.equal(human.status, 1);
   assert.equal(h.requests.length, 1, 'an uncertain create must never be retried');
-  assert.match(human.stderr, /POSTGRES_CREATE_UNCERTAIN: Neon did not return a readable result/);
+  assert.match(human.stderr, /POSTGRES_CREATE_UNCERTAIN: The create request did not return a readable result/);
   assert.match(human.stdout, /Do NOT run create again/);
   assert.match(human.stdout, /somewhere postgres status/);
   assert.match(human.stdout, /somewhere postgres attach/);
@@ -248,18 +303,73 @@ test('POSTGRES_CREATE_UNCERTAIN is preserved, never retried, and says do not ret
   const envelope = JSON.parse(json.stdout);
   assert.equal(envelope.ok, false);
   assert.equal(envelope.error, 'POSTGRES_CREATE_UNCERTAIN');
-  assert.ok(Array.isArray(envelope.guidance) && envelope.guidance.some((line) => /Do NOT run create again/.test(line)));
+  assert.equal(envelope.outcome, 'unknown');
+  assert.ok(envelope.guidance.some((line) => /Do NOT run create again/.test(line)));
 });
 
-test('status reads GET ?project_id= and prints no credential, even one the server leaks', async (t) => {
+test('a create whose response never arrives is unknown, not a retryable failure', async (t) => {
+  const h = harness(t);
+  h.drop();
+
+  const human = await h.run(['create', '--project', 'fixture-project', '--yes']);
+  assert.equal(human.status, 1);
+  assert.equal(h.requests.length, 1, 'a lost response must never be retried');
+  assert.match(human.stderr, /may or may not have been created/);
+  assert.match(human.stderr, /outcome is unknown, not failed/);
+  assert.match(human.stdout, /Do NOT run create again/);
+  // The generic transport advice — "check your network and retry" — is exactly
+  // the wrong thing to say about provisioning.
+  assert.doesNotMatch(human.output, /Check your network and retry/);
+
+  const json = await h.run(['create', '--project', 'fixture-project', '--yes', '--json']);
+  assert.equal(json.status, 1);
+  const envelope = JSON.parse(json.stdout);
+  assert.equal(envelope.ok, false);
+  assert.equal(envelope.outcome, 'unknown');
+  assert.ok(envelope.guidance.some((line) => /Do NOT run create again/.test(line)));
+  // The transport code is kept: the route never answered, so its verdict is
+  // not ours to assert.
+  assert.notEqual(envelope.error, 'POSTGRES_CREATE_UNCERTAIN');
+});
+
+test('a definite create rejection is never dressed up as an unknown outcome', async (t) => {
+  const h = harness(t);
+  for (const [status, code, message] of [
+    [400, 'VALIDATION_ERROR', 'project_id is required (string).'],
+    [401, 'API_KEY_INVALID', 'The supplied developer key is not valid.'],
+    [403, 'PROJECT_OWNER_REQUIRED', 'Owner access is required to create a database.'],
+    [409, 'POSTGRES_NOT_CONNECTED', 'Connect a database provider account first.'],
+    [502, 'POSTGRES_PROVIDER_ERROR', 'The database provider could not create the database (status 500).'],
+  ]) {
+    h.fail(status, code, message);
+    const result = await h.run(['create', '--project', 'fixture-project', '--yes']);
+    assert.equal(result.status, 1, code);
+    assert.match(result.stderr, new RegExp(`${code}: `), code);
+    assert.doesNotMatch(result.output, /may or may not have been created|Do NOT run create again/, code);
+
+    const json = await h.run(['create', '--project', 'fixture-project', '--yes', '--json']);
+    const envelope = JSON.parse(json.stdout);
+    assert.equal(envelope.error, code);
+    assert.equal(envelope.outcome, undefined, `${code} must not be labelled uncertain`);
+    assert.equal(envelope.guidance, undefined, code);
+  }
+});
+
+test('status reads the route field names and prints no credential, even a leaked one', async (t) => {
   const h = harness(t);
   h.ok({
-    project_id: 'fixture-project',
     connected: true,
     attached: true,
-    neon_project_id: 'np_fixture',
-    host: 'ep-…redacted….us-east-2.aws.neon.tech',
-    status: 'ready',
+    status: 'attached',
+    auth_kind: 'api_key',
+    provider: 'neon',
+    provider_project_id: 'np_fixture',
+    branch_id: 'br_fixture',
+    database: 'appdb',
+    role: 'app_user',
+    host: 'ep-redacted.us-east-2.aws.neon.tech',
+    last_error: 'connection refused on 2026-09-19',
+    attached_at: '2026-09-19T00:00:00.000Z',
     updated_at: '2026-09-20T00:00:00.000Z',
     // Must never be rendered: human output reads an allowlist of fields.
     dsn: 'postgres://app_user:leaked-password@ep-real.us-east-2.aws.neon.tech/appdb',
@@ -272,23 +382,28 @@ test('status reads GET ?project_id= and prints no credential, even one the serve
   assert.equal(h.requests.at(-1).path, '/v1/postgres/status?project_id=fixture-project');
   assert.match(result.stdout, /Connected:\s+yes/);
   assert.match(result.stdout, /Attached:\s+yes/);
+  assert.match(result.stdout, /neon/);
   assert.match(result.stdout, /np_fixture/);
-  assert.match(result.stdout, /ready/);
+  assert.match(result.stdout, /br_fixture/);
+  assert.match(result.stdout, /appdb/);
+  assert.match(result.stdout, /api_key/);
+  assert.match(result.stdout, /Last error:\s+connection refused on 2026-09-19/);
   assert.doesNotMatch(result.output, /postgres:\/\/|leaked-password|napi_/);
 });
 
-test('status on an unconnected project says how to connect and that OAuth is unavailable', async (t) => {
+test('status on a project with no row matches the route and says how to connect', async (t) => {
   const h = harness(t);
-  h.ok({ project_id: 'fixture-project', connected: false, attached: false });
+  h.ok({ connected: false, attached: false, auth_kind: null });
 
   const result = await h.run(['status', '--project', 'fixture-project']);
   assert.equal(result.status, 0, result.stderr);
   assert.match(result.stdout, /Connected:\s+no/);
+  assert.match(result.stdout, /Attached:\s+no/);
   assert.match(result.stdout, /somewhere postgres connect/);
-  assert.match(result.stdout, /OAuth to registered commercial partners/);
+  assert.match(result.stdout, /neon\.com\/docs\/manage\/api-keys/);
 });
 
-test('disconnect needs --yes, removes only our attachment, and claims no immediate revocation', async (t) => {
+test('disconnect needs --yes, removes only our attachment, and claims no revocation', async (t) => {
   const h = harness(t);
 
   const unconfirmed = await h.run(['disconnect', '--project', 'fixture-project']);
@@ -296,7 +411,14 @@ test('disconnect needs --yes, removes only our attachment, and claims no immedia
   assert.match(unconfirmed.stderr, /Pass --yes to disconnect in a non-interactive shell/);
   assert.equal(h.requests.length, 0);
 
-  h.ok({ project_id: 'fixture-project', disconnected: true });
+  h.ok({
+    disconnected: true,
+    detached: true,
+    key_removed: false,
+    database_deleted: false,
+    requires_redeploy: true,
+    note: RETAINED_RELEASE_NOTE,
+  });
   const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes']);
   assert.equal(result.status, 0, result.stderr);
   assert.deepEqual(h.requests.at(-1), {
@@ -306,9 +428,20 @@ test('disconnect needs --yes, removes only our attachment, and claims no immedia
     body: { project_id: 'fixture-project' },
   });
   assert.match(result.stdout, /Neon database was NOT deleted/);
-  assert.match(result.stdout, /Not an immediate revocation/);
-  assert.match(result.stdout, /until you redeploy, or revoke the credential in Neon/);
+  assert.match(result.stdout, /this does not revoke access for them/);
+  assert.match(result.stdout, /Rotate the credential in your provider account/);
   assert.doesNotMatch(result.stdout, /revoked immediately|access is now cut off/i);
+  // key_removed:false must not be reported as a key removal.
+  assert.doesNotMatch(result.stdout, /API key was removed/);
+});
+
+test('disconnect on a project with nothing attached reports the route error', async (t) => {
+  const h = harness(t);
+  h.fail(409, 'POSTGRES_NOT_CONNECTED', 'No database is connected to this project.');
+
+  const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes']);
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /POSTGRES_NOT_CONNECTED: No database is connected to this project\./);
 });
 
 test('every subcommand infers the linked project and reports its absence the same way', async (t) => {
@@ -326,11 +459,8 @@ test('every subcommand infers the linked project and reports its absence the sam
   ];
 
   for (const args of invocations) {
-    h.ok({ project_id: 'linked-project', connected: true, attached: true });
-    const result = await h.run(args, {
-      cwd: linked,
-      env: { SOMEWHERE_NEON_API_KEY: NEON_KEY },
-    });
+    h.ok({ connected: true, attached: true, disconnected: true });
+    const result = await h.run(args, { cwd: linked, env: { SOMEWHERE_NEON_API_KEY: NEON_KEY } });
     assert.equal(result.status, 0, `${args[0]}: ${result.stderr}`);
     const request = h.requests.at(-1);
     const sent = request.method === 'GET' ? request.path : JSON.stringify(request.body);
@@ -342,14 +472,38 @@ test('every subcommand infers the linked project and reports its absence the sam
   }
 });
 
-test('--json prints the response envelope and nothing else', async (t) => {
+test('--json prints the route response verbatim and nothing else', async (t) => {
   const h = harness(t);
   const payloads = {
-    connect: { project_id: 'fixture-project', connected: true, account: { email: 'dev@example.test' } },
-    attach: { project_id: 'fixture-project', attached: true, neon_project_id: 'np_fixture', requires_redeploy: true },
-    create: { project_id: 'fixture-project', created: true, neon_project_id: 'np_created' },
-    status: { project_id: 'fixture-project', connected: true, attached: false },
-    disconnect: { project_id: 'fixture-project', disconnected: true },
+    connect: { connected: true },
+    attach: {
+      attached: true,
+      provider_project_id: 'np_fixture',
+      branch_id: 'br_fixture',
+      database: 'appdb',
+      role: 'app_user',
+      host: 'ep-redacted.us-east-2.aws.neon.tech',
+      requires_redeploy: true,
+      note: RETAINED_RELEASE_NOTE,
+    },
+    create: {
+      created: true,
+      attached: true,
+      provider_project_id: 'np_created',
+      region: 'aws-us-east-2',
+      host: 'ep-redacted.us-east-2.aws.neon.tech',
+      requires_redeploy: true,
+      note: RETAINED_RELEASE_NOTE,
+    },
+    status: { connected: true, attached: false, auth_kind: 'api_key', provider: 'neon' },
+    disconnect: {
+      disconnected: true,
+      detached: true,
+      key_removed: false,
+      database_deleted: false,
+      requires_redeploy: true,
+      note: RETAINED_RELEASE_NOTE,
+    },
   };
   const invocations = [
     ['connect'],
@@ -368,12 +522,12 @@ test('--json prints the response envelope and nothing else', async (t) => {
     assert.deepEqual(JSON.parse(result.stdout), payloads[args[0]], args[0]);
   }
 
-  h.fail(409, 'POSTGRES_NOT_CONNECTED', 'No Neon API key is stored for this project.');
-  const failed = await h.run(['status', '--project', 'fixture-project', '--json']);
+  h.fail(403, 'PROJECT_OWNER_REQUIRED', 'Owner access is required to attach a database.');
+  const failed = await h.run(['attach', 'np_fixture', '--project', 'fixture-project', '--json']);
   assert.equal(failed.status, 1);
   assert.deepEqual(JSON.parse(failed.stdout), {
     ok: false,
-    error: 'POSTGRES_NOT_CONNECTED',
-    message: 'No Neon API key is stored for this project.',
+    error: 'PROJECT_OWNER_REQUIRED',
+    message: 'Owner access is required to attach a database.',
   });
 });
