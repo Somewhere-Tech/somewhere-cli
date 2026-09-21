@@ -116,8 +116,13 @@ interface StatusResult {
 interface DisconnectResult {
   disconnected?: unknown;
   detached?: unknown;
+  cleared_pending_create?: unknown;
   key_removed?: unknown;
   database_deleted?: unknown;
+  /** The only remaining handle on a database that may exist and be billing.
+   *  Sent once, because the attachment row will not name it after this. */
+  unresolved_provider_project_id?: unknown;
+  unresolved_note?: unknown;
   requires_redeploy?: unknown;
   note?: unknown;
 }
@@ -162,6 +167,11 @@ function field(label: string, value: string): void {
  * what keeps the CLI from making a revocation claim the platform does not.
  */
 function printNote(result: { requires_redeploy?: unknown; note?: unknown }): void {
+  // The shared note is about what the NEXT deploy picks up. `disconnect` sends
+  // it unconditionally but reports requires_redeploy:false when it detached
+  // nothing — clearing a stuck create changes no release, so printing "takes
+  // effect on the next deploy" there would describe work that does not exist.
+  if (result.requires_redeploy === false) return;
   const note = str(result.note);
   if (note) {
     warn(note);
@@ -495,7 +505,10 @@ export function registerPostgres(program: Command): void {
         'It is also not an immediate cut-off — a release that is already deployed keeps the\n' +
         'connection details it was built with. Rotate the credential in Neon to cut those off.\n' +
         '\nThe stored Neon API key is kept by default, so you can attach again without supplying it.\n' +
-        'Pass --forget-key to delete it too; a later attach then needs `somewhere postgres connect` first.\n',
+        'Pass --forget-key to delete it too; a later attach then needs `somewhere postgres connect` first.\n' +
+        '\nDisconnecting also clears a create that never resolved. If that create had already reached\n' +
+        'your provider, the id of the database it left behind is printed once here — after this the\n' +
+        'platform no longer stores it, and that database keeps billing until you attach or delete it.\n',
     )
     .action(async (opts: ProjectOptions & { yes?: boolean; forgetKey?: boolean }) => {
       try {
@@ -520,10 +533,30 @@ export function registerPostgres(program: Command): void {
           printJson(result);
           return;
         }
-        success(`Postgres attachment removed for ${teal(projectId)}.`);
-        info('Your Neon database was NOT deleted — it and its Neon billing continue.');
+        // Detaching a live database and clearing a create that never resolved
+        // are different events, and the route now distinguishes them. Saying
+        // "attachment removed" for a project that had nothing attached would
+        // describe a detach that did not happen.
+        const detached = result.detached === true;
+        const clearedPendingCreate = result.cleared_pending_create === true;
+        if (detached) {
+          success(`Postgres attachment removed for ${teal(projectId)}.`);
+          info('Your Neon database was NOT deleted — it and its Neon billing continue.');
+        } else if (clearedPendingCreate) {
+          success(`Cleared an unresolved create for ${teal(projectId)}. No attached database was removed.`);
+        } else {
+          success(`Postgres record cleared for ${teal(projectId)}. Nothing was attached.`);
+        }
         if (result.key_removed === true) info('The stored Neon API key was deleted too.');
         else info(dim('The stored Neon API key was kept — pass --forget-key to delete it as well.'));
+        // After this the platform no longer stores the id, so this is the last
+        // time anything can tell the developer what to reconcile. Printed in
+        // normal output, not behind --json: a database they are paying for
+        // must not disappear from view because they ran the human command.
+        const unresolvedId = str(result.unresolved_provider_project_id);
+        if (unresolvedId) field('Unresolved:', unresolvedId);
+        const unresolvedNote = str(result.unresolved_note);
+        if (unresolvedNote) warn(unresolvedNote);
         // The route's own sentence about already-deployed releases; never a
         // local paraphrase that could harden into a revocation claim.
         printNote(result);

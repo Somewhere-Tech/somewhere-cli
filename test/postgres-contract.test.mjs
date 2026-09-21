@@ -476,6 +476,7 @@ test('disconnect needs --yes, removes only our attachment, and claims no revocat
   h.ok({
     disconnected: true,
     detached: true,
+    cleared_pending_create: false,
     key_removed: false,
     database_deleted: false,
     requires_redeploy: true,
@@ -499,11 +500,117 @@ test('disconnect needs --yes, removes only our attachment, and claims no revocat
   assert.match(result.stdout, /Neon API key was kept/);
 });
 
+test('a disconnect that only cleared a stuck create does not claim a detach', async (t) => {
+  const h = harness(t);
+  h.ok({
+    disconnected: true,
+    detached: false,
+    cleared_pending_create: true,
+    key_removed: false,
+    database_deleted: false,
+    unresolved_provider_project_id: 'np_orphan',
+    unresolved_note:
+      'A database may exist at your provider as project np_orphan. ' +
+      'Attach it here, or delete it in your provider account — it will keep billing until you do.',
+    requires_redeploy: false,
+    note: RETAINED_RELEASE_NOTE,
+  });
+
+  const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Cleared an unresolved create for fixture-project/);
+  assert.match(result.stdout, /No attached database was removed/);
+  assert.doesNotMatch(result.stdout, /attachment removed/);
+  // The recovery handle must survive in normal human output: after this the
+  // platform no longer stores it.
+  assert.match(result.stdout, /Unresolved:\s+np_orphan/);
+  assert.match(result.stdout, /it will keep billing until you do/);
+  // requires_redeploy:false — nothing was detached, so no release changes.
+  assert.doesNotMatch(result.stdout, /Takes effect on the next deploy/);
+});
+
+test('disconnect with nothing attached and no pending create says exactly that', async (t) => {
+  const h = harness(t);
+  h.ok({
+    disconnected: true,
+    detached: false,
+    cleared_pending_create: false,
+    key_removed: false,
+    database_deleted: false,
+    requires_redeploy: false,
+    note: RETAINED_RELEASE_NOTE,
+  });
+
+  const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.match(result.stdout, /Postgres record cleared for fixture-project\. Nothing was attached\./);
+  assert.doesNotMatch(result.stdout, /Takes effect on the next deploy|Unresolved:/);
+});
+
+test('--json keeps the disconnect recovery fields exactly as the route sent them', async (t) => {
+  const h = harness(t);
+  const payload = {
+    disconnected: true,
+    detached: false,
+    cleared_pending_create: true,
+    key_removed: true,
+    database_deleted: false,
+    unresolved_provider_project_id: 'np_orphan',
+    unresolved_note:
+      'A database may exist at your provider as project np_orphan. ' +
+      'Attach it here, or delete it in your provider account — it will keep billing until you do.',
+    requires_redeploy: false,
+    note: RETAINED_RELEASE_NOTE,
+  };
+  h.ok(payload);
+
+  const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes', '--forget-key', '--json']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(JSON.parse(result.stdout), payload);
+});
+
+test('an interrupted or superseded create keeps its recovery message and is not retried', async (t) => {
+  const h = harness(t);
+  // Both name a provider project the developer is paying for. They are
+  // ordinary typed errors: the route already said what to do, so the CLI
+  // neither masks the message nor bolts its own do-not-retry copy on top.
+  for (const [code, message] of [
+    [
+      'POSTGRES_CREATE_SUPERSEDED',
+      'The database was created (provider project np_superseded) but this project changed while it was being created, ' +
+        'so it was not attached. Nothing here was overwritten. Attach that provider project directly if you still want it, ' +
+        'or delete it in your provider account — it will keep billing until you do.',
+    ],
+    [
+      'POSTGRES_CREATE_IN_PROGRESS',
+      'A create for this project is unresolved (started 2026-09-20T00:00:00.000Z): a database named "my-db" may have been created. ' +
+        'Provider project np_inflight. If it is still running, wait. If the request was interrupted, check your provider account — ' +
+        'attach the database directly if it exists, or disconnect to clear this state once you have reconciled. ' +
+        'It will not be retried or cleared automatically.',
+    ],
+  ]) {
+    h.fail(409, code, message);
+    const human = await h.run(['create', '--project', 'fixture-project', '--yes']);
+    assert.equal(human.status, 1, code);
+    assert.equal(h.requests.length, 1, `${code} must not be retried`);
+    assert.ok(human.stderr.includes(message), `${code} message must reach the developer whole`);
+    assert.doesNotMatch(human.output, /Do NOT run create again/, `${code} carries its own guidance`);
+
+    const json = await h.run(['create', '--project', 'fixture-project', '--yes', '--json']);
+    const envelope = JSON.parse(json.stdout);
+    assert.equal(envelope.error, code, code);
+    assert.equal(envelope.message, message, code);
+    assert.equal(envelope.outcome, undefined, code);
+    h.requests.length = 0;
+  }
+});
+
 test('disconnect --forget-key deletes the stored key and says so', async (t) => {
   const h = harness(t);
   h.ok({
     disconnected: true,
     detached: true,
+    cleared_pending_create: false,
     key_removed: true,
     database_deleted: false,
     requires_redeploy: true,
