@@ -32,7 +32,13 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-      - run: npm install -g npm@latest # trusted publishing (OIDC) needs npm >= 11.5
+      # Trusted publishing (OIDC) needs npm >= 11.5, but npm 12 REMOVED
+      # npm-shrinkwrap.json support from `npm ci` — this repo ships a
+      # shrinkwrap and no package-lock, so `npm@latest` fails the next step
+      # with EUSAGE and nothing publishes. Reproduced on 2026-09-21: npm
+      # 12.0.2 errors on this tree, 11.19.0 installs it. Pinned rather than
+      # floating, so a future npm major cannot silently break releases again.
+      - run: npm install -g npm@11.19.0
       - run: npm ci
       - run: npm run build
       - run: npm test
