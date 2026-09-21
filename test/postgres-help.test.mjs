@@ -103,6 +103,15 @@ test('no help text discusses the provider relationship instead of the task', asy
   }
 });
 
+test('attach help documents the pooled default and the direct-connection flag', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-postgres-help-attach-'));
+  const help = await run(['postgres', 'attach', '--help'], home);
+  assert.equal(help.status, 0, help.stderr);
+
+  assert.match(help.stdout, /--no-pooled\b/);
+  assert.match(help.stdout, /through Neon's pooler by default/);
+});
+
 test('create help warns about real Neon billing and forbids retrying an uncertain create', async () => {
   const home = mkdtempSync(join(tmpdir(), 'sw-postgres-help-create-'));
   const help = await run(['postgres', 'create', '--help'], home);
@@ -125,6 +134,10 @@ test('disconnect help says the Neon database survives and access is not cut off 
   assert.match(help.stdout, /not an immediate cut-off/i);
   assert.match(help.stdout, /keeps the\n?connection details it was built with/);
   assert.match(help.stdout, /Rotate the credential in Neon/);
+  // The key outlives the attachment unless asked otherwise, and the path to
+  // removing it is named rather than left to the API.
+  assert.match(help.stdout, /--forget-key\b/);
+  assert.match(help.stdout, /stored Neon API key is kept by default/);
 });
 
 test('an unknown postgres subcommand fails instead of guessing', async () => {

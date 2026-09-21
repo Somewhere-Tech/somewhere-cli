@@ -224,6 +224,21 @@ test('attach omits unset options so the platform resolves them', async (t) => {
     project_id: 'fixture-project',
     provider_project_id: 'np_fixture',
   });
+  // Pooling is the platform's default; not passing the flag must not assert one.
+  assert.equal('pooled' in h.requests.at(-1).body, false);
+});
+
+test('attach --no-pooled asks for a direct connection', async (t) => {
+  const h = harness(t);
+  h.ok({ attached: true, provider_project_id: 'np_fixture', requires_redeploy: true, note: RETAINED_RELEASE_NOTE }, 201);
+
+  const result = await h.run(['attach', 'np_fixture', '--project', 'fixture-project', '--no-pooled']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(h.requests.at(-1).body, {
+    project_id: 'fixture-project',
+    provider_project_id: 'np_fixture',
+    pooled: false,
+  });
 });
 
 test('attach surfaces an ambiguous target instead of choosing one', async (t) => {
@@ -316,6 +331,7 @@ test('a create whose response never arrives is unknown, not a retryable failure'
   assert.equal(h.requests.length, 1, 'a lost response must never be retried');
   assert.match(human.stderr, /may or may not have been created/);
   assert.match(human.stderr, /outcome is unknown, not failed/);
+  assert.doesNotMatch(human.output, /Created Neon project|was created/);
   assert.match(human.stdout, /Do NOT run create again/);
   // The generic transport advice — "check your network and retry" — is exactly
   // the wrong thing to say about provisioning.
@@ -334,12 +350,14 @@ test('a create whose response never arrives is unknown, not a retryable failure'
 
 test('a definite create rejection is never dressed up as an unknown outcome', async (t) => {
   const h = harness(t);
+  // 4xx is the server saying it did not act. Sending someone hunting through
+  // their Neon account for a database that was never requested is its own harm.
   for (const [status, code, message] of [
     [400, 'VALIDATION_ERROR', 'project_id is required (string).'],
     [401, 'API_KEY_INVALID', 'The supplied developer key is not valid.'],
     [403, 'PROJECT_OWNER_REQUIRED', 'Owner access is required to create a database.'],
+    [403, 'POSTGRES_PROVIDER_UNAUTHORIZED', 'The stored database credential was refused when trying to create the database.'],
     [409, 'POSTGRES_NOT_CONNECTED', 'Connect a database provider account first.'],
-    [502, 'POSTGRES_PROVIDER_ERROR', 'The database provider could not create the database (status 500).'],
   ]) {
     h.fail(status, code, message);
     const result = await h.run(['create', '--project', 'fixture-project', '--yes']);
@@ -353,6 +371,50 @@ test('a definite create rejection is never dressed up as an unknown outcome', as
     assert.equal(envelope.outcome, undefined, `${code} must not be labelled uncertain`);
     assert.equal(envelope.guidance, undefined, code);
   }
+});
+
+test('a 5xx after create is ambiguous, because a gateway can lose a committed POST', async (t) => {
+  const h = harness(t);
+  for (const [status, code, message] of [
+    [500, 'INTERNAL_ERROR', 'Unexpected error.'],
+    [502, 'POSTGRES_PROVIDER_ERROR', 'The database provider could not create the database (status 500).'],
+    [503, 'POSTGRES_PROVIDER_UNREACHABLE', 'The database provider could not be reached.'],
+    [504, 'GATEWAY_TIMEOUT', 'The upstream did not respond in time.'],
+  ]) {
+    h.fail(status, code, message);
+    const human = await h.run(['create', '--project', 'fixture-project', '--yes']);
+    assert.equal(human.status, 1, code);
+    assert.equal(h.requests.at(-1).path, '/v1/postgres/create', code);
+    assert.match(human.stderr, /may or may not have been created/, code);
+    assert.match(human.stdout, /Do NOT run create again/, code);
+    // The platform's own message is specific and is preserved, not replaced.
+    assert.ok(human.stderr.includes(message), `${code} must keep the platform message`);
+    // Ambiguity is never dressed up as a completed creation.
+    assert.doesNotMatch(human.output, /Created Neon project|was created/, code);
+
+    const json = await h.run(['create', '--project', 'fixture-project', '--yes', '--json']);
+    const envelope = JSON.parse(json.stdout);
+    // The error's own code survives — POSTGRES_CREATE_UNCERTAIN is the route's
+    // verdict to give, and here the route gave a different one.
+    assert.equal(envelope.error, code, code);
+    assert.equal(envelope.outcome, 'unknown', code);
+    assert.ok(envelope.guidance.some((line) => /Do NOT run create again/.test(line)), code);
+  }
+});
+
+test('a 5xx on attach or disconnect stays an ordinary failure', async (t) => {
+  const h = harness(t);
+  // Only create can leave a paid resource behind. Nothing else earns the
+  // reconciliation copy, and handing it out everywhere would dilute it.
+  h.fail(502, 'POSTGRES_PROVIDER_ERROR', 'The database provider could not read the connection details (status 500).');
+  const attach = await h.run(['attach', 'np_fixture', '--project', 'fixture-project']);
+  assert.equal(attach.status, 1);
+  assert.match(attach.stderr, /POSTGRES_PROVIDER_ERROR: The database provider could not read the connection details/);
+  assert.doesNotMatch(attach.output, /may or may not have been created|Do NOT run create again/);
+
+  const disconnect = await h.run(['disconnect', '--project', 'fixture-project', '--yes']);
+  assert.equal(disconnect.status, 1);
+  assert.doesNotMatch(disconnect.output, /may or may not have been created|Do NOT run create again/);
 });
 
 test('status reads the route field names and prints no credential, even a leaked one', async (t) => {
@@ -431,8 +493,30 @@ test('disconnect needs --yes, removes only our attachment, and claims no revocat
   assert.match(result.stdout, /this does not revoke access for them/);
   assert.match(result.stdout, /Rotate the credential in your provider account/);
   assert.doesNotMatch(result.stdout, /revoked immediately|access is now cut off/i);
-  // key_removed:false must not be reported as a key removal.
-  assert.doesNotMatch(result.stdout, /API key was removed/);
+  // key_removed:false must not be reported as a key removal, and the default
+  // must not silently send forget_key.
+  assert.doesNotMatch(result.stdout, /API key was deleted/);
+  assert.match(result.stdout, /Neon API key was kept/);
+});
+
+test('disconnect --forget-key deletes the stored key and says so', async (t) => {
+  const h = harness(t);
+  h.ok({
+    disconnected: true,
+    detached: true,
+    key_removed: true,
+    database_deleted: false,
+    requires_redeploy: true,
+    note: RETAINED_RELEASE_NOTE,
+  });
+
+  const result = await h.run(['disconnect', '--project', 'fixture-project', '--yes', '--forget-key']);
+  assert.equal(result.status, 0, result.stderr);
+  assert.deepEqual(h.requests.at(-1).body, { project_id: 'fixture-project', forget_key: true });
+  assert.match(result.stdout, /Neon API key was deleted too/);
+  assert.doesNotMatch(result.stdout, /Neon API key was kept/);
+  // Forgetting our copy of the key is still not a deletion of their database.
+  assert.match(result.stdout, /Neon database was NOT deleted/);
 });
 
 test('disconnect on a project with nothing attached reports the route error', async (t) => {

@@ -206,24 +206,40 @@ function transportDetail(message: string): string {
 }
 
 /**
- * A create that got no HTTP answer at all.
+ * A create whose failure does not prove the database was not created.
  *
- * `CliApiError.statusCode === 0` is the client's marker for "no response was
- * received" — a timeout, a dropped connection, a slow server. Everywhere else
- * that means "safe to try again", and the generic message says so. For create
- * it means the opposite: the request may have reached Neon and provisioned a
- * database nobody can see yet. The transport code is kept rather than
- * relabelled as the route's POSTGRES_CREATE_UNCERTAIN — the route never
- * answered, so asserting its verdict would be an invention — but the outcome
- * is reported as unknown and the guidance is reconciliation, not retry.
+ * Two shapes qualify, and neither is a definite "no":
  *
- * Errors that DID get an HTTP status (validation, auth, provider refusals) are
- * untouched: they are definite answers and are never called uncertain.
+ *  - `statusCode === 0` — the client's marker for "no response received": a
+ *    timeout, a dropped connection. The request may have reached Neon and
+ *    provisioned a database nobody can see yet.
+ *  - Any 5xx. A gateway can answer 500/502/503/504 for a POST the origin
+ *    already committed, so the failure is the *answer* going missing, not the
+ *    work. That covers the platform's own POSTGRES_PROVIDER_ERROR too: the
+ *    provider having errored is not evidence it created nothing.
+ *
+ * The error's own code is kept rather than relabelled as the route's
+ * POSTGRES_CREATE_UNCERTAIN — that is the route's verdict to give, and in
+ * these cases the route either never answered or answered something else.
+ * What the CLI adds is the outcome being unknown and guidance that
+ * reconciles rather than retries. It never claims a database WAS created.
+ *
+ * 4xx answers are left definite: validation, auth, owner-role and refusals are
+ * the server saying it did not act, and calling them uncertain would send
+ * someone hunting through their Neon account for nothing.
  */
-function reportUncertainCreateTransport(err: CliApiError, json: boolean | undefined): void {
+function isAmbiguousCreateOutcome(err: CliApiError): boolean {
+  return err.statusCode === 0 || err.statusCode >= 500;
+}
+
+function reportAmbiguousCreateOutcome(err: CliApiError, json: boolean | undefined): void {
+  // A client-synthesized transport message closes with retry advice that is
+  // wrong here, so only its first sentence survives. A 5xx message came from
+  // the platform, is already specific about what failed, and is kept whole.
+  const detail = err.statusCode === 0 ? transportDetail(err.message) : err.message;
   const message =
-    'The create request got no response, so a Neon database may or may not have been created. ' +
-    `The outcome is unknown, not failed. (${transportDetail(err.message)})`;
+    'The create request did not return a usable result, so a Neon database may or may not have been created. ' +
+    `The outcome is unknown, not failed. (${detail})`;
   if (json) {
     printJsonError(err.code, message, { outcome: 'unknown', guidance: CREATE_RECONCILE_GUIDANCE });
   } else {
@@ -315,16 +331,19 @@ export function registerPostgres(program: Command): void {
     .option('--database <name>', 'Database to connect to; required when the branch has more than one')
     .option('--role <name>', 'Neon role to connect as; required when the branch has more than one')
     .option('--branch <id>', 'Neon branch ID; defaults to the branch Neon marks default')
+    .option('--no-pooled', "Connect directly instead of through Neon's connection pooler")
     .option('--json', 'Print the complete response as JSON')
     .addHelpText(
       'after',
       '\nBranch, database and role are chosen explicitly. When Neon offers several and you named\n' +
         'none, the platform refuses and lists them rather than binding whichever sorted first.\n' +
-        'Attaching never resets a role password, because that would break anything else using it.\n',
+        'Attaching never resets a role password, because that would break anything else using it.\n' +
+        '\nConnections go through Neon\'s pooler by default. Pass --no-pooled for a direct connection\n' +
+        'when you need session-level features the pooler does not carry.\n',
     )
     .action(async (
       neonProjectId: string,
-      opts: ProjectOptions & { database?: string; role?: string; branch?: string },
+      opts: ProjectOptions & { database?: string; role?: string; branch?: string; pooled?: boolean },
     ) => {
       try {
         const projectId = resolveProjectRef(opts.project);
@@ -335,6 +354,9 @@ export function registerPostgres(program: Command): void {
           ...(opts.database === undefined ? {} : { database: opts.database }),
           ...(opts.role === undefined ? {} : { role: opts.role }),
           ...(opts.branch === undefined ? {} : { branch_id: opts.branch }),
+          // Commander defaults a --no-x flag to true, so only an explicit
+          // --no-pooled is sent; the platform owns the pooled default.
+          ...(opts.pooled === false ? { pooled: false } : {}),
         });
         if (opts.json) {
           printJson(result);
@@ -402,10 +424,10 @@ export function registerPostgres(program: Command): void {
         info(dim('This database belongs to your Neon account and Neon bills you for it.'));
         printNote(result);
       } catch (err) {
-        // Never retried, and a lost response is reported as unknown rather
-        // than as the generic "safe to try again" transport failure.
-        if (err instanceof CliApiError && err.statusCode === 0) {
-          reportUncertainCreateTransport(err, opts.json);
+        // Never retried. A lost response or a 5xx is reported as an unknown
+        // outcome rather than as the generic "safe to try again" failure.
+        if (err instanceof CliApiError && isAmbiguousCreateOutcome(err)) {
+          reportAmbiguousCreateOutcome(err, opts.json);
           return;
         }
         reportError(err, opts.json);
@@ -463,6 +485,7 @@ export function registerPostgres(program: Command): void {
     .command('disconnect')
     .description("Remove Somewhere's Postgres attachment (your Neon database is NOT deleted)")
     .option('-p, --project <id-or-slug>', 'Project ID or slug; defaults to the linked project')
+    .option('--forget-key', 'Also delete the stored Neon API key, not just the attachment')
     .option('-y, --yes', 'Disconnect without confirming')
     .option('--json', 'Print the complete response as JSON')
     .addHelpText(
@@ -470,13 +493,17 @@ export function registerPostgres(program: Command): void {
       '\nThis removes the attachment on our side. It never calls Neon\'s delete: your database,\n' +
         'its data and its Neon billing continue.\n' +
         'It is also not an immediate cut-off — a release that is already deployed keeps the\n' +
-        'connection details it was built with. Rotate the credential in Neon to cut those off.\n',
+        'connection details it was built with. Rotate the credential in Neon to cut those off.\n' +
+        '\nThe stored Neon API key is kept by default, so you can attach again without supplying it.\n' +
+        'Pass --forget-key to delete it too; a later attach then needs `somewhere postgres connect` first.\n',
     )
-    .action(async (opts: ProjectOptions & { yes?: boolean }) => {
+    .action(async (opts: ProjectOptions & { yes?: boolean; forgetKey?: boolean }) => {
       try {
         const projectId = resolveProjectRef(opts.project);
         const ok = await confirm(
-          'Remove the Postgres attachment? Your Neon database is not deleted.',
+          opts.forgetKey
+            ? 'Remove the Postgres attachment and delete the stored Neon API key? Your Neon database is not deleted.'
+            : 'Remove the Postgres attachment? Your Neon database is not deleted.',
           opts.yes,
           'Pass --yes to disconnect in a non-interactive shell.',
         );
@@ -487,6 +514,7 @@ export function registerPostgres(program: Command): void {
         const client = new ApiClient(getToken());
         const result = await client.call<DisconnectResult>('POST', '/postgres/disconnect', {
           project_id: projectId,
+          ...(opts.forgetKey ? { forget_key: true } : {}),
         });
         if (opts.json) {
           printJson(result);
@@ -494,7 +522,8 @@ export function registerPostgres(program: Command): void {
         }
         success(`Postgres attachment removed for ${teal(projectId)}.`);
         info('Your Neon database was NOT deleted — it and its Neon billing continue.');
-        if (result.key_removed === true) info('The stored Neon API key was removed too.');
+        if (result.key_removed === true) info('The stored Neon API key was deleted too.');
+        else info(dim('The stored Neon API key was kept — pass --forget-key to delete it as well.'));
         // The route's own sentence about already-deployed releases; never a
         // local paraphrase that could harden into a revocation claim.
         printNote(result);
