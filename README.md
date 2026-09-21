@@ -183,8 +183,10 @@ platform.
 
 `somewhere preview` sends every save to a private URL, reachable only by you
 until you share the link. The build is the one production would get. The
-database is a separate copy of your schema with none of your production rows,
-so nothing you try in a preview can touch real data. After each update the
+database is an isolated copy of production, data included, taken when the
+preview session was created — so nothing you try in a preview touches real
+data, but the preview does hold a copy of it. The single-use link is what
+grants access; treat sharing one as sharing that copy. After each update the
 command prints that URL and the `somewhere promote` command that makes those
 exact bytes live. Reach for it when you want a URL to send someone, or when the
 agent doing the work reaches the platform over MCP and has no local machine to
@@ -217,7 +219,7 @@ environment variables injected — for example `somewhere dev npm run dev`.
 
 ## Client-side code: use the SDK
 
-The CLI deploys and manages projects. For **client-side code** (browser / Node app talking to your backend), install the SDK — a Supabase-shaped client so existing code ports with one import swap:
+The CLI deploys and manages projects. For **client-side code** (browser / Node app talking to your backend), install the SDK — a familiar `{ data, error }` client:
 
 ```bash
 npm i @somewhere-tech/sdk
