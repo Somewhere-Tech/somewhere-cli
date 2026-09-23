@@ -27,7 +27,7 @@ process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${port}`;
 
 const { ApiClient, CliApiError } = await import('../dist/lib/client.js');
 const { buildCheckBody, buildCheckRunBody, checkErrorsToCliError, checkRunExitCode, checkRunPath, formatCheckRunResult,
-  formatCompileOnlySuccess, registerCheck } =
+  formatCompileOnlySuccess, localPreflightVerdict, registerCheck, runLocalPreflight } =
   await import('../dist/commands/check.js');
 
 const collected = (over = {}) => ({ files: {}, binaryFiles: {}, functions: {}, ...over });
@@ -233,6 +233,89 @@ test('deploy-check help distinguishes compile-only mode from explicit --run exec
   assert.match(help, /can write data or call services/);
   assert.match(help, /Exits nonzero\s+for handler preparation errors, handler errors,\s+and HTTP 4xx\/5xx/);
   assert.doesNotMatch(help, /safe to deploy|oracle/i);
+});
+
+// Projectless preflight (tsk_bac980aca5dc4d3883863d18e59a3104): before the
+// first deploy there is no project to compile against. Local checks run; the
+// platform compile is reported as skipped and the verdict is never "passed".
+const { mkdtempSync, writeFileSync } = await import('node:fs');
+const { tmpdir } = await import('node:os');
+const { join } = await import('node:path');
+const { spawnSync } = await import('node:child_process');
+const { fileURLToPath } = await import('node:url');
+const cliBin = fileURLToPath(new URL('../bin/somewhere.js', import.meta.url));
+
+test('projectless verdict: a skipped step is partial, never passed', () => {
+  const partial = localPreflightVerdict([
+    { name: 'source', status: 'passed' },
+    { name: 'platform_compile', status: 'skipped', reason: 'no project' },
+  ]);
+  assert.equal(partial.ok, true);
+  assert.equal(partial.complete, false);
+  assert.equal(partial.verdict, 'partial');
+  const failed = localPreflightVerdict([
+    { name: 'typecheck', status: 'failed' },
+    { name: 'platform_compile', status: 'skipped' },
+  ]);
+  assert.equal(failed.ok, false);
+  assert.equal(failed.verdict, 'failed');
+});
+
+test('runLocalPreflight: skips typecheck without tsconfig and always skips the platform compile', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-check-local-'));
+  let typechecked = false;
+  const result = await runLocalPreflight(
+    dir,
+    collected({ files: { 'index.html': '<html>' }, skipped: [], excluded: [] }),
+    async () => { typechecked = true; return { ok: true, errors: [], via: 'bundled', raw: '' }; },
+  );
+  assert.equal(typechecked, false);
+  assert.deepEqual(result.checks.map((c) => [c.name, c.status]), [
+    ['source', 'passed'], ['typecheck', 'skipped'], ['platform_compile', 'skipped'],
+  ]);
+  assert.equal(result.verdict, 'partial');
+  assert.match(result.checks[2].reason, /first `somewhere deploy`/);
+});
+
+test('runLocalPreflight: a type error fails the verdict with file:line detail', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-check-local-ts-'));
+  writeFileSync(join(dir, 'tsconfig.json'), '{}');
+  const error = { file: 'api/a.ts', line: 2, column: 3, code: 'TS2304', message: "Cannot find name 'x'." };
+  const result = await runLocalPreflight(
+    dir,
+    collected({ functions: { 'api/a.ts': 'x' }, skipped: [], excluded: [] }),
+    async () => ({ ok: false, errors: [error], via: 'bundled', raw: '' }),
+  );
+  assert.equal(result.ok, false);
+  assert.equal(result.verdict, 'failed');
+  assert.deepEqual(result.checks[1].errors, [error]);
+});
+
+test('runLocalPreflight: an empty directory fails source intake', async () => {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-check-local-empty-'));
+  const result = await runLocalPreflight(dir, collected({ skipped: [], excluded: [] }));
+  assert.equal(result.checks[0].status, 'failed');
+  assert.equal(result.ok, false);
+});
+
+test('deploy-check without a project runs locally, needs no login, and never calls the platform', () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-check-home-'));
+  const dir = mkdtempSync(join(tmpdir(), 'sw-check-app-'));
+  writeFileSync(join(dir, 'index.html'), '<!doctype html><title>x</title>');
+  lastRequest = null;
+  const env = { ...process.env, HOME: home, USERPROFILE: home, SOMEWHERE_API_URL: `http://127.0.0.1:${port}` };
+  const local = spawnSync(process.execPath, [cliBin, 'deploy-check', '--json'], { cwd: dir, env, encoding: 'utf8' });
+  assert.equal(local.status, 0, local.stderr);
+  const body = JSON.parse(local.stdout);
+  assert.equal(body.verdict, 'partial');
+  assert.equal(body.complete, false);
+  assert.equal(body.checks.find((c) => c.name === 'platform_compile').status, 'skipped');
+  assert.equal(lastRequest, null);
+
+  const run = spawnSync(process.execPath, [cliBin, 'deploy-check', '--run', '/api/x', '--json'], { cwd: dir, env, encoding: 'utf8' });
+  assert.equal(run.status, 1);
+  assert.equal(JSON.parse(run.stdout).error, 'NO_PROJECT');
+  assert.equal(lastRequest, null);
 });
 
 test.after(() => server.close());
