@@ -54,3 +54,32 @@ test('SOMEWHERE_CONFIG_DIR is the only config root the CLI reads and writes', as
     server.close();
   }
 });
+
+// The MCP bridge is launched by the host (Claude Code, Cursor), not by this
+// CLI, so it only sees SOMEWHERE_CONFIG_DIR if the installed entry carries it.
+// Without it the bridge would silently read the default ~/.somewhere login.
+async function installHost(host, extraEnv) {
+  const home = mkdtempSync(join(tmpdir(), 'sw-configdir-mcp-home-'));
+  const child = spawn(process.execPath, [cliBin, 'mcp', 'install', host], {
+    cwd: home,
+    env: { ...process.env, HOME: home, USERPROFILE: home, SOMEWHERE_NO_NOTIFICATIONS: '1', ...extraEnv },
+  });
+  let stderr = '';
+  child.stderr.on('data', (d) => { stderr += d; });
+  child.stdout.resume();
+  const status = await new Promise((resolve) => child.on('close', resolve));
+  assert.equal(status, 0, stderr);
+  return home;
+}
+
+test('mcp install carries SOMEWHERE_CONFIG_DIR into the host entry, and only when set', async () => {
+  const root = join(mkdtempSync(join(tmpdir(), 'sw-configdir-mcp-root-')), 'cfg');
+  const withOverride = { SOMEWHERE_CONFIG_DIR: root };
+  const withoutOverride = { SOMEWHERE_CONFIG_DIR: '' };
+  for (const [host, file] of [['claude-code', '.claude.json'], ['cursor', join('.cursor', 'mcp.json')]]) {
+    const scoped = JSON.parse(readFileSync(join(await installHost(host, withOverride), file), 'utf8')).mcpServers.somewhere;
+    assert.deepEqual(scoped, { command: 'somewhere', args: ['mcp'], env: { SOMEWHERE_CONFIG_DIR: root } }, host);
+    const plain = JSON.parse(readFileSync(join(await installHost(host, withoutOverride), file), 'utf8')).mcpServers.somewhere;
+    assert.deepEqual(plain, { command: 'somewhere', args: ['mcp'] }, `${host} default entry unchanged`);
+  }
+});

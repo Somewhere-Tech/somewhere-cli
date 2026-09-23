@@ -15,6 +15,8 @@ import {
   loadConfig,
   saveCursorMcpConfig,
   saveGlobalMcpConfig,
+  cliConfigPathForDisplay,
+  somewhereStdioEntry,
 } from '../lib/config.js';
 import { ApiClient } from '../lib/client.js';
 import { dim, error, info, success, teal } from '../lib/output.js';
@@ -230,12 +232,18 @@ const CODEX_SHELL = process.platform === 'win32';
 /** Codex owns its own config format, so we drive its CLI instead of writing
  *  the file ourselves. The entry uses the stdio bridge so auth rides the
  *  CLI login rather than a token pasted into Codex config. */
+/** Carry SOMEWHERE_CONFIG_DIR into the Codex entry, like the JSON hosts. */
+function codexEnvArgs(): string[] {
+  const env = somewhereStdioEntry().env;
+  return env ? ['--env', `SOMEWHERE_CONFIG_DIR=${env.SOMEWHERE_CONFIG_DIR}`] : [];
+}
+
 function installCodex(loggedIn: boolean): void {
   const probe = spawnSync('codex', ['--version'], { stdio: 'ignore', shell: CODEX_SHELL });
   if (probe.error || probe.status !== 0) {
     error('Codex CLI not found on PATH.');
     info('Install Codex first, then either re-run this command or add the entry manually:');
-    info(dim('  codex mcp add somewhere -- somewhere mcp'));
+    info(dim(`  codex mcp add somewhere ${codexEnvArgs().join(' ')}${codexEnvArgs().length ? ' ' : ''}-- somewhere mcp`));
     process.exit(1);
   }
 
@@ -244,7 +252,7 @@ function installCodex(loggedIn: boolean): void {
     success('Codex already has a "somewhere" MCP server configured.');
     info(dim('To reconfigure: codex mcp remove somewhere, then re-run this command.'));
   } else {
-    const add = spawnSync('codex', ['mcp', 'add', 'somewhere', '--', 'somewhere', 'mcp'], { stdio: 'inherit', shell: CODEX_SHELL });
+    const add = spawnSync('codex', ['mcp', 'add', 'somewhere', ...codexEnvArgs(), '--', 'somewhere', 'mcp'], { stdio: 'inherit', shell: CODEX_SHELL });
     if (add.status !== 0) {
       error('`codex mcp add` failed (see output above).');
       process.exit(1);
@@ -308,9 +316,9 @@ async function runDoctor(version: string): Promise<void> {
   // 1. Login config present
   const config = loadConfig();
   if (config?.token) {
-    success(`Logged in as ${teal(config.user.email || '(unknown)')} (~/.somewhere/config.json)`);
+    success(`Logged in as ${teal(config.user.email || '(unknown)')} (${cliConfigPathForDisplay()})`);
   } else {
-    fail('Not logged in — no token in ~/.somewhere/config.json.', 'somewhere login');
+    fail(`Not logged in — no token in ${cliConfigPathForDisplay()}.`, 'somewhere login');
   }
 
   // 2. Token actually valid against the API. /auth/whoami is the endpoint

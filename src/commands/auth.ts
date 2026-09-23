@@ -29,6 +29,7 @@ import {
   loadProjectConfig,
   saveConfig,
   saveGlobalMcpConfig,
+  cliConfigPathForDisplay,
 } from '../lib/config.js';
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
@@ -201,8 +202,8 @@ export function registerAuth(program: Command) {
         clearConfig();
       }
       success(revokedOnServer
-        ? 'Logged out. This device\'s session was revoked on the server and the token removed from ~/.somewhere/config.json'
-        : 'Logged out locally. Token removed from ~/.somewhere/config.json');
+        ? `Logged out. This device's session was revoked on the server and the token removed from ${cliConfigPathForDisplay()}`
+        : `Logged out locally. Token removed from ${cliConfigPathForDisplay()}`);
     });
 
   program
