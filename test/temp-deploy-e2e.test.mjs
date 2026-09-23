@@ -230,6 +230,7 @@ test('deploy --json with no stored credential deploys and emits the anonymous co
     url: `https://${project.subdomain}.somewhere.tech`,
     claim_url: 'https://somewhere.tech/claim?token=swtc_e2e',
     expires_at: config.temp_expires_at,
+    claim_connects_agent: true,
   });
   assert.equal(result.stderr, '');
 });

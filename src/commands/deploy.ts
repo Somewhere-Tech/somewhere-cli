@@ -792,6 +792,9 @@ export function registerDeploy(program: Command) {
                 url: formatted.liveUrl,
                 claim_url: tempSession.claimUrl,
                 expires_at: tempSession.expiresAt ?? null,
+                // True only when the claim page can connect this CLI with no
+                // extra sign-in; promise continuation only then.
+                claim_connects_agent: tempSession.handoffReady === true,
               }
             : result;
           printJson(verification ? { ...output, verification } : output);
