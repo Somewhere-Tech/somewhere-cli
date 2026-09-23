@@ -1,9 +1,10 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir, hostname } from 'node:os';
+import { hostname } from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { join } from 'node:path';
+import { cliConfigDir } from './config.js';
 
-const CONFIG_DIR = join(homedir(), '.somewhere');
+const CONFIG_DIR = cliConfigDir();
 const DEVICE_PATH = join(CONFIG_DIR, 'device.json');
 
 interface DeviceFile {

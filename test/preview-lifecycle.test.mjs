@@ -12,7 +12,7 @@ import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { hostname, tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -31,8 +31,24 @@ function platform() {
     // 'after' = apply, then drop the connection; 'before' = drop without applying.
     dropDeploy: [],
     closeCleanupPending: new Set(),
+    // The platform's operation ledger: op id → { state, release }.
+    ledger: new Map(),
+    // Next preview write is received and left executing, its response lost.
+    nextRunning: false,
+    deployDelayMs: 0,
   };
-  const view = (s) => ({
+  const receipt = (s, op) => {
+    if (s.candidate_op === op && s.candidate) return { operation_id: op, state: 'current', release_id: s.candidate };
+    const entry = state.ledger.get(op);
+    if (!entry) return { operation_id: op, state: 'not_recorded', release_id: null };
+    return {
+      operation_id: op,
+      state: entry.state === 'succeeded' ? 'succeeded_not_current' : entry.state,
+      release_id: entry.release ?? null,
+    };
+  };
+  const view = (s, op) => ({
+    ...(op ? { operation: receipt(s, op) } : {}),
     project_id: s.project_id,
     preview_session_id: s.id,
     status: s.status,
@@ -62,6 +78,8 @@ function platform() {
     res.end(JSON.stringify({ ok: true, data }));
   };
   function applyPreview(body) {
+    // A retry of an operation still executing gets no answer either.
+    if (state.ledger.get(body.preview_operation_id)?.state === 'running') return ['running'];
     const id = body.preview_session_id;
     const expected = body.expected_preview_id;
     let s = state.sessions.get(id);
@@ -86,12 +104,22 @@ function platform() {
     if (s.ops.has(body.preview_operation_id)) return [409, 'DRAFT_OPERATION_REUSED', 'This update was already applied.'];
     if (state.buildErrorNext) {
       state.buildErrorNext = false;
+      state.ledger.set(body.preview_operation_id, { state: 'failed' });
       return [400, 'BUILD_ERROR', 'index.html: fixture build failure', { errors: [] }];
     }
+    if (state.nextRunning) {
+      state.nextRunning = false;
+      state.ledger.set(body.preview_operation_id, { state: 'running', body, session: s });
+      return ['running'];
+    }
+    return commit(s, body);
+  }
+  function commit(s, body) {
     s.candidate = `rel_preview_${++state.releaseSeq}`;
     s.candidate_op = body.preview_operation_id;
     s.ops.add(body.preview_operation_id);
     s.files = body.files;
+    state.ledger.set(body.preview_operation_id, { state: 'succeeded', release: s.candidate });
     return [200, s];
   }
   const server = createServer((req, res) => {
@@ -101,7 +129,7 @@ function platform() {
       const url = new URL(req.url, 'http://mock');
       const body = raw ? JSON.parse(raw) : null;
       const path = url.pathname.replace(/^\/v1/, '');
-      state.requests.push({ method: req.method, path, query: Object.fromEntries(url.searchParams), body });
+      state.requests.push({ method: req.method, path, query: Object.fromEntries(url.searchParams), body, auth: req.headers.authorization });
       const projectMatch = /^\/projects\/([^/]+)$/.exec(path);
       if (req.method === 'GET' && projectMatch) {
         const ref = decodeURIComponent(projectMatch[1]);
@@ -122,10 +150,11 @@ function platform() {
       }
       if (req.method === 'POST' && path === '/deploy') {
         if (!body.preview) return fail(res, 500, 'UNEXPECTED', 'the CLI must not deploy to production here');
+        return void setTimeout(() => {
         const drop = state.dropDeploy.shift();
         if (drop === 'before') return req.socket.destroy();
         const [status, codeOrSession, message, data] = applyPreview(body);
-        if (drop === 'after') return req.socket.destroy();
+        if (status === 'running' || drop === 'after') return req.socket.destroy();
         if (status !== 200) return fail(res, status, codeOrSession, message, data);
         const s = codeOrSession;
         return ok(res, {
@@ -133,11 +162,12 @@ function platform() {
           expires_at: Date.parse('2026-09-24T00:00:00.000Z'), db_status: 'ready', files_status: 'ready',
           files_deployed: Object.keys(body.files).length, preview: true,
         });
+        }, state.deployDelayMs);
       }
       if (req.method === 'GET' && path === '/deploy/preview/session') {
         const s = state.sessions.get(url.searchParams.get('preview_session_id'));
         if (!s || s.project_id !== url.searchParams.get('project_id')) return fail(res, 404, 'DRAFT_NOT_FOUND', 'This preview does not exist in this project.');
-        return ok(res, view(s));
+        return ok(res, view(s, url.searchParams.get('preview_operation_id')));
       }
       if (req.method === 'POST' && path === '/deploy/preview/close') {
         const s = state.sessions.get(body.preview_session_id);
@@ -169,6 +199,15 @@ function platform() {
       return fail(res, 404, 'NOT_FOUND', `mock has no ${req.method} ${path}`);
     });
   });
+  // Let an operation the test left executing finish on the platform.
+  state.finishRunning = (op) => {
+    const entry = state.ledger.get(op);
+    if (entry.session.candidate !== entry.body.expected_preview_id) {
+      state.ledger.set(op, { state: 'failed' });
+      return;
+    }
+    commit(entry.session, entry.body);
+  };
   return { state, server };
 }
 
@@ -176,9 +215,9 @@ async function withPlatform(fn) {
   const { state, server } = platform();
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
   const api = `http://127.0.0.1:${server.address().port}/v1`;
-  const HOME = mkdtempSync(join(tmpdir(), 'preview-life-home-'));
-  mkdirSync(join(HOME, '.somewhere'), { recursive: true });
-  writeFileSync(join(HOME, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_preview_fixture', user: { email: 'dev@example.com', username: 'dev' } }) + '\n');
+  // The CLI's supported config-directory override: HOME is never touched.
+  const CONFIG = mkdtempSync(join(tmpdir(), 'preview-life-config-'));
+  writeFileSync(join(CONFIG, 'config.json'), JSON.stringify({ token: 'smt_preview_fixture', user: { email: 'dev@example.com', username: 'dev' } }) + '\n');
   const checkout = (name, project = PROJECT, html = `<main>${name}</main>`) => {
     const dir = mkdtempSync(join(tmpdir(), `preview-life-${name}-`));
     writeFileSync(join(dir, '.somewhere.json'), JSON.stringify({ project_id: project }) + '\n');
@@ -189,7 +228,7 @@ async function withPlatform(fn) {
     const child = spawn(process.execPath, [distIndex, ...args], {
       cwd: dir,
       stdio: ['ignore', 'pipe', 'pipe'],
-      env: { ...process.env, HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: api, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
+      env: { ...process.env, SOMEWHERE_CONFIG_DIR: CONFIG, SOMEWHERE_API_URL: api, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
     let stderr = '';
@@ -201,20 +240,23 @@ async function withPlatform(fn) {
       resolve({ status, stdout, stderr, json });
     });
   });
-  const stateFiles = () => {
-    const root = join(HOME, '.somewhere', 'previews');
-    return existsSync(root) ? readdirSync(root).filter((f) => f.endsWith('.json')).map((f) => readFileSync(join(root, f), 'utf8')) : [];
-  };
+  const previewsRoot = join(CONFIG, 'previews');
+  const stateFiles = () => (existsSync(previewsRoot)
+    ? readdirSync(previewsRoot)
+      .filter((f) => f.endsWith('.json') && !f.endsWith('.pending-request.json'))
+      .map((f) => readFileSync(join(previewsRoot, f), 'utf8'))
+    : []);
+  const records = () => stateFiles().map((text) => JSON.parse(text));
   const deploys = () => state.requests.filter((r) => r.method === 'POST' && r.path === '/deploy');
   try {
-    await fn({ state, run, checkout, stateFiles, deploys, HOME });
+    await fn({ state, run, checkout, stateFiles, records, deploys, CONFIG, previewsRoot });
   } finally {
     server.close();
   }
 }
 
 test('two checkouts of one project each start, update, and list their own preview', async () => {
-  await withPlatform(async ({ state, run, checkout, stateFiles, deploys }) => {
+  await withPlatform(async ({ state, run, checkout, stateFiles, deploys, CONFIG }) => {
     const a = checkout('agent-a');
     const b = checkout('agent-b');
     const startA = await run(a, ['preview', 'start', '--json']);
@@ -239,6 +281,11 @@ test('two checkouts of one project each start, update, and list their own previe
     // Directory-scoped state: two files, ids only, nothing in the shared link.
     const files = stateFiles();
     assert.equal(files.length, 2);
+    // Everything came from the SOMEWHERE_CONFIG_DIR override, not the developer's home.
+    assert.ok(state.requests.every((r) => r.auth === 'Bearer smt_preview_fixture'), 'the override config supplied the token');
+    assert.ok(existsSync(join(CONFIG, 'last-run.json')), 'CLI state is written to the override directory');
+    assert.equal(readdirSync(join(CONFIG, 'previews')).filter((f) => f.endsWith('.pending-request.json')).length, 0,
+      'no stored request survives a confirmed operation');
     for (const text of files) {
       assert.doesNotMatch(text, /__sw_cap|cap_|smt_preview_fixture/, 'no sign-in link or token is stored');
     }
@@ -328,8 +375,8 @@ test('explicit identity: --session needs --expect and must match the checkout it
   });
 });
 
-test('closed and expired previews refuse updates with a way forward; close is idempotent and retries cleanup', async () => {
-  await withPlatform(async ({ state, run, checkout, stateFiles }) => {
+test('closed and expired previews refuse updates with a way forward; close keeps a cleanup receipt until cleanup finishes', async () => {
+  await withPlatform(async ({ state, run, checkout, records }) => {
     const a = checkout('terminal');
     const started = await run(a, ['preview', 'start', '--json']);
     const id = started.json.preview_session_id;
@@ -349,20 +396,30 @@ test('closed and expired previews refuse updates with a way forward; close is id
     assert.equal(restart.status, 0, restart.stdout + restart.stderr);
     assert.notEqual(restart.json.preview_session_id, id);
     assert.match(restart.json.warnings.join(' '), /is expired; starting a new one/);
+    const second = restart.json.preview_session_id;
 
-    state.closeCleanupPending.add(restart.json.preview_session_id);
+    state.closeCleanupPending.add(second);
     const closed = await run(a, ['preview', 'close', '--json']);
     assert.equal(closed.status, 0, closed.stdout + closed.stderr);
     assert.equal(closed.json.cleanup_pending, true);
-    assert.equal(closed.json.tracking_removed, true);
-    assert.match(closed.json.retry_cleanup, new RegExp(`--session ${restart.json.preview_session_id}`));
-    assert.equal(stateFiles().length, 0);
+    assert.equal(closed.json.closed_receipt_kept, true);
+    assert.equal(closed.json.retry_cleanup, `somewhere preview close --session ${second}`);
     assert.equal(state.sessions.get(id).status, 'expired', 'close touched only the named preview');
+    const [receipt] = records();
+    assert.equal(receipt.preview_session_id, second);
+    assert.equal(receipt.closed.cleanup_pending, true, 'a closed receipt is kept while cleanup is pending');
 
-    const retry = await run(a, ['preview', 'close', '--session', restart.json.preview_session_id, '--json']);
-    assert.equal(retry.status, 0);
+    const noUpdate = await run(a, ['preview', 'update', '--json']);
+    assert.equal(noUpdate.json.error, 'DRAFT_SESSION_TERMINAL', 'a closed receipt is never an active preview');
+    const list = await run(a, ['preview', 'list', '--json']);
+    assert.equal(list.json.tracked_here, null);
+
+    const retry = await run(a, ['preview', 'close', '--json']);
+    assert.equal(retry.status, 0, retry.stdout + retry.stderr);
+    assert.equal(retry.json.preview_session_id, second, 'a plain close retries the receipt');
     assert.equal(retry.json.idempotent_replay, true);
     assert.equal(retry.json.cleanup_pending, false);
+    assert.equal(records().length, 0, 'the receipt goes once cleanup finished');
 
     const foreign = await run(a, ['preview', 'status', '--session', 'draft_99999999-9999-4999-8999-999999999999', '--json']);
     assert.equal(foreign.status, 1);
@@ -370,39 +427,138 @@ test('closed and expired previews refuse updates with a way forward; close is id
   });
 });
 
-test('a lost response that landed is adopted; one that did not is re-sent with the same operation', async () => {
-  await withPlatform(async ({ state, run, checkout, deploys }) => {
+test('a lost response is settled only by the platform receipt; replays carry the exact original request', async () => {
+  await withPlatform(async ({ state, run, checkout, deploys, records }) => {
     const a = checkout('lost');
     const started = await run(a, ['preview', 'start', '--json']);
     const session = state.sessions.get(started.json.preview_session_id);
 
-    // Landed: both the attempt and its in-process retry lose the response.
+    // Landed, same files: receipt `current` → adopted, nothing re-sent.
     writeFileSync(join(a, 'index.html'), '<main>landed</main>');
     state.dropDeploy.push('after', 'after');
     const lost = await run(a, ['preview', 'update', '--json']);
-    assert.equal(lost.status, 1);
     assert.equal(lost.json.error, 'PREVIEW_OUTCOME_UNKNOWN');
     const landedOps = deploys().slice(-2).map((r) => r.body.preview_operation_id);
     assert.equal(landedOps[0], landedOps[1], 'the in-process retry re-sent the same operation');
-    const landedCandidate = session.candidate;
-    const count = deploys().length;
+    assert.equal(records()[0].pending.operation_id, landedOps[0]);
+    const landed = session.candidate;
+    let count = deploys().length;
     const settled = await run(a, ['preview', 'update', '--json']);
     assert.equal(settled.status, 0, settled.stdout + settled.stderr);
-    assert.equal(settled.json.sent, false, 'nothing new is sent for a change that already landed');
-    assert.equal(settled.json.preview_id, landedCandidate);
-    assert.equal(deploys().length, count);
+    assert.equal(settled.json.sent, false);
+    assert.equal(settled.json.preview_id, landed);
+    assert.equal(deploys().length, count, 'nothing re-sent for a change that already landed');
+    assert.equal(records()[0].pending, null);
 
-    // Not landed: the connection drops before the platform applies anything.
-    writeFileSync(join(a, 'index.html'), '<main>not landed</main>');
+    // Not recorded, then the files change: the stored request is replayed
+    // byte-for-byte under its own id FIRST, and only then the new change goes
+    // out as a new operation on top of it.
+    writeFileSync(join(a, 'index.html'), '<main>sent but never arrived</main>');
     state.dropDeploy.push('before', 'before');
     const unsent = await run(a, ['preview', 'update', '--json']);
     assert.equal(unsent.json.error, 'PREVIEW_OUTCOME_UNKNOWN');
-    const pendingOp = deploys().at(-1).body.preview_operation_id;
-    assert.equal(session.candidate, landedCandidate, 'nothing applied');
-    const resent = await run(a, ['preview', 'update', '--json']);
-    assert.equal(resent.status, 0, resent.stdout + resent.stderr);
-    assert.equal(deploys().at(-1).body.preview_operation_id, pendingOp, 'the next run re-sends the same operation');
-    assert.equal(deploys().at(-1).body.expected_preview_id, landedCandidate);
+    const original = deploys().at(-1).body;
+    assert.equal(session.candidate, landed, 'nothing applied');
+    writeFileSync(join(a, 'index.html'), '<main>newer local edit</main>');
+    count = deploys().length;
+    const after = await run(a, ['preview', 'update', '--json']);
+    assert.equal(after.status, 0, after.stdout + after.stderr);
+    const [replay, fresh] = deploys().slice(count);
+    assert.deepEqual(replay.body, original, 'the replay is the exact original request, never rebound to newer files');
+    assert.notEqual(fresh.body.preview_operation_id, original.preview_operation_id);
+    assert.equal(fresh.body.files['index.html'], '<main>newer local edit</main>');
+    assert.equal(fresh.body.expected_preview_id, state.ledger.get(original.preview_operation_id).release,
+      'the new change builds on the settled replay, not on an unrelated head');
+    assert.equal(deploys().length, count + 2);
+  });
+});
+
+test('an operation still running or superseded is never adopted and blocks new writes', async () => {
+  await withPlatform(async ({ state, run, checkout, deploys, records }) => {
+    const a = checkout('running');
+    const started = await run(a, ['preview', 'start', '--json']);
+    const session = state.sessions.get(started.json.preview_session_id);
+
+    writeFileSync(join(a, 'index.html'), '<main>slow change</main>');
+    state.nextRunning = true;
+    const lost = await run(a, ['preview', 'update', '--json']);
+    assert.equal(lost.json.error, 'PREVIEW_OUTCOME_UNKNOWN');
+    const op = records()[0].pending.operation_id;
+    // Someone else's change lands on the same preview meanwhile.
+    session.candidate = 'rel_other_agent';
+    session.candidate_op = 'previewop_other_agent';
+
+    writeFileSync(join(a, 'index.html'), '<main>even newer</main>');
+    const count = deploys().length;
+    const blocked = await run(a, ['preview', 'update', '--json']);
+    assert.equal(blocked.status, 1);
+    assert.equal(blocked.json.error, 'PREVIEW_OPERATION_PENDING');
+    assert.equal(blocked.json.reason, 'running');
+    assert.equal(deploys().length, count, 'nothing is sent while the earlier operation runs');
+    assert.equal(records()[0].pending.operation_id, op, 'the pending operation is kept');
+    assert.equal(records()[0].preview_id, started.json.preview_id, 'the newer unrelated head is not adopted');
+    const status = await run(a, ['preview', 'status', '--json']);
+    assert.equal(status.json.tracking.pending_operation.receipt, 'running');
+
+    // It finishes on the platform but loses the CAS race: built, not current.
+    state.ledger.set(op, { state: 'succeeded', release: 'rel_built_not_head' });
+    const superseded = await run(a, ['preview', 'update', '--json']);
+    assert.equal(superseded.status, 1);
+    assert.equal(superseded.json.error, 'PREVIEW_OPERATION_SUPERSEDED');
+    assert.equal(superseded.json.current_preview_id, 'rel_other_agent');
+    assert.equal(deploys().length, count, 'still nothing sent');
+    assert.equal(records()[0].pending, null, 'settled by the receipt');
+    assert.equal(records()[0].preview_id, started.json.preview_id, 'and still not adopted');
+    assert.equal(readFileSync(join(a, 'index.html'), 'utf8'), '<main>even newer</main>');
+  });
+});
+
+test('concurrent commands in one directory are serialized: one proceeds, the other is refused without side effects', async () => {
+  await withPlatform(async ({ state, run, checkout, records }) => {
+    const a = checkout('race');
+    state.deployDelayMs = 700;
+    const [one, two] = await Promise.all([
+      run(a, ['preview', 'start', '--json']),
+      run(a, ['preview', 'start', '--json']),
+    ]);
+    const outcomes = [one, two].map((r) => r.json?.error ?? (r.status === 0 ? 'ok' : r.stdout + r.stderr)).sort();
+    assert.deepEqual(outcomes, ['PREVIEW_BUSY', 'ok']);
+    assert.equal(state.sessions.size, 1, 'exactly one preview was created');
+    const winner = [one, two].find((r) => r.status === 0).json.preview_session_id;
+    assert.equal(records().length, 1);
+    assert.equal(records()[0].preview_session_id, winner, 'the record names the preview that was created');
+
+    writeFileSync(join(a, 'index.html'), '<main>race update</main>');
+    const [u1, u2] = await Promise.all([
+      run(a, ['preview', 'update', '--json']),
+      run(a, ['preview', 'update', '--json']),
+    ]);
+    const updates = [u1, u2].map((r) => r.json?.error ?? (r.status === 0 ? 'ok' : r.stdout + r.stderr)).sort();
+    assert.deepEqual(updates, ['PREVIEW_BUSY', 'ok']);
+    const applied = [u1, u2].find((r) => r.status === 0).json.preview_id;
+    assert.equal(records()[0].preview_id, applied, 'the record holds the applied version');
+    assert.equal(records()[0].pending, null, 'no pending operation was lost or left behind');
+  });
+});
+
+test('a lock left by a crashed command is recovered; a live one is respected', async () => {
+  await withPlatform(async ({ run, checkout, previewsRoot, records }) => {
+    const a = checkout('crash');
+    const first = await run(a, ['preview', 'start', '--json']);
+    assert.equal(first.status, 0, first.stdout + first.stderr);
+    const lock = readdirSync(previewsRoot).find((f) => f.endsWith('.json') && !f.endsWith('.pending-request.json')).replace(/\.json$/, '.lock');
+    const dead = spawn(process.execPath, ['-e', '']);
+    await new Promise((resolve) => dead.on('close', resolve));
+    writeFileSync(join(previewsRoot, lock), JSON.stringify({ token: 'crashed', pid: dead.pid, host: hostname(), started_at: new Date().toISOString() }));
+    const recovered = await run(a, ['preview', 'status', '--json']);
+    assert.equal(recovered.status, 0, recovered.stdout + recovered.stderr);
+    assert.equal(existsSync(join(previewsRoot, lock)), false, 'the stale lock was taken over and released');
+
+    writeFileSync(join(previewsRoot, lock), JSON.stringify({ token: 'live', pid: process.pid, host: hostname(), started_at: new Date().toISOString() }));
+    const busy = await run(a, ['preview', 'update', '--json']);
+    assert.equal(busy.json.error, 'PREVIEW_BUSY');
+    assert.equal(JSON.parse(readFileSync(join(previewsRoot, lock), 'utf8')).token, 'live', 'a live lock is never taken');
+    assert.equal(records()[0].pending, null);
   });
 });
 

@@ -13,11 +13,16 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
 import { error } from './output.js';
 
-const CONFIG_DIR = join(homedir(), '.somewhere');
+/** Every CLI state file lives here: `SOMEWHERE_CONFIG_DIR` when set, otherwise
+ * ~/.somewhere. The override is how tests, CI, and several isolated agent
+ * identities run without repurposing HOME. */
+const CONFIG_DIR = process.env.SOMEWHERE_CONFIG_DIR?.trim()
+  ? resolve(process.env.SOMEWHERE_CONFIG_DIR.trim())
+  : join(homedir(), '.somewhere');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 const CLAUDE_CONFIG_PATH = join(homedir(), '.claude.json');
 const PROJECT_FILE = '.somewhere.json';

@@ -134,8 +134,8 @@ export function promotionConflictRecovery(projectRef: string | null): string[] {
   ];
 }
 
-function untrackAfterPromote(projectIds: Array<string | undefined>, draftId: string): void {
-  untrackPromotedPreview(
+async function untrackAfterPromote(projectIds: Array<string | undefined>, draftId: string): Promise<void> {
+  await untrackPromotedPreview(
     process.cwd(),
     projectIds.filter((id): id is string => typeof id === 'string' && id.length > 0),
     draftId,
@@ -233,7 +233,7 @@ export function registerPromote(program: Command) {
           );
         }
         // A promoted preview is finished; this directory stops working on it.
-        untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
+        await untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
         if (opts.json) {
           printJson(r);
           return;
@@ -286,7 +286,7 @@ export function registerPromote(program: Command) {
               verdict.activeReleaseId,
             );
           }
-          if (described.succeeded) untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
+          if (described.succeeded) await untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
           if (opts.json) {
             if (described.succeeded) {
               printJson({

@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import type { ApiClient } from './client.js';
+import { cliConfigDir } from './config.js';
 
 export interface ProjectNotice {
   id: string;
@@ -66,7 +66,7 @@ export async function showProjectNotices(
 ): Promise<ProjectNotice[]> {
   const now = options.now ?? Date.now();
   const day = localDay(now);
-  const statePath = options.statePath ?? join(homedir(), '.somewhere', 'project-notices.json');
+  const statePath = options.statePath ?? join(cliConfigDir(), 'project-notices.json');
   const write = options.write ?? ((line: string) => process.stderr.write(`${line}\n`));
 
   try {
