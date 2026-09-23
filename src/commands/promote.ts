@@ -26,7 +26,8 @@ import {
   formatPublishSurface,
   type PublishSurfaceCounts,
 } from '../lib/surface-counts.js';
-import { promotedDataNotes } from '../lib/promote-handoff.js';
+import { promotedDataNotes, shellArgument } from '../lib/promote-handoff.js';
+import { untrackPromotedPreview } from './preview-lifecycle.js';
 
 /**
  * Read what production is serving right now.
@@ -115,6 +116,30 @@ export function promoteDataNotesFromResponse(
   result: Pick<PromoteResult, 'data_notice' | 'data_note'>,
 ): string[] {
   return promotedDataNotes(result.data_notice ?? result.data_note);
+}
+
+/**
+ * What to do when production moved after the preview started. Promotion never
+ * rebases or merges: the reviewed preview stays exactly as it was, and the
+ * way forward is a new preview built from current production plus the change.
+ */
+export function promotionConflictRecovery(projectRef: string | null): string[] {
+  const project = projectRef ? ` --project ${shellArgument(projectRef)}` : '';
+  return [
+    'Bring production\'s current source into your working copy, for example `somewhere pull'
+      + `${projectRef ? ` ${shellArgument(projectRef)}` : ''} --out <empty-directory>\` and merge it with your changes.`,
+    `End this preview: \`somewhere preview close${project}\`.`,
+    `Preview the merged source: \`somewhere preview start${project}\`, review it, then promote that new pair.`,
+    'Data is never merged or copied by promotion; production data stays as it is.',
+  ];
+}
+
+async function untrackAfterPromote(projectIds: Array<string | undefined>, draftId: string): Promise<void> {
+  await untrackPromotedPreview(
+    process.cwd(),
+    projectIds.filter((id): id is string => typeof id === 'string' && id.length > 0),
+    draftId,
+  );
 }
 
 export function registerPromote(program: Command) {
@@ -207,6 +232,8 @@ export function registerPromote(program: Command) {
             r.active_release_id ?? r.release_id,
           );
         }
+        // A promoted preview is finished; this directory stops working on it.
+        await untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
         if (opts.json) {
           printJson(r);
           return;
@@ -259,6 +286,7 @@ export function registerPromote(program: Command) {
               verdict.activeReleaseId,
             );
           }
+          if (described.succeeded) await untrackAfterPromote([projectId, linkedProjectEntry?.config.project_id], draftId);
           if (opts.json) {
             if (described.succeeded) {
               printJson({
@@ -309,15 +337,24 @@ export function registerPromote(program: Command) {
           expectedUnchanged: pointerBefore.known ? pointerBefore.releaseId : null,
           after: pointerAfter,
         });
+        const conflict = err instanceof CliApiError && err.code === 'PROMOTION_CONFLICT';
+        const recovery = conflict ? promotionConflictRecovery(opts.project ?? null) : null;
         if (opts.json) {
           if (err instanceof CliApiError) {
-            printJsonError(err.code, message);
+            printJsonError(err.code, message, {
+              ...(err.data ? { data: err.data } : {}),
+              ...(recovery ? { local_files_changed: false, recovery } : {}),
+            });
           } else {
             printJsonError('ERROR', message);
           }
           process.exit(1);
         }
         error(message);
+        if (recovery) {
+          info('Your preview and your local files are untouched. To ship these changes:');
+          recovery.forEach((line, index) => info(`  ${index + 1}. ${line}`));
+        }
         if (contradicted) {
           warn(
             'Production HAS changed since this promote was first attempted — an earlier attempt landed. ' +
