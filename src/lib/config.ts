@@ -13,11 +13,16 @@ import {
 } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, resolve } from 'node:path';
 import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
 import { error } from './output.js';
 
-const CONFIG_DIR = join(homedir(), '.somewhere');
+// SOMEWHERE_CONFIG_DIR points the CLI at a separate config root (login,
+// temporary session, device id, caches) without changing HOME, so a test or
+// second identity never touches the developer's own ~/.somewhere.
+const CONFIG_DIR = process.env.SOMEWHERE_CONFIG_DIR?.trim()
+  ? resolve(process.env.SOMEWHERE_CONFIG_DIR.trim())
+  : join(homedir(), '.somewhere');
 const CONFIG_PATH = join(CONFIG_DIR, 'config.json');
 const CLAUDE_CONFIG_PATH = join(homedir(), '.claude.json');
 const PROJECT_FILE = '.somewhere.json';
