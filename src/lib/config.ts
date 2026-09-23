@@ -32,6 +32,12 @@ export function cliConfigDir(): string {
   return CONFIG_DIR;
 }
 
+/** The login file path, for messages: `~/.somewhere/config.json` by default,
+ *  the real path when SOMEWHERE_CONFIG_DIR is set. */
+export function cliConfigPathForDisplay(): string {
+  return process.env.SOMEWHERE_CONFIG_DIR?.trim() ? CONFIG_PATH : '~/.somewhere/config.json';
+}
+
 function ensureDir() {
   if (!existsSync(CONFIG_DIR)) mkdirSync(CONFIG_DIR, { recursive: true, mode: 0o700 });
   // mkdir/write modes are creation-only. Tighten an existing directory before
@@ -260,6 +266,15 @@ export function saveProjectDeployState(
  *  the file. Never reintroduce the http+headers shape (tsk_104fe2d0). */
 const SOMEWHERE_STDIO_ENTRY = { command: 'somewhere', args: ['mcp'] } as const;
 
+/** The entry for this invocation. When SOMEWHERE_CONFIG_DIR is set, the host
+ *  must launch the bridge with the same root, or the bridge would read the
+ *  default ~/.somewhere login instead of the one this CLI is using. */
+export function somewhereStdioEntry(): { command: string; args: string[]; env?: Record<string, string> } {
+  return process.env.SOMEWHERE_CONFIG_DIR?.trim()
+    ? { ...SOMEWHERE_STDIO_ENTRY, args: [...SOMEWHERE_STDIO_ENTRY.args], env: { SOMEWHERE_CONFIG_DIR: CONFIG_DIR } }
+    : { ...SOMEWHERE_STDIO_ENTRY, args: [...SOMEWHERE_STDIO_ENTRY.args] };
+}
+
 /** Project-local `.mcp.json` (read by Claude Code in the project dir). Uses the
  *  stdio bridge, not a baked token — see SOMEWHERE_STDIO_ENTRY. */
 export function saveMcpConfig(dir: string): void {
@@ -273,7 +288,7 @@ export function saveMcpConfig(dir: string): void {
     }
   }
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  servers.somewhere = { ...SOMEWHERE_STDIO_ENTRY };
+  servers.somewhere = somewhereStdioEntry();
   config.mcpServers = servers;
   writeFileSync(path, JSON.stringify(config, null, 2) + '\n');
 }
@@ -291,7 +306,7 @@ export function saveGlobalMcpConfig(): void {
   }
 
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  servers.somewhere = { ...SOMEWHERE_STDIO_ENTRY };
+  servers.somewhere = somewhereStdioEntry();
   config.mcpServers = servers;
 
   writeFileSync(CLAUDE_CONFIG_PATH, JSON.stringify(config, null, 2) + '\n');
@@ -325,7 +340,7 @@ export function saveCursorMcpConfig(): void {
   }
 
   const servers = (config.mcpServers ?? {}) as Record<string, unknown>;
-  servers.somewhere = { command: 'somewhere', args: ['mcp'] };
+  servers.somewhere = somewhereStdioEntry();
   config.mcpServers = servers;
 
   if (!existsSync(CURSOR_DIR)) mkdirSync(CURSOR_DIR, { recursive: true });
