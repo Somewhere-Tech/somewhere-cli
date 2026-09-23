@@ -1,5 +1,6 @@
 import { Command } from 'commander';
-import { resolve } from 'node:path';
+import { existsSync } from 'node:fs';
+import { join, resolve } from 'node:path';
 import ora from '../lib/spinner.js';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError, type BuildErrorDetail } from '../lib/build-errors.js';
@@ -7,7 +8,9 @@ import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes, type CollectedFiles } from '../lib/files.js';
 import { shellQuote } from '../lib/next-actions.js';
 import { printExcludedFiles } from './deploy.js';
-import { bold, dim, error, green, info, red, success, warn, yellow } from '../lib/output.js';
+import { MISSING_TSCONFIG_GUIDANCE } from './typecheck.js';
+import { ensureDeclaredTypePackages, runTypecheck, type TypecheckResult } from '../lib/typecheck.js';
+import { bold, dim, error, green, info, printJson, red, success, warn, yellow } from '../lib/output.js';
 
 /** A single diagnostic from the server-side dry compile. Same file:line shape
  *  the /deploy BUILD_ERROR payload uses (so it renders through the same code
@@ -164,6 +167,123 @@ export function formatCompileOnlySuccess(totalFiles: number, totalBytes: number,
   ];
 }
 
+/** One step of the projectless preflight. `skipped` is never a pass. */
+export interface LocalCheckStep {
+  name: 'source' | 'typecheck' | 'platform_compile';
+  status: 'passed' | 'failed' | 'skipped';
+  reason?: string;
+  errors?: Array<{ file: string; line: number; column: number; code: string; message: string }>;
+  files?: number;
+  bytes?: number;
+  not_uploaded?: Array<{ path: string; reason: string }>;
+  not_published?: Array<{ path: string; reason: string }>;
+}
+
+/** The projectless verdict. `complete` is false whenever any step was
+ *  skipped, so a green local run can never read as a full deploy check. */
+export interface LocalPreflightResult {
+  ok: boolean;
+  complete: boolean;
+  verdict: 'failed' | 'partial' | 'passed';
+  mode: 'local';
+  checks: LocalCheckStep[];
+  next: string;
+}
+
+export const PLATFORM_COMPILE_SKIPPED_REASON =
+  'No project yet, so the platform compile did not run. Your first `somewhere deploy` ' +
+  '(or `somewhere deploy --temporary` without an account) runs it and fails with file:line ' +
+  'errors on a compile problem. After that deploy, `somewhere deploy-check` runs the full check.';
+
+export const RUN_NEEDS_PROJECT_MESSAGE =
+  '--run invokes a handler on the platform, which needs a project. Deploy first with ' +
+  '`somewhere deploy` (or `somewhere deploy --temporary` without an account), then rerun ' +
+  '`somewhere deploy-check --run <path>`. Without --run, deploy-check runs local checks before the first deploy.';
+
+/** Combine projectless steps into one verdict. A skipped step makes the
+ *  result partial, never passed. */
+export function localPreflightVerdict(checks: LocalCheckStep[]): LocalPreflightResult {
+  const failed = checks.some((c) => c.status === 'failed');
+  const complete = checks.every((c) => c.status !== 'skipped');
+  const verdict = failed ? 'failed' : complete ? 'passed' : 'partial';
+  return {
+    ok: !failed,
+    complete,
+    verdict,
+    mode: 'local',
+    checks,
+    next: failed
+      ? 'Fix the failed checks, then rerun `somewhere deploy-check`.'
+      : 'Run `somewhere deploy` (or `somewhere deploy --temporary` without an account); it runs the platform compile.',
+  };
+}
+
+/** Projectless preflight: only checks that need no project, account, or
+ *  network. The platform compile is reported as skipped, not passed. */
+export async function runLocalPreflight(
+  targetDir: string,
+  collected: CollectedFiles,
+  typecheck: (dir: string) => Promise<TypecheckResult> = async (dir) => {
+    ensureDeclaredTypePackages(dir);
+    return runTypecheck(dir, { installTypePackages: false });
+  },
+): Promise<LocalPreflightResult> {
+  const files =
+    Object.keys(collected.files).length +
+    Object.keys(collected.functions).length +
+    Object.keys(collected.binaryFiles).length;
+  const source: LocalCheckStep = files === 0
+    ? { name: 'source', status: 'failed', reason: 'No deployable files found in this directory.', files: 0, bytes: 0 }
+    : { name: 'source', status: 'passed', files, bytes: sourceBytes(collected) };
+  if (collected.skipped.length) source.not_uploaded = collected.skipped;
+  if (collected.excluded.length) source.not_published = collected.excluded;
+
+  let typecheckStep: LocalCheckStep;
+  if (!existsSync(join(targetDir, 'tsconfig.json'))) {
+    typecheckStep = { name: 'typecheck', status: 'skipped', reason: MISSING_TSCONFIG_GUIDANCE };
+  } else {
+    const result = await typecheck(targetDir);
+    if (result.ok) {
+      typecheckStep = { name: 'typecheck', status: 'passed' };
+    } else {
+      typecheckStep = {
+        name: 'typecheck',
+        status: 'failed',
+        reason: result.spawnError
+          ? `Could not run the typechecker: ${result.spawnError}`
+          : result.errors.length === 0
+            ? (result.raw.trim() || 'Typecheck failed.')
+            : `${result.errors.length} type error${result.errors.length === 1 ? '' : 's'}.`,
+        errors: result.errors,
+      };
+    }
+  }
+
+  return localPreflightVerdict([
+    source,
+    typecheckStep,
+    { name: 'platform_compile', status: 'skipped', reason: PLATFORM_COMPILE_SKIPPED_REASON },
+  ]);
+}
+
+function reportLocalPreflight(result: LocalPreflightResult): void {
+  const mark = { passed: green('passed'), failed: red('failed'), skipped: yellow('skipped') };
+  const label = { source: 'Source intake', typecheck: 'TypeScript', platform_compile: 'Platform compile' };
+  for (const step of result.checks) {
+    const detail = step.name === 'source' && step.status === 'passed'
+      ? dim(` (${step.files} files, ${formatBytes(step.bytes ?? 0)})`)
+      : '';
+    console.log(`  ${label[step.name]}: ${mark[step.status]}${detail}`);
+    if (step.reason && step.status !== 'passed') info(dim(`    ${step.reason}`));
+    for (const e of step.errors ?? []) console.log(`    ${e.file}:${e.line}:${e.column} ${dim(e.code)} ${e.message}`);
+    for (const s of step.not_uploaded ?? []) warn(`    not uploaded: ${s.path} — ${s.reason}`);
+  }
+  console.log('');
+  if (result.verdict === 'failed') error('Local checks failed.');
+  else warn('Local checks passed. This is a partial check: the platform compile has not run yet.');
+  info(result.next);
+}
+
 export function registerCheck(program: Command) {
   program
     .command('deploy-check [dir]')
@@ -175,7 +295,10 @@ export function registerCheck(program: Command) {
         'handler from the collected function source; static/client files are not checked in that mode. ' +
         'Distinct from the local `somewhere typecheck`: ' +
         '`deploy-check` catches platform-only compile issues such as cross-import resolution, ' +
-        'bundling, and bundled-deploy rejects.',
+        'bundling, and bundled-deploy rejects. ' +
+        'Before the first deploy (no linked project and no --project), it runs local checks only — ' +
+        'source intake and TypeScript when a tsconfig.json exists — and reports the platform compile ' +
+        'as skipped (verdict "partial"), never as passed.',
     )
     .option('--project <ref>', 'Project to check against (defaults to the linked project).')
     .option(
@@ -193,8 +316,22 @@ export function registerCheck(program: Command) {
       if (!projectId) {
         const config = loadProjectConfig(targetDir) ?? loadProjectConfig();
         if (!config) {
-          error('No project linked. Run `somewhere init` or pass --project <ref>.');
-          process.exit(1);
+          // Before the first deploy: no project, and possibly no account.
+          // Run only checks that need neither; never call the platform.
+          if (opts.run !== undefined) {
+            if (opts.json) printJson({ ok: false, error: 'NO_PROJECT', message: RUN_NEEDS_PROJECT_MESSAGE });
+            else error(RUN_NEEDS_PROJECT_MESSAGE);
+            process.exit(1);
+          }
+          const collectedLocal = collectFiles(targetDir);
+          if (collectedLocal.excluded.length && !opts.json) {
+            printExcludedFiles(collectedLocal.excluded, targetDir);
+          }
+          if (!opts.json) info('No project linked — running local checks only (no account or deploy needed).');
+          const local = await runLocalPreflight(targetDir, collectedLocal);
+          if (opts.json) printJson(local);
+          else reportLocalPreflight(local);
+          process.exit(local.ok ? 0 : 1);
         }
         projectId = config.project_id;
       }
