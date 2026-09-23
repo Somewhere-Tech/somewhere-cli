@@ -279,17 +279,18 @@ function previewPollMs(): number {
   return Number.isFinite(parsed) && parsed > 0 ? Math.floor(parsed) : 2_000;
 }
 
-export function registerPreview(program: Command) {
-  program
+export function registerPreview(program: Command): Command {
+  return program
     .command('preview')
     .description(
       'Run your app on the platform instead of your machine. Every save goes to a private URL, '
         + 'reachable only by you until you share the link. The build is the one production would get; '
-        + 'the database is a separate copy of your schema, so nothing you try here can touch production '
-        + 'rows. Nothing your users see changes — production keeps serving what you last promoted, until '
-        + 'you run `somewhere promote`. Reach for this when you want the real hosted app in front of you, '
-        + 'or when your agent reaches the platform over MCP and cannot serve on localhost. '
-        + 'Available on the Pro and Scale plans; `somewhere dev` provides frontend hot reload against the deployed backend.',
+        + 'the database starts as a separate copy of your production data, so nothing you try here can '
+        + 'change production rows. Nothing your users see changes — production keeps serving what you last '
+        + 'promoted, until you run `somewhere promote`. Bare `somewhere preview` watches this directory and '
+        + 'updates on every save; `start`, `update`, `status`, `list`, and `close` run one step and exit, for '
+        + 'agents and scripts — several checkouts can each work on their own preview. Available on plans that '
+        + 'include hosted previews; `somewhere dev` provides frontend hot reload against the deployed backend.',
     )
     .option('--project <id>', 'Override project ID')
     .option(
@@ -323,8 +324,8 @@ export function registerDev(program: Command) {
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
-  '`somewhere preview` is available on the Pro and Scale plans. '
-  + 'This account is on a plan that does not include it.';
+  '`somewhere preview` is not included in this account\'s plan. '
+  + 'Plans that include hosted previews are listed at https://somewhere.tech/pricing.';
 
 /**
  * Does this account have private previews?

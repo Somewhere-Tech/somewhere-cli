@@ -208,7 +208,7 @@ test('preview --json preserves the typed plan refusal', async () => {
     expected: {
       ok: false,
       error: 'CLOUD_DEV_NOT_ENABLED',
-      message: '`somewhere preview` is available on the Pro and Scale plans. This account is on a plan that does not include it.',
+      message: "`somewhere preview` is not included in this account's plan. Plans that include hosted previews are listed at https://somewhere.tech/pricing.",
     },
   });
 });
