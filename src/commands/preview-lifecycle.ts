@@ -25,7 +25,9 @@ import {
   CloudDevUnavailableError,
   PublishConsentRequiredError,
   callDraftCandidate,
+  cloudDevUnavailableMessage,
   readBaseReleaseState,
+  readPreviewPlanNames,
   readPublishConsent,
   resolveBaseRelease,
 } from './dev.js';
@@ -858,8 +860,9 @@ function run(handler: (opts: LifecycleOptions) => Promise<void>) {
         if (json) printJsonError(err.code, err.message, err.extra);
         else error(`${err.code}: ${err.message}`);
       } else if (err instanceof CloudDevUnavailableError) {
-        if (json) printJsonError(err.code, err.message);
-        else { error(err.message); info('Nothing was created or changed.'); }
+        const message = cloudDevUnavailableMessage(await readPreviewPlanNames(new ApiClient(getToken())));
+        if (json) printJsonError(err.code, message);
+        else { error(message); info('Nothing was created or changed.'); }
       } else if (err instanceof PublishConsentRequiredError) {
         const message = err.why === 'declined'
           ? 'Publishing the first production version was declined. Nothing was created or changed.'

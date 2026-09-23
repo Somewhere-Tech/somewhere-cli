@@ -289,8 +289,9 @@ export function registerPreview(program: Command): Command {
         + 'change production rows. Nothing your users see changes — production keeps serving what you last '
         + 'promoted, until you run `somewhere promote`. Bare `somewhere preview` watches this directory and '
         + 'updates on every save; `start`, `update`, `status`, `list`, and `close` run one step and exit, for '
-        + 'agents and scripts — several checkouts can each work on their own preview. Available on plans that '
-        + 'include hosted previews; `somewhere dev` provides frontend hot reload against the deployed backend.',
+        + 'agents and scripts — several checkouts can each work on their own preview. Included on the Builder, '
+        + 'Pro and Scale plans (https://somewhere.tech/pricing); `somewhere dev` provides frontend hot reload '
+        + 'against the deployed backend.',
     )
     .option('--project <id>', 'Override project ID')
     .option(
@@ -361,6 +362,36 @@ export async function readCloudDevAllowed(
   } catch {
     return null;
   }
+}
+
+/**
+ * The plans that include previews, read from the public plan table rather than
+ * typed here, so a plan change never leaves this refusal naming the wrong ones.
+ * Null when the table cannot be read; the refusal then stays plan-neutral.
+ */
+export async function readPreviewPlanNames(client: Pick<ApiClient, 'call'>): Promise<string[] | null> {
+  try {
+    const pricing = await client.call<Record<string, unknown>>('GET', '/pricing');
+    const tiers: unknown[] = isRecord(pricing) && Array.isArray(pricing.tiers) ? pricing.tiers : [];
+    const names = tiers
+      .filter(isRecord)
+      .filter((tier) => isRecord(tier.limits) && tier.limits.preview_allowed === true)
+      .map((tier) => (typeof tier.name === 'string' ? tier.name : null))
+      .filter((name): name is string => name !== null && name.length > 0);
+    return names.length ? names : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The customer-facing refusal, naming the plans when the table was readable. */
+export function cloudDevUnavailableMessage(planNames: string[] | null): string {
+  if (!planNames?.length) return CLOUD_DEV_UNAVAILABLE_MESSAGE;
+  const list = planNames.length === 1
+    ? planNames[0]
+    : `${planNames.slice(0, -1).join(', ')} and ${planNames[planNames.length - 1]}`;
+  return '`somewhere preview` is not included in this account\'s plan. '
+    + `It is included on the ${list} plan${planNames.length === 1 ? '' : 's'}: https://somewhere.tech/pricing.`;
 }
 
 export class CloudDevUnavailableError extends Error {
@@ -614,11 +645,12 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
     // is exactly as you left it. Nothing below may claim anything about whether
     // this project is published — that is precisely the read that failed.
     if (err instanceof CloudDevUnavailableError) {
+      const message = cloudDevUnavailableMessage(await readPreviewPlanNames(client));
       if (opts.json) {
-        printJsonError(err.code, err.message);
+        printJsonError(err.code, message);
         process.exit(1);
       }
-      error(err.message);
+      error(message);
       info('Nothing was created or changed — whatever is live stays live.');
       info('`somewhere deploy` publishes to production on any plan, and `somewhere dev` runs the same app on your machine.');
       process.exit(1);

@@ -358,3 +358,27 @@ test('no refusal claims this project has not been published', async () => {
   assert.doesNotMatch(source, /this project has not been published/);
   assert.match(source, /Nothing was created or changed — whatever is live stays live\./);
 });
+
+test('the preview refusal names the plans the public plan table marks as including previews', async () => {
+  const { readPreviewPlanNames, cloudDevUnavailableMessage, CLOUD_DEV_UNAVAILABLE_MESSAGE } = await import('../dist/commands/dev.js');
+  // The shape GET /v1/pricing serves: tiers[].limits.preview_allowed.
+  const pricing = { tiers: [
+    { id: 'free', name: 'Free', limits: { preview_allowed: false } },
+    { id: 'builder', name: 'Builder', limits: { preview_allowed: true } },
+    { id: 'pro', name: 'Pro', limits: { preview_allowed: true } },
+    { id: 'scale', name: 'Scale', limits: { preview_allowed: true } },
+    { id: 'enterprise', name: 'Enterprise', limits: {} },
+  ] };
+  const names = await readPreviewPlanNames({ async call(method, path) {
+    assert.equal(method, 'GET');
+    assert.equal(path, '/pricing');
+    return pricing;
+  } });
+  assert.deepEqual(names, ['Builder', 'Pro', 'Scale']);
+  assert.match(cloudDevUnavailableMessage(names), /included on the Builder, Pro and Scale plans/);
+
+  // Unreadable or empty table: plan-neutral, never a guessed list.
+  assert.equal(await readPreviewPlanNames({ async call() { throw new Error('offline'); } }), null);
+  assert.equal(await readPreviewPlanNames({ async call() { return { tiers: [] }; } }), null);
+  assert.equal(cloudDevUnavailableMessage(null), CLOUD_DEV_UNAVAILABLE_MESSAGE);
+});

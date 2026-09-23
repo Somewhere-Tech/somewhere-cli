@@ -20,11 +20,12 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
 const PROJECT = '0f7c1c9e-1111-4111-8111-000000000001';
 const UNPUBLISHED = '0f7c1c9e-1111-4111-8111-000000000002';
+const FREE = '0f7c1c9e-1111-4111-8111-000000000003';
 
 function platform() {
   const state = {
     active: 'rel_live_1',
-    published: { [PROJECT]: true, [UNPUBLISHED]: false },
+    published: { [PROJECT]: true, [UNPUBLISHED]: false, [FREE]: true },
     sessions: new Map(),
     releaseSeq: 0,
     requests: [],
@@ -135,7 +136,7 @@ function platform() {
         const ref = decodeURIComponent(projectMatch[1]);
         const id = ref === 'app' ? PROJECT : ref;
         if (!(id in state.published)) return fail(res, 404, 'PROJECT_NOT_FOUND', 'Project not found.');
-        return ok(res, { id, subdomain: 'app', cloud_dev_allowed: true });
+        return ok(res, { id, subdomain: 'app', cloud_dev_allowed: id !== FREE });
       }
       if (req.method === 'GET' && path === '/deploy/status') {
         const id = url.searchParams.get('project_id');
@@ -193,6 +194,13 @@ function platform() {
         s.status = 'promoted';
         state.active = `rel_live_from_${s.candidate}`;
         return ok(res, { version: 2, release_id: state.active, active_release_id: state.active, preview_session_id: s.id, preview_id: s.candidate, files_promoted: 1, has_functions: false });
+      }
+      if (req.method === 'GET' && path === '/pricing') {
+        return ok(res, { tiers: [
+          { id: 'free', name: 'Free', limits: { preview_allowed: false } },
+          { id: 'builder', name: 'Builder', limits: { preview_allowed: true } },
+          { id: 'pro', name: 'Pro', limits: { preview_allowed: true } },
+        ] });
       }
       if (req.method === 'GET' && /^\/projects\/[^/]+\/urls$/.test(path)) return ok(res, { prod_fallback: 'https://app.example.test' });
       if (req.method === 'GET' && /^\/projects\/[^/]+\/files$/.test(path)) return ok(res, { counts: { static: 1, binary: 0, functions: 0 } });
@@ -629,5 +637,17 @@ test('a start whose first snapshot was refused is finished on the same preview, 
     assert.equal(state.sessions.get(emptySession).status, 'closed', 'the empty, unusable preview was closed exactly');
     assert.equal(state.sessions.get(firstSession).status, 'open', 'no other preview was touched');
     assert.match(replaced.json.warnings.join(' '), /never got a version/);
+  });
+});
+
+test('on a plan without previews, start refuses before anything is created and names the plans from the plan table', async () => {
+  await withPlatform(async ({ run, checkout, deploys, records }) => {
+    const free = checkout('free-plan', FREE);
+    const refused = await run(free, ['preview', 'start', '--json']);
+    assert.equal(refused.status, 1);
+    assert.equal(refused.json.error, 'CLOUD_DEV_NOT_ENABLED');
+    assert.match(refused.json.message, /included on the Builder and Pro plans/, 'names exactly what the served table says');
+    assert.equal(deploys().length, 0);
+    assert.equal(records().length, 0);
   });
 });
