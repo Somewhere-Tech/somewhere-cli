@@ -145,7 +145,7 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   assert.match(first.stdout, /Live URL:/);
   assert.match(first.stdout, /Claim URL:/);
   assert.match(first.stdout, /Expires at:/);
-  assert.match(first.stdout, /approve CLI continuation.*next command will reconnect/i);
+  assert.match(first.stdout, /"Save project and connect agent".*signs in on its next command/i);
   assert.ok(first.stdout.includes('https://somewhere.tech/claim?token=swtc_e2e'), 'claim URL present in stdout');
 
   const configPath = join(HOME, '.somewhere', 'config.json');
@@ -175,7 +175,7 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   assert.match(second.stdout, /Live URL:/);
   assert.match(second.stdout, /Expires at: .* \(\d+h \d+m remaining\)/);
   assert.match(second.stdout, /Claim URL:/);
-  assert.match(second.stdout, /approve CLI continuation.*next command will reconnect/i);
+  assert.match(second.stdout, /"Save project and connect agent".*signs in on its next command/i);
 
   assert.equal(tempCreateCalls, 1, 'still exactly ONE temp-create total — silent reuse');
   assert.equal(projectsCalls, 1, 'still exactly ONE project create total — .somewhere.json was reused');

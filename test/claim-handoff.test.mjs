@@ -35,6 +35,10 @@ const server = createServer(async (req, res) => {
     }
     return res.end(JSON.stringify({ ok: true, data: delivered }));
   }
+  if (req.url === '/v1/auth/temp-handoff/register') {
+    res.statusCode = 201;
+    return res.end(JSON.stringify({ ok: true, data: { handoff_id: 'cch_registered', expires_at: '2026-09-18T00:00:00.000Z' } }));
+  }
   if (req.url === '/v1/auth/temp-handoff/ack') {
     ackStarted?.();
     if (ackGate) await ackGate;
@@ -49,21 +53,25 @@ const server = createServer(async (req, res) => {
 });
 await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
 process.env.SOMEWHERE_API_URL = `http://127.0.0.1:${server.address().port}/v1`;
-const { recoverClaimHandoff } = await import('../dist/lib/claim-handoff.js?' + Date.now());
+const { recoverClaimHandoff, ensureClaimHandoff } = await import('../dist/lib/claim-handoff.js?' + Date.now());
 
 function writeConfig(config) { writeFileSync(configPath, JSON.stringify(config)); }
 function readConfig() { return JSON.parse(readFileSync(configPath, 'utf8')); }
-function encrypted(verifier, handoffId, projectId) {
+function encrypted(verifier, handoffId, projectId, { account = false, aadAccount = account } = {}) {
   const payload = {
     token: 'smt_project_bound', refresh_token: 'smtr_project_bound', expires_at: '2026-09-18T00:00:00.000Z',
-    email: 'owner@example.com', project_id: projectId, scope: { projects: [projectId] }, session_id: 'key-1',
+    email: 'owner@example.com', project_id: projectId, scope: account ? null : { projects: [projectId] },
+    ...(account ? { approved_scope: 'account' } : {}), session_id: 'key-1',
   };
   const key = createHash('sha256').update(`claim-cli-handoff:v1:${verifier}`).digest();
   const iv = randomBytes(12);
   const cipher = createCipheriv('aes-256-gcm', key, iv);
-  cipher.setAAD(Buffer.from(`${handoffId}:${projectId}`));
+  cipher.setAAD(Buffer.from(`${handoffId}:${projectId}${aadAccount ? ':account' : ''}`));
   const ciphertext = Buffer.concat([cipher.update(JSON.stringify(payload)), cipher.final(), cipher.getAuthTag()]);
-  return { status: 'ready', project_id: projectId, ciphertext: ciphertext.toString('base64'), iv: iv.toString('base64') };
+  return {
+    status: 'ready', project_id: projectId, ...(account ? { approved_scope: 'account' } : {}),
+    ciphertext: ciphertext.toString('base64'), iv: iv.toString('base64'),
+  };
 }
 
 const projectId = '11111111-1111-4111-8111-111111111111';
@@ -181,6 +189,35 @@ test('fresh exchange acknowledgement cannot overwrite a login made after install
   ]);
   ackGate = undefined;
   ackStarted = undefined;
+});
+
+test('registration declares the all-projects capability; project-only stays the server default', async () => {
+  calls = [];
+  writeConfig({ token: 'smt_temp_register', user: { email: 'temporary', username: '' }, temporary: true });
+  const state = await ensureClaimHandoff(projectId);
+  assert.equal(state.handoff_id, 'cch_registered');
+  const register = calls.find((call) => call.url === '/v1/auth/temp-handoff/register');
+  assert.deepEqual(register.body.capabilities, ['account_scope']);
+  assert.equal('verifier' in register.body, false, 'only the verifier hash leaves the machine');
+  assert.match(register.body.verifier_hash, /^[a-f0-9]{64}$/);
+});
+
+test('all-projects approval installs and says so', async () => {
+  delivered = encrypted(verifier, handoffId, projectId, { account: true });
+  ackOk = true;
+  writeConfig({ token: 'smt_temp', user: { email: 'temporary', username: '' }, temporary: true, claim_handoff: { project_id: projectId, verifier, handoff_id: handoffId } });
+  const result = await recoverClaimHandoff();
+  assert.equal(result.kind, 'recovered');
+  assert.match(result.message, /all its projects/);
+  delivered = encrypted(verifier, handoffId, projectId);
+});
+
+test('a project grant relabelled as all-projects is refused and nothing is installed', async () => {
+  delivered = { ...encrypted(verifier, handoffId, projectId), approved_scope: 'account' };
+  writeConfig({ token: 'smt_temp_relabel', user: { email: 'temporary', username: '' }, temporary: true, claim_handoff: { project_id: projectId, verifier, handoff_id: handoffId } });
+  await assert.rejects(() => recoverClaimHandoff());
+  assert.equal(readConfig().token, 'smt_temp_relabel');
+  delivered = encrypted(verifier, handoffId, projectId);
 });
 
 test.after(async () => { await new Promise((resolve) => server.close(resolve)); });

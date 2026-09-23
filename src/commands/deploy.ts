@@ -895,7 +895,7 @@ export function registerDeploy(program: Command) {
             besideRealLogin
               ? `Your permanent login is untouched. After claiming, keep this project and run ${teal(`somewhere init --link --project ${projectId}`)} only if this directory has no link. Do not unlink, create a replacement, or redeploy to recover it.`
               : tempSession.handoffReady
-                ? 'If you approve CLI continuation on the claim page, the next command will reconnect this CLI to this project only.'
+                ? 'Tell the owner to choose "Save project and connect agent" on the claim page. This CLI then signs in on its next command, to this project only unless they choose all projects. If they save without connecting, they can connect it later from the same link, or run `somewhere login` here.'
                 : `After claiming, run ${teal('somewhere login')} in this directory. Keep the existing project link; do not unlink or redeploy.`,
           );
         } else {

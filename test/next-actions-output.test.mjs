@@ -261,7 +261,7 @@ test('an anonymous temporary deploy gets the same browser guidance, addressed by
     assert.match(result.stdout, /Live URL:/);
     assert.match(result.stdout, /Claim URL: https:\/\/somewhere\.tech\/claim\?token=swtc_temp_out/);
     assert.match(result.stdout, /Expires at:/);
-    assert.match(result.stdout, /approve CLI continuation.*next command will reconnect/i);
+    assert.match(result.stdout, /"Save project and connect agent".*signs in on its next command/i);
 
     // By URL, not the bare project form: the throwaway project is not always
     // the directory's linked project.
