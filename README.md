@@ -183,8 +183,9 @@ platform.
 
 `somewhere preview` sends every save to a private URL, reachable only by you
 until you share the link. The build is the one production would get. The
-database is a separate copy of your schema with none of your production rows,
-so nothing you try in a preview can touch real data. After each update the
+database starts as a separate copy of your production data, rows included, so
+you test against real-shaped data and nothing you try in a preview can change
+production rows. After each update the
 command prints that URL and the `somewhere promote` command that makes those
 exact bytes live. Reach for it when you want a URL to send someone, or when the
 agent doing the work reaches the platform over MCP and has no local machine to
@@ -200,11 +201,34 @@ or signed in as someone else — gets a 404.
 
 A preview is built against your live version, so a project that has never been
 published has nothing for the first one to build on. On such a project
-`somewhere preview` publishes once — it says so before it does — and every
-preview after that stays private to you and never changes what is live.
+`somewhere preview` asks before publishing once (`--publish-first` gives that
+consent up front in a script), and every preview after that stays private to you
+and never changes what is live.
 
-`somewhere preview` is on the Pro and Scale plans. `somewhere dev` runs the same
-app on your machine on every plan, and deploying is unaffected on every plan.
+`somewhere preview` is included on the Builder, Pro and Scale plans. `somewhere
+dev` runs the same app on your machine on every plan, and deploying is
+unaffected on every plan.
+
+### One step at a time, for agents and scripts
+
+`somewhere preview` keeps running and updates on every save. For an agent or a
+script, each of these does one step and exits (add `--json` for a typed result):
+
+| Command | What it does |
+|---|---|
+| `somewhere preview start` | Opens a new preview from this directory's complete source and prints its ids, end times and a single-use sign-in link. |
+| `somewhere preview update` | Sends the complete source again, replacing exactly the version this checkout last saw. |
+| `somewhere preview status` | Reads the preview in any state: open, promoting, promoted, closed or expired. |
+| `somewhere preview list` | Lists the project's open previews and marks this checkout's. |
+| `somewhere preview close` | Ends exactly this preview. Repeat it to retry unfinished cleanup. |
+
+Each checkout works on its own preview, so several agents can work on one
+project side by side. Stopping a command never closes a preview; it ends when
+you close or promote it, a day after its last update, or a week after it
+started. If another agent changed the same preview, `update` refuses rather than
+overwriting it. A second command in the same checkout while one is running is
+refused with nothing sent. The CLI keeps its state in `~/.somewhere`, or in the
+directory named by `SOMEWHERE_CONFIG_DIR`.
 
 `somewhere dev --cloud` still starts the same loop and points you at the new
 name. `somewhere dev --local` is accepted and does what bare `somewhere dev`

@@ -17,9 +17,10 @@ import { join, resolve } from 'node:path';
 import type { CliConfig, ProjectConfig, ProjectDeployState } from '../types.js';
 import { error } from './output.js';
 
-// SOMEWHERE_CONFIG_DIR points the CLI at a separate config root (login,
-// temporary session, device id, caches) without changing HOME, so a test or
-// second identity never touches the developer's own ~/.somewhere.
+/** Every CLI state file lives here: `SOMEWHERE_CONFIG_DIR` when set, otherwise
+ * ~/.somewhere. The override is how tests, CI, and several isolated agent
+ * identities run without repurposing HOME: HOME is never read for CLI state
+ * when the override is set, and never changed. */
 const CONFIG_DIR = process.env.SOMEWHERE_CONFIG_DIR?.trim()
   ? resolve(process.env.SOMEWHERE_CONFIG_DIR.trim())
   : join(homedir(), '.somewhere');

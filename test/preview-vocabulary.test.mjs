@@ -55,7 +55,8 @@ test('customer-facing CLI copy uses exactly two words: dev and preview', () => {
 
   // The refusal names the command, not the flag, and is customer voice.
   const refusal = dev.slice(dev.indexOf('CLOUD_DEV_UNAVAILABLE_MESSAGE ='), dev.indexOf('CLOUD_DEV_UNAVAILABLE_MESSAGE =') + 300);
-  assert.match(refusal, /`somewhere preview` is available on the Pro and Scale plans/);
+  assert.match(refusal, /`somewhere preview` is not included in this account\\'s plan/);
+  assert.doesNotMatch(refusal, /Pro|Scale|Builder/, 'plan names come from the platform, never typed here');
   assert.doesNotMatch(refusal, /--cloud/);
 });
 

@@ -1,9 +1,9 @@
 import { fetchWithProxy as fetch } from '../../http.js';
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { cliConfigDir } from '../../config.js';
 import { dim, teal } from '../../output.js';
 import type { NoticeProvider } from '../types.js';
-import { cliConfigDir } from '../../config.js';
 
 const PACKAGE = '@somewhere-tech/cli';
 const CACHE_PATH = join(cliConfigDir(), 'update-check.json');
