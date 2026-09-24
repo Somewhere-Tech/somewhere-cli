@@ -92,6 +92,28 @@ async function loadCatalogTool(query: string): Promise<CatalogToolDefinition> {
   return tool;
 }
 
+/** `catalog email` names a category, not a tool. Resolve category names first,
+ *  then the aliases the catalog already publishes; an alias can span groups. */
+export function matchCatalogCategories(
+  catalog: CatalogResponse,
+  query: string,
+): Array<[string, CatalogCategory]> {
+  const name = query.trim().toLowerCase();
+  const entries = Object.entries(catalog.categories);
+  const exact = entries.filter(([category]) => category.toLowerCase() === name);
+  if (exact.length) return exact;
+  return entries.filter(([, category]) =>
+    Array.isArray(category.aliases) && category.aliases.some((alias) => alias.toLowerCase() === name));
+}
+
+function printCatalogCategories(categories: Array<[string, CatalogCategory]>): void {
+  for (const [name, category] of categories) {
+    console.log(`${bold(name)}  ${category.summary}`);
+    console.log(`  ${dim(category.tools.join(', '))}\n`);
+  }
+  console.log(dim('Input schema for one tool: somewhere catalog <tool>'));
+}
+
 function printCatalogTool(tool: CatalogToolDefinition): void {
   console.log(bold(tool.name));
   console.log(tool.description);
@@ -102,12 +124,28 @@ function printCatalogTool(tool: CatalogToolDefinition): void {
 export function registerCatalog(program: Command): void {
   program
     .command('catalog [tool]')
-    .description('Browse the live somewhere.tech platform tool catalog')
+    .description('Browse the live somewhere.tech platform tool catalog; pass a tool for its input schema or a category such as email')
     .option('--json', 'Print the catalog and complete input schemas as JSON')
     .action(async (tool: string | undefined, opts: { json?: boolean }) => {
       try {
         if (tool) {
-          const definition = await loadCatalogTool(tool);
+          let definition: CatalogToolDefinition;
+          try {
+            definition = await loadCatalogTool(tool);
+          } catch (err) {
+            if (!(err instanceof Error) || !err.message.startsWith('UNKNOWN_TOOL:')) throw err;
+            const categories = matchCatalogCategories(
+              parseCatalogResponse(await callPlatformHelpTool('catalog', {})),
+              tool,
+            );
+            if (!categories.length) throw err;
+            if (opts.json) {
+              printJson({ categories: Object.fromEntries(categories) });
+            } else {
+              printCatalogCategories(categories);
+            }
+            return;
+          }
           if (opts.json) printJson(definition);
           else printCatalogTool(definition);
           return;

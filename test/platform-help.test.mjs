@@ -230,7 +230,11 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
         let text = rpc.params.name === 'advisor'
           ? 'Use `sw.db.query` for this.'
           : rpc.params.name === 'docs'
-            ? '# sw.db\n\nDatabase reference.'
+            ? rpc.params.arguments.detail === 'full'
+              ? '[docs] topic=sw.db view=full complete=true shown=27 full=27\n# sw.db\n\nDatabase reference.'
+              : rpc.params.arguments.section
+                ? '[docs] topic=sw.db view=section complete=false shown=9 full=27\n## Where\n'
+                : '# sw.db\n\nDatabase reference.'
             : JSON.stringify(catalog, null, 2);
         if (rpc.params.name === 'catalog' && rpc.params.arguments.load) {
           text = JSON.stringify({ loaded: [rpc.params.arguments.load], count: 1, tools: [cronCreate] }, null, 2);
@@ -301,6 +305,20 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     const docsPayload = JSON.parse(docs.stdout);
     assert.equal(docsPayload.topic, 'sw.db');
     assert.equal(docsPayload.content, '# sw.db\n\nDatabase reference.');
+    assert.equal('complete' in docsPayload, false, 'an old platform gives no status line, so nothing is guessed');
+
+    const docsFull = await run(['docs', 'sw.db', '--full', '--json'], env);
+    assert.equal(docsFull.status, 0, docsFull.stderr);
+    assert.deepEqual(
+      { view: JSON.parse(docsFull.stdout).view, complete: JSON.parse(docsFull.stdout).complete },
+      { view: 'full', complete: true },
+    );
+    const docsSection = await run(['docs', 'sw.db', '--section', 'where'], env);
+    assert.equal(docsSection.status, 0, docsSection.stderr);
+    assert.match(docsSection.stdout, /^\[docs\] topic=sw\.db view=section complete=false/);
+    const docsBoth = await run(['docs', 'sw.db', '--full', '--section', 'where'], env);
+    assert.equal(docsBoth.status, 1);
+    assert.match(docsBoth.stderr, /--full or --section/);
 
     const catalogJson = await run(['catalog', '--json'], env);
     assert.equal(catalogJson.status, 0, catalogJson.stderr);
@@ -322,6 +340,17 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     assert.match(missingTool.stderr, /UNKNOWN_TOOL/);
     assert.match(missingTool.stderr, /Matches: cron_create/);
 
+    // A category name or published alias is not a tool: show that category
+    // instead of UNKNOWN_TOOL, from the same catalog response.
+    const category = await run(['catalog', 'db'], env);
+    assert.equal(category.status, 0, category.stderr);
+    assert.match(category.stdout, /db  Database tools/);
+    assert.match(category.stdout, /db_query, db_migrate/);
+    assert.doesNotMatch(category.stdout, /Platform help/);
+    const alias = await run(['catalog', 'SQL', '--json'], env);
+    assert.equal(alias.status, 0, alias.stderr);
+    assert.deepEqual(JSON.parse(alias.stdout), { categories: { db: catalog.categories.db } });
+
     const catalogHuman = await run(['catalog'], env);
     assert.equal(catalogHuman.status, 0, catalogHuman.stderr);
     assert.match(catalogHuman.stdout, /Platform tool catalog — 5 tools/);
@@ -329,11 +358,18 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
 
     assert.deepEqual(calls.slice(2).map((call) => [call.name, call.arguments]), [
       ['docs', { topic: 'sw.db' }],
+      ['docs', { topic: 'sw.db', detail: 'full' }],
+      ['docs', { topic: 'sw.db', section: 'where' }],
       ['catalog', {}],
       ['catalog', { load: 'all' }],
       ['catalog', { search: 'cron_create' }],
       ['catalog', { load: 'cron' }],
       ['catalog', { search: 'cron_missing' }],
+      ['catalog', {}],
+      ['catalog', { search: 'db' }],
+      ['catalog', {}],
+      ['catalog', { search: 'sql' }],
+      ['catalog', {}],
       ['catalog', {}],
     ]);
     assert.ok(calls.every((call) => call.authorization === 'Bearer smt_platform_help_test'));

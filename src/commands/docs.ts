@@ -55,11 +55,99 @@ const ALIASES: Record<string, string> = {
  * references in the long-form corpus. */
 const PUBLIC_MANIFEST_PATH = '/docs-manifest.json';
 
+export interface PublicDocsSection {
+  id: string;
+  heading: string;
+  start: number;
+  end: number;
+}
+
 export interface PublicDocsPage {
   id: string;
   title: string;
   section: string | null;
   body: string;
+  /** Compact default view, when the platform publishes one. */
+  summary?: string;
+  summary_complete?: boolean;
+  /** Offsets into `body`; each section includes its nested subsections. */
+  sections?: PublicDocsSection[];
+}
+
+export type DocsView = { kind: 'default' } | { kind: 'full' } | { kind: 'section'; id: string };
+
+interface RenderedDocs {
+  content: string;
+  view?: string;
+  complete?: boolean;
+  notice?: string;
+}
+
+function parseSections(value: unknown, bodyLength: number): PublicDocsSection[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const sections = value.filter((entry): entry is PublicDocsSection => {
+    if (!entry || typeof entry !== 'object') return false;
+    const candidate = entry as Record<string, unknown>;
+    return typeof candidate.id === 'string' && typeof candidate.heading === 'string'
+      && Number.isInteger(candidate.start) && Number.isInteger(candidate.end)
+      && (candidate.start as number) >= 0 && (candidate.start as number) < (candidate.end as number)
+      && (candidate.end as number) <= bodyLength;
+  });
+  return sections.map(({ id, heading, start, end }) => ({ id, heading, start, end }));
+}
+
+/** Public-manifest rendering of the docs views. Older manifests carry only
+ *  `body`, so every view falls back to the complete page rather than to less. */
+export function renderPublicDocsView(page: PublicDocsPage, view: DocsView): RenderedDocs {
+  const full = renderPublicPage(page);
+  if (view.kind === 'full') return { content: full, view: 'full', complete: true };
+  if (view.kind === 'default') {
+    return page.summary
+      ? { content: withNewline(page.summary), view: 'summary', complete: page.summary_complete === true }
+      : { content: full, view: 'full', complete: true };
+  }
+  if (!page.sections) {
+    return {
+      content: full,
+      view: 'full',
+      complete: true,
+      notice: `This docs version has no section index; printed all of "${page.id}".`,
+    };
+  }
+  const wanted = view.id.trim().toLowerCase();
+  const match = page.sections.find((section) =>
+    section.id.toLowerCase() === wanted || headingText(section).toLowerCase() === wanted);
+  if (!match) {
+    const index = page.sections.map((section) => `  ${section.id} · ${headingText(section)}`).join('\n');
+    return {
+      content: `No section "${view.id}" in ${page.id}. Sections:\n${index}\n`,
+      view: 'section',
+      complete: false,
+    };
+  }
+  return { content: withNewline(page.body.slice(match.start, match.end)), view: 'section', complete: false };
+}
+
+/** The platform prefixes docs tool responses with
+ *  `[docs] topic=<t> view=<v> complete=<bool> ...`; older platforms do not. */
+export function parseDocsStatusLine(content: string): { view?: string; complete?: boolean } {
+  const first = /^\[docs\][^\n]*/.exec(content)?.[0];
+  if (!first) return {};
+  const view = /\bview=([a-z]+)/.exec(first)?.[1];
+  const complete = /\bcomplete=(true|false)\b/.exec(first)?.[1];
+  return {
+    ...(view ? { view } : {}),
+    ...(complete ? { complete: complete === 'true' } : {}),
+  };
+}
+
+/** Manifest headings are the raw markdown line (`## Reads`). */
+function headingText(section: PublicDocsSection): string {
+  return section.heading.replace(/^#+\s*/, '').trim();
+}
+
+function withNewline(value: string): string {
+  return value.endsWith('\n') ? value : `${value}\n`;
 }
 
 export function parsePublicDocsManifest(value: unknown): PublicDocsPage[] {
@@ -77,11 +165,15 @@ export function parsePublicDocsManifest(value: unknown): PublicDocsPage[] {
         || typeof candidate.body !== 'string' || !candidate.body) {
       throw new Error(`Public docs manifest page ${index} is missing id, title, section, or body.`);
     }
+    const sections = parseSections(candidate.sections, candidate.body.length);
     return {
       id: candidate.id,
       title: candidate.title,
       section: candidate.section,
       body: candidate.body,
+      ...(typeof candidate.summary === 'string' && candidate.summary ? { summary: candidate.summary } : {}),
+      ...(typeof candidate.summary_complete === 'boolean' ? { summary_complete: candidate.summary_complete } : {}),
+      ...(sections ? { sections } : {}),
     };
   });
 }
@@ -143,8 +235,21 @@ export function registerDocs(program: Command) {
         '. Example manual topic: `somewhere docs sw.db`.',
     )
     .option('--list', 'List available topics instead of streaming documentation')
+    .option('--full', 'Print the complete topic instead of its summary')
+    .option('--section <id>', 'Print one section of a topic (ids are listed in the summary)')
     .option('--json', 'Print the selected document in a JSON envelope')
-    .action(async (topic: string | undefined, opts: { list?: boolean; json?: boolean }) => {
+    .action(async (
+      topic: string | undefined,
+      opts: { list?: boolean; full?: boolean; section?: string; json?: boolean },
+    ) => {
+      if (opts.full && opts.section !== undefined) {
+        error('Pass --full or --section <id>, not both.');
+        process.exitCode = 1;
+        return;
+      }
+      const view: DocsView = opts.section !== undefined
+        ? { kind: 'section', id: opts.section }
+        : opts.full ? { kind: 'full' } : { kind: 'default' };
       if (opts.list) {
         try {
           const pages = await fetchPublicManifest();
@@ -187,6 +292,11 @@ export function registerDocs(program: Command) {
         ? requestedTopic
         : ALIASES[requestedTopic.toLowerCase()];
       const entry = key ? TOPICS[key] : undefined;
+      if (entry && view.kind === 'section') {
+        error(`"${requestedTopic}" is a whole-file quick link without sections. Run: somewhere docs --list`);
+        process.exitCode = 1;
+        return;
+      }
       if (!entry) {
         // Manual topics (tsk_926fbf8e). The platform tool gives the signed-in
         // read; the generated public manifest carries each canonical page body
@@ -195,9 +305,13 @@ export function registerDocs(program: Command) {
         let authenticatedFailure: string | null = null;
         if (hasUsableCredential()) {
           try {
-            const content = await callPlatformHelpTool('docs', { topic: requestedTopic });
-            if (opts.json) printJson({ topic: requestedTopic, content });
-            else process.stdout.write(content.endsWith('\n') ? content : `${content}\n`);
+            const content = await callPlatformHelpTool('docs', {
+              topic: requestedTopic,
+              ...(view.kind === 'full' ? { detail: 'full' } : {}),
+              ...(view.kind === 'section' ? { section: view.id } : {}),
+            });
+            if (opts.json) printJson({ topic: requestedTopic, ...parseDocsStatusLine(content), content });
+            else process.stdout.write(withNewline(content));
             return;
           } catch (e) {
             authenticatedFailure = e instanceof Error ? e.message : String(e);
@@ -208,16 +322,20 @@ export function registerDocs(program: Command) {
           const pages = await fetchPublicManifest();
           const page = pages.find(({ id }) => id.toLowerCase() === requestedTopic.toLowerCase());
           if (page) {
-            const content = renderPublicPage(page);
+            const rendered = renderPublicDocsView(page, view);
+            if (rendered.notice) console.error(dim(rendered.notice));
             if (opts.json) {
               printJson({
                 topic: page.id,
                 url: DOCS_BASE + PUBLIC_MANIFEST_PATH,
                 source: 'public',
-                content,
+                ...(page.summary || page.summary_complete !== undefined || view.kind !== 'default'
+                  ? { view: rendered.view, complete: rendered.complete }
+                  : {}),
+                content: rendered.content,
               });
             } else {
-              process.stdout.write(content);
+              process.stdout.write(rendered.content);
             }
             return;
           }

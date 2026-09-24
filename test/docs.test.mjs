@@ -30,6 +30,22 @@ function run(args, env) {
   });
 }
 
+const SECTIONED_BODY = 'Lead.\n\n## Reads\n\nfrom() rows.\n\n### Where\n\nwhere shapes.\n\n## Writes\n\ninsert().\n';
+const readsStart = SECTIONED_BODY.indexOf('## Reads');
+const writesStart = SECTIONED_BODY.indexOf('## Writes');
+const SECTIONED_PAGE = {
+  id: 'sw.data', title: 'Data', section: 'data-identity',
+  body: SECTIONED_BODY,
+  summary: '[docs] topic=sw.data view=summary complete=false\nLead.\nreads · Reads\nwrites · Writes\n',
+  summary_complete: false,
+  sections: [
+    { id: 'reads', heading: '## Reads', level: 2, start: readsStart, end: writesStart },
+    { id: 'where', heading: '### Where', level: 3, start: SECTIONED_BODY.indexOf('### Where'), end: writesStart },
+    { id: 'writes', heading: '## Writes', level: 2, start: writesStart, end: SECTIONED_BODY.length },
+  ],
+  anchors: [], provenance: { authored: 'hand' },
+};
+
 const MANIFEST = {
   version: 1,
   pages: [
@@ -53,12 +69,14 @@ const MANIFEST = {
     },
     {
       id: 'troubleshooting', title: 'Troubleshooting', section: 'operate',
-      body: 'What to do when a deploy fails.\n', anchors: [], provenance: { authored: 'hand' },
+      body: 'What to do when a deploy fails.\n', summary_complete: true,
+      anchors: [], provenance: { authored: 'hand' },
     },
     {
       id: 'verify-before-deploy', title: 'Verify before deploy', section: 'start',
       body: 'Flow schema and examples.\n', anchors: [], provenance: { authored: 'hand' },
     },
+    SECTIONED_PAGE,
   ],
 };
 
@@ -304,4 +322,61 @@ test('a manifest page without a body fails precisely instead of substituting ano
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
+});
+
+test('public docs default to the published summary; --full and --section retrieve the rest', async () => {
+  const home = emptyCredentialHome();
+  const env = (base) => ({
+    HOME: home,
+    USERPROFILE: home,
+    SOMEWHERE_DOCS_BASE: base,
+    SOMEWHERE_NO_NOTIFICATIONS: '1',
+    NO_COLOR: '1',
+    CI: '1',
+  });
+  await withManifest(async (base) => {
+    const summary = await run(['docs', 'sw.data'], env(base));
+    assert.equal(summary.status, 0, summary.stderr);
+    assert.equal(summary.stdout, SECTIONED_PAGE.summary);
+
+    const full = await run(['docs', 'sw.data', '--full', '--json'], env(base));
+    assert.equal(full.status, 0, full.stderr);
+    const fullPayload = JSON.parse(full.stdout);
+    assert.equal(fullPayload.content, `# Data\n\n${SECTIONED_BODY}`);
+    assert.equal(fullPayload.complete, true);
+
+    const section = await run(['docs', 'sw.data', '--section', 'reads'], env(base));
+    assert.equal(section.status, 0, section.stderr);
+    assert.equal(section.stdout, SECTIONED_BODY.slice(readsStart, writesStart));
+    assert.match(section.stdout, /### Where/, 'a section includes its nested subsections');
+    assert.doesNotMatch(section.stdout, /insert\(\)/);
+
+    const unknown = await run(['docs', 'sw.data', '--section', 'nope', '--json'], env(base));
+    assert.equal(unknown.status, 0, unknown.stderr);
+    const unknownPayload = JSON.parse(unknown.stdout);
+    assert.equal(unknownPayload.complete, false);
+    assert.match(unknownPayload.content, /No section "nope" in sw\.data[\s\S]*writes · Writes/);
+    assert.doesNotMatch(unknownPayload.content, /insert\(\)/, 'an unknown section never dumps the page');
+
+    // An older manifest has neither summary nor sections: never print less than the page.
+    const byHeading = await run(['docs', 'sw.data', '--section', 'Writes'], env(base));
+    assert.equal(byHeading.stdout, SECTIONED_BODY.slice(writesStart));
+
+    // A small topic publishes summary_complete without a summary: the body is the complete view.
+    const small = await run(['docs', 'troubleshooting', '--json'], env(base));
+    const smallPayload = JSON.parse(small.stdout);
+    assert.equal(smallPayload.content, '# Troubleshooting\n\nWhat to do when a deploy fails.\n');
+    assert.equal(smallPayload.complete, true);
+
+    const legacy = await run(['docs', 'sw.db', '--section', 'reads'], env(base));
+    assert.equal(legacy.status, 0, legacy.stderr);
+    assert.equal(legacy.stdout, '# Database\n\nCanonical database body.\n');
+    assert.match(legacy.stderr, /no section index/);
+    const legacyDefault = await run(['docs', 'sw.db'], env(base));
+    assert.equal(legacyDefault.stdout, '# Database\n\nCanonical database body.\n');
+
+    const quickLink = await run(['docs', 'start', '--section', 'reads'], env(base));
+    assert.equal(quickLink.status, 1);
+    assert.match(quickLink.stderr, /somewhere docs --list/);
+  });
 });
