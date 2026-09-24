@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { loadProjectConfig } from '../lib/config.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import {
   compactRecord,
@@ -12,6 +13,10 @@ import { dim, error, printJson, printJsonError, success, table } from '../lib/ou
 interface ProjectOptions {
   project?: string;
   json?: boolean;
+}
+
+interface CronListOptions extends ProjectOptions {
+  all?: boolean;
 }
 
 interface CronCreateOptions extends ProjectOptions {
@@ -122,8 +127,16 @@ function printTypedCronError(code: string, message: string, json: boolean | unde
   process.exitCode = 1;
 }
 
-async function resolveCronRunId(target: string, project: string | undefined): Promise<string> {
+/** An explicit --project wins; otherwise the linked directory's project.
+ *  Undefined only when neither exists, which the caller must treat as
+ *  account-wide rather than guessing a project. */
+function cronProjectScope(explicit: string | undefined): string | undefined {
+  return explicit ?? loadProjectConfig()?.project_id;
+}
+
+async function resolveCronRunId(target: string, explicit: string | undefined): Promise<string> {
   if (target.startsWith('cron_')) return target;
+  const project = cronProjectScope(explicit);
   const rows = cronRows(await callPlatformTool('cron_list', compactRecord([
     ['project_id', project],
   ]), { allTools: true }));
@@ -155,7 +168,8 @@ export function registerCron(program: Command): void {
     .description('Manage scheduled triggers')
     .addHelpText(
       'after',
-      '\nExamples:\n  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
+      '\nExamples:\n  somewhere cron list                 # linked project; --all lists every project\n'
+        + '  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
         + '  somewhere cron create "0 9 * * *" /api/daily-digest --project my-app --timezone America/Los_Angeles\n'
         + '\nSchedules are read in UTC unless --timezone names an IANA zone.\n',
     );
@@ -163,12 +177,22 @@ export function registerCron(program: Command): void {
   cron
     .command('list')
     .alias('ls')
-    .description('List scheduled triggers')
-    .option('-p, --project <project>', 'Project slug or ID; omit to list across projects')
+    .description('List scheduled triggers for the linked project, or across projects with --all')
+    .option('-p, --project <project>', 'Project slug or ID; defaults to the linked project')
+    .option('--all', 'List scheduled triggers across every project you can access')
     .option('--json', 'Print the complete response as JSON')
-    .action(async (opts: ProjectOptions) => {
+    .action(async (opts: CronListOptions) => {
+      if (opts.all && opts.project) {
+        error('Pass --project <project> or --all, not both.');
+        process.exitCode = 1;
+        return;
+      }
+      const project = opts.all ? undefined : cronProjectScope(opts.project);
+      if (!opts.all && !project) {
+        console.error(dim('No linked project: listing across all projects. Pass --project <project> to scope, or --all to say so.'));
+      }
       await runCronTool('cron_list', compactRecord([
-        ['project_id', opts.project],
+        ['project_id', project],
       ]), opts.json, (value) => {
         const rows = cronRows(value);
         if (rows.length === 0) {
@@ -188,7 +212,7 @@ export function registerCron(program: Command): void {
   cron
     .command('run <cron-id-or-name>')
     .description('Run a scheduled task once now without changing its schedule')
-    .option('-p, --project <project>', 'Project slug or ID; used to resolve a task name')
+    .option('-p, --project <project>', 'Project slug or ID used to resolve a task name; defaults to the linked project')
     .option('--json', 'Print the complete response as JSON')
     .action(async (target: string, opts: ProjectOptions) => {
       try {

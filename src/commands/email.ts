@@ -1,4 +1,5 @@
 import { Command } from 'commander';
+import { shellQuote } from '../lib/next-actions.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { compactRecord, isRecord, resolveProjectRef, unwrapPlatformData } from '../lib/platform-command.js';
 import { dim, error, printJson, printJsonError, success } from '../lib/output.js';
@@ -90,6 +91,18 @@ function platformErrorParts(err: unknown): { code: string; message: string } {
   return match ? { code: match[1], message: match[2] } : { code: 'CLI_ERROR', message };
 }
 
+/**
+ * The platform names the only valid domain (`<subdomain>.test.somewhere.site`)
+ * when it rejects an address. Turn that into a runnable command with a fixed
+ * example mailbox: never echo the rejected, possibly private, address.
+ */
+export function testInboxNextCommand(message: string, project: string | undefined): string | null {
+  const match = /@([a-z0-9][a-z0-9-]*)\.test\.somewhere\.site\b/i.exec(message);
+  if (!match) return null;
+  const subdomain = match[1].toLowerCase();
+  return `somewhere email test-inbox person@${subdomain}.test.somewhere.site --project ${shellQuote(project ?? subdomain)}`;
+}
+
 export function registerEmail(program: Command): void {
   const email = program
     .command('email')
@@ -148,8 +161,11 @@ export function registerEmail(program: Command): void {
           else error(`EMAIL_TEST_INBOX_NOT_AVAILABLE: ${TEST_INBOX_UNAVAILABLE}`);
         } else {
           const { code, message } = platformErrorParts(err);
-          if (opts.json) printJsonError(code, message);
-          else error(`${code}: ${message}`);
+          const next = code === 'VALIDATION_ERROR' ? testInboxNextCommand(message, opts.project) : null;
+          const hint = 'The test inbox stores platform auth email (verification, magic link, password reset)'
+            + ' sent to that domain. Sign up or sign in with such an address first, then run:';
+          if (opts.json) printJsonError(code, message, next ? { hint, next_command: next } : undefined);
+          else error(`${code}: ${message}${next ? `\n${hint}\n  ${next}` : ''}`);
         }
         process.exitCode = 1;
       }

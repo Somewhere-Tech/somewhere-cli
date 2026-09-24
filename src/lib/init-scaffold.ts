@@ -73,3 +73,29 @@ export function writeInitScaffold(
 
   return { created: [...targets.values()].map(({ path }) => path) };
 }
+
+/**
+ * `init --bare` keeps the agent workflow guide without the starter: each
+ * top-level guide file is created only when absent (O_EXCL), so an existing
+ * AGENTS.md or CLAUDE.md is never replaced.
+ */
+export function writeMissingGuideFiles(
+  dir: string,
+  files: readonly InitScaffoldFile[],
+): { created: string[]; kept: string[] } {
+  const created: string[] = [];
+  const kept: string[] = [];
+  for (const file of files) {
+    if (file.path.includes('/') || file.path.includes('\\')) {
+      throw new Error(`Guide files are top-level only: ${file.path}`);
+    }
+    try {
+      writeFileSync(resolve(dir, file.path), file.content, { encoding: 'utf8', flag: 'wx' });
+      created.push(file.path);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+      kept.push(file.path);
+    }
+  }
+  return { created, kept };
+}

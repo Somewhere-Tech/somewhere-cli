@@ -643,7 +643,7 @@ test('init --link --project links an exact existing project non-interactively', 
   });
 });
 
-test('init creates the green starter, --bare stays minimal, and existing source is preserved', async () => {
+test('init creates the green starter, --bare keeps only the workflow guide, and existing source is preserved', async () => {
   const HOME = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-home-'));
   writeConfig(HOME);
   const project = {
@@ -708,8 +708,25 @@ test('init creates the green starter, --bare stays minimal, and existing source 
     assert.equal(bareResult.status, 0, `stdout:\n${bareResult.stdout}\nstderr:\n${bareResult.stderr}`);
     assert.deepEqual(JSON.parse(bareResult.stdout), project);
     assert.throws(() => readFileSync(join(bare, 'package.json')), /ENOENT/);
-    assert.throws(() => readFileSync(join(bare, 'AGENTS.md')), /ENOENT/);
-    assert.throws(() => readFileSync(join(bare, 'CLAUDE.md')), /ENOENT/);
+    assert.throws(() => readFileSync(join(bare, 'src/App.tsx')), /ENOENT/);
+    assert.match(readFileSync(join(bare, 'AGENTS.md'), 'utf8'), /somewhere verify --flow flow\.json/);
+    assert.equal(readFileSync(join(bare, 'CLAUDE.md'), 'utf8'), 'Read AGENTS.md for project instructions.\n');
+
+    // An existing guide is the developer's: --bare adds only what is absent.
+    const bareOwned = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-bare-owned-'));
+    writeFileSync(join(bareOwned, 'AGENTS.md'), '# my rules\n');
+    writeFileSync(join(bareOwned, 'main.js'), 'mine();\n');
+    const bareOwnedResult = await run(['init', '--name', project.name, '--bare'], {
+      cwd: bareOwned,
+      env,
+    });
+    assert.equal(bareOwnedResult.status, 0, `stdout:\n${bareOwnedResult.stdout}\nstderr:\n${bareOwnedResult.stderr}`);
+    assert.equal(readFileSync(join(bareOwned, 'AGENTS.md'), 'utf8'), '# my rules\n');
+    assert.equal(readFileSync(join(bareOwned, 'main.js'), 'utf8'), 'mine();\n');
+    assert.equal(readFileSync(join(bareOwned, 'CLAUDE.md'), 'utf8'), 'Read AGENTS.md for project instructions.\n');
+    assert.match(bareOwnedResult.stdout, /no starter source or dependencies were added/);
+    assert.match(bareOwnedResult.stdout, /Existing AGENTS\.md kept unchanged/);
+    assert.doesNotMatch(bareOwnedResult.stdout, /starter written/);
 
     const existing = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-existing-'));
     writeFileSync(join(existing, 'app.ts'), 'export const mine = true;\n');
@@ -720,6 +737,7 @@ test('init creates the green starter, --bare stays minimal, and existing source 
     assert.equal(preserved.status, 0, `stdout:\n${preserved.stdout}\nstderr:\n${preserved.stderr}`);
     assert.equal(readFileSync(join(existing, 'app.ts'), 'utf8'), 'export const mine = true;\n');
     assert.throws(() => readFileSync(join(existing, 'package.json')), /ENOENT/);
+    assert.throws(() => readFileSync(join(existing, 'AGENTS.md')), /ENOENT/);
   });
 });
 

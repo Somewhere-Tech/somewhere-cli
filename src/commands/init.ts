@@ -11,7 +11,8 @@ import {
   saveProjectConfig,
 } from '../lib/config.js';
 import { installInitDependencies } from '../lib/init-install.js';
-import { canWriteInitScaffold, writeInitScaffold } from '../lib/init-scaffold.js';
+import { canWriteInitScaffold, writeInitScaffold, writeMissingGuideFiles } from '../lib/init-scaffold.js';
+import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from '../lib/init-agent-guide.js';
 import { createGreenTemplate } from '../lib/init-green-template.js';
 import { formatNextActions, nextActions, type NextActionContext } from '../lib/next-actions.js';
 import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
@@ -34,12 +35,22 @@ interface LinkProject {
 export function registerInit(program: Command) {
   program
     .command('init')
-    .description('Initialize a somewhere.tech project in the current directory')
+    .description('Create a project and link this directory; an empty directory also gets the React + TypeScript starter')
     .option('--name <name>', 'Project name (skip prompt)')
     .option('--link', 'Link to an existing project instead of creating one')
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
-    .option('--bare', 'Create and link the project without starter files or dependencies')
+    .option('--bare', 'Create and link only: no starter source or dependencies (AGENTS.md/CLAUDE.md are still added when absent)')
     .option('--json', 'Print the created or linked project as JSON')
+    .addHelpText(
+      'after',
+      '\nRecommended for a new app: run `somewhere init` in an empty directory.\n'
+        + 'The starter is a deployable React + TypeScript app: src/ with a services/ layer,\n'
+        + 'a typed api/greeting.ts function, db/schema.ts, types/, tsconfig.json, and an\n'
+        + 'AGENTS.md workflow (typecheck, deploy, verify --flow). It has no auth, email, or\n'
+        + 'cron code; add those with `somewhere docs <topic>`.\n'
+        + '\nA directory that already has files is linked and left untouched. Use --bare\n'
+        + 'only to bring your own layout; existing AGENTS.md/CLAUDE.md are never replaced.\n',
+    )
     .action(async (opts: InitOptions) => {
       if (opts.project && !opts.link) {
         error('--project requires --link.');
@@ -134,6 +145,8 @@ export function registerInit(program: Command) {
           if (shouldScaffold) {
             writeInitScaffold(dir, createGreenTemplate());
             await installInitDependencies({ cwd: dir, quiet: true });
+          } else if (opts.bare) {
+            writeBareGuide(dir);
           }
           printJson(project);
           return;
@@ -155,12 +168,13 @@ export function registerInit(program: Command) {
           info('Installing pinned dependencies with `npm install`…');
           await installInitDependencies({ cwd: dir, quiet: false });
           success('Dependencies installed');
+        } else if (opts.bare) {
+          info('Bare project: no starter source or dependencies were added.');
+          const guide = writeBareGuide(dir);
+          if (guide.created.length) success(`Agent workflow guide written (${guide.created.join(', ')})`);
+          if (guide.kept.length) info(`Existing ${guide.kept.join(', ')} kept unchanged.`);
         } else {
-          info(
-            opts.bare
-              ? 'Bare project requested; starter files were not added.'
-              : 'Existing source preserved; starter files were not added.',
-          );
+          info('Existing source preserved; starter files were not added.');
         }
 
         if (!hasGlobalMcpConfig()) {
@@ -246,6 +260,13 @@ export async function linkExisting(
 
   console.log('');
   printNext({ stage: 'init', scaffolded: false });
+}
+
+function writeBareGuide(dir: string) {
+  return writeMissingGuideFiles(dir, [
+    { path: 'AGENTS.md', content: INIT_AGENTS_MD },
+    { path: 'CLAUDE.md', content: INIT_CLAUDE_MD },
+  ]);
 }
 
 /** One rendering of the contextual next steps (lib/next-actions.ts), so create

@@ -20,10 +20,10 @@ function credentialHome(prefix) {
   return home;
 }
 
-function run(args, env) {
+function run(args, env, cwd = repoRoot) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [distIndex, ...args], {
-      cwd: repoRoot,
+      cwd,
       env: { ...process.env, ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
     });
     let stdout = '';
@@ -193,4 +193,69 @@ test('cron run preserves a real missing-task error and types unresolved names', 
     assert.equal(ambiguous.status, 1);
     assert.equal(JSON.parse(ambiguous.stdout).error, 'CRON_NAME_AMBIGUOUS');
   });
+});
+
+function linkedDir(projectId) {
+  const dir = mkdtempSync(join(tmpdir(), 'sw-cron-linked-'));
+  writeFileSync(join(dir, '.somewhere.json'), JSON.stringify({
+    project_id: projectId,
+    name: 'Linked app',
+    subdomain: 'linked-app',
+  }) + '\n');
+  return dir;
+}
+
+test('cron list and name resolution default to the linked project; --all stays explicit', async () => {
+  const home = credentialHome('sw-cron-scope-home-');
+  const calls = [];
+  let refuse = false;
+  await withFixture((params) => {
+    calls.push({ name: params.name, arguments: params.arguments });
+    if (refuse) return toolError('PROJECT_NOT_FOUND', 'Project not found.');
+    if (params.name === 'cron_run') {
+      return toolSuccess({ cron_id: 'cron_mine', job_id: 'job_1', status: 'queued', trigger: 'manual' });
+    }
+    return toolSuccess({ crons: [{ cron_id: 'cron_mine', name: 'Reminders', schedule: '0 * * * *', handler: '/api/remind' }] });
+  }, async (url) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url };
+    const linked = linkedDir('proj_linked');
+    const unlinked = mkdtempSync(join(tmpdir(), 'sw-cron-unlinked-'));
+
+    const scoped = await run(['cron', 'list', '--json'], env, linked);
+    assert.equal(scoped.status, 0, scoped.stderr);
+    assert.equal(scoped.stderr, '');
+    const explicit = await run(['cron', 'list', '--project', 'other-app', '--json'], env, linked);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    const all = await run(['cron', 'list', '--all', '--json'], env, linked);
+    assert.equal(all.status, 0, all.stderr);
+    const named = await run(['cron', 'run', 'Reminders', '--json'], env, linked);
+    assert.equal(named.status, 0, named.stderr);
+
+    const accountWide = await run(['cron', 'list', '--json'], env, unlinked);
+    assert.equal(accountWide.status, 0, accountWide.stderr);
+    assert.match(accountWide.stderr, /No linked project: listing across all projects/);
+    assert.equal(JSON.parse(accountWide.stdout).ok, true, 'stdout stays machine-readable');
+
+    const callCount = calls.length;
+    const both = await run(['cron', 'list', '--all', '--project', 'other-app'], env, linked);
+    assert.equal(both.status, 1);
+    assert.match(both.stderr, /--project <project> or --all, not both/);
+    assert.equal(calls.length, callCount, 'a usage error never calls the platform');
+
+    // A refused linked project is reported, never widened to the account.
+    refuse = true;
+    const refused = await run(['cron', 'list'], env, linked);
+    assert.equal(refused.status, 1);
+    assert.match(refused.stderr, /PROJECT_NOT_FOUND|Project not found/);
+  });
+
+  assert.deepEqual(calls, [
+    { name: 'cron_list', arguments: { project_id: 'proj_linked' } },
+    { name: 'cron_list', arguments: { project_id: 'other-app' } },
+    { name: 'cron_list', arguments: {} },
+    { name: 'cron_list', arguments: { project_id: 'proj_linked' } },
+    { name: 'cron_run', arguments: { cron_id: 'cron_mine' } },
+    { name: 'cron_list', arguments: {} },
+    { name: 'cron_list', arguments: { project_id: 'proj_linked' } },
+  ]);
 });

@@ -302,11 +302,23 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       'email', 'test-inbox', 'real@example.com', '--project', 'platform', '--json',
     ], env);
     assert.equal(wrongInbox.status, 1);
-    assert.deepEqual(JSON.parse(wrongInbox.stdout), {
+    const wrongInboxPayload = JSON.parse(wrongInbox.stdout);
+    assert.deepEqual({ ...wrongInboxPayload, hint: undefined }, {
       ok: false,
       error: 'VALIDATION_ERROR',
       message: "address must belong to this project's test inbox: <anything>@platform.test.somewhere.site.",
+      hint: undefined,
+      next_command: 'somewhere email test-inbox person@platform.test.somewhere.site --project platform',
     });
+    assert.match(wrongInboxPayload.hint, /auth email/);
+    assert.doesNotMatch(wrongInbox.stdout, /real@example\.com/, 'the rejected address is not echoed');
+
+    const wrongInboxHuman = await run([
+      'email', 'test-inbox', 'real@example.com', '--project', 'platform',
+    ], env);
+    assert.equal(wrongInboxHuman.status, 1);
+    assert.match(wrongInboxHuman.stderr, /VALIDATION_ERROR: address must belong/);
+    assert.match(wrongInboxHuman.stderr, /\n  somewhere email test-inbox person@platform\.test\.somewhere\.site --project platform/);
 
     const oldPlatformInbox = await run([
       'email', 'test-inbox', 'old@platform.test.somewhere.site', '--project', 'platform', '--json',
@@ -335,4 +347,14 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
   } finally {
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
+});
+
+test('test-inbox next command names the project by subdomain when --project was not passed', async () => {
+  const { testInboxNextCommand } = await import('../dist/commands/email.js');
+  const message = "address must belong to this project's test inbox: <anything>@linked-app.test.somewhere.site.";
+  assert.equal(
+    testInboxNextCommand(message, undefined),
+    'somewhere email test-inbox person@linked-app.test.somewhere.site --project linked-app',
+  );
+  assert.equal(testInboxNextCommand('project_id and address are required.', undefined), null);
 });
