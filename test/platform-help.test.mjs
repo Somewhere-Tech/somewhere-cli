@@ -233,7 +233,9 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
             ? rpc.params.arguments.detail === 'full'
               ? '[docs] topic=sw.db view=full complete=true shown=27 full=27\n# sw.db\n\nDatabase reference.'
               : rpc.params.arguments.section
-                ? '[docs] topic=sw.db view=section complete=false shown=9 full=27\n## Where\n'
+                ? rpc.params.arguments.section === 'legacy'
+                  ? '# sw.db\n\nDatabase reference.'
+                  : '[docs] topic=sw.db view=section complete=false shown=9 full=27\n## Where\n'
                 : '# sw.db\n\nDatabase reference.'
             : JSON.stringify(catalog, null, 2);
         if (rpc.params.name === 'catalog' && rpc.params.arguments.load) {
@@ -316,6 +318,11 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     const docsSection = await run(['docs', 'sw.db', '--section', 'where'], env);
     assert.equal(docsSection.status, 0, docsSection.stderr);
     assert.match(docsSection.stdout, /^\[docs\] topic=sw\.db view=section complete=false/);
+    assert.equal(docsSection.stderr, '');
+    const docsOldSection = await run(['docs', 'sw.db', '--section', 'legacy'], env);
+    assert.equal(docsOldSection.status, 0, docsOldSection.stderr);
+    assert.equal(docsOldSection.stdout, '# sw.db\n\nDatabase reference.\n');
+    assert.match(docsOldSection.stderr, /does not support sections yet/);
     const docsBoth = await run(['docs', 'sw.db', '--full', '--section', 'where'], env);
     assert.equal(docsBoth.status, 1);
     assert.match(docsBoth.stderr, /--full or --section/);
@@ -360,6 +367,7 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
       ['docs', { topic: 'sw.db' }],
       ['docs', { topic: 'sw.db', detail: 'full' }],
       ['docs', { topic: 'sw.db', section: 'where' }],
+      ['docs', { topic: 'sw.db', section: 'legacy' }],
       ['catalog', {}],
       ['catalog', { load: 'all' }],
       ['catalog', { search: 'cron_create' }],

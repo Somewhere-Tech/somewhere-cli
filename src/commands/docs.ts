@@ -310,7 +310,11 @@ export function registerDocs(program: Command) {
               ...(view.kind === 'full' ? { detail: 'full' } : {}),
               ...(view.kind === 'section' ? { section: view.id } : {}),
             });
-            if (opts.json) printJson({ topic: requestedTopic, ...parseDocsStatusLine(content), content });
+            const status = parseDocsStatusLine(content);
+            if (view.kind === 'section' && !status.view) {
+              console.error(dim(`This platform version does not support sections yet; printed all of "${requestedTopic}".`));
+            }
+            if (opts.json) printJson({ topic: requestedTopic, ...status, content });
             else process.stdout.write(withNewline(content));
             return;
           } catch (e) {
