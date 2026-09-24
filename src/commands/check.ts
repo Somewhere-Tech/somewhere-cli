@@ -5,6 +5,7 @@ import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { isBuildError, renderBuildError, type BuildErrorDetail } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { collectFiles, formatBytes, type CollectedFiles } from '../lib/files.js';
+import { shellQuote } from '../lib/next-actions.js';
 import { printExcludedFiles } from './deploy.js';
 import { bold, dim, error, green, info, red, success, warn, yellow } from '../lib/output.js';
 
@@ -154,11 +155,11 @@ export function checkRunExitCode(r: CheckRunResult): number {
 
 /** Human success copy for the compile-only path. Keep the scope explicit: a
  * clean compile says nothing about requests or user journeys. */
-export function formatCompileOnlySuccess(totalFiles: number, totalBytes: number): string[] {
+export function formatCompileOnlySuccess(totalFiles: number, totalBytes: number, projectId: string): string[] {
   return [
     `Platform compile passed. ${dim(`(${totalFiles} files, ${formatBytes(totalBytes)})`)}`,
     dim('Runtime behavior, auth, data access, and user flows were not exercised.'),
-    'Next: deploy, then verify the real flow with `somewhere verify --url https://your-app.somewhere.site --flow flow.json`.',
+    `Next: deploy, then verify the real flow with \`somewhere verify --project ${shellQuote(projectId)} --flow flow.json\`.`,
     dim('Unsure about a platform contract? Run `somewhere advisor "<question>"`.'),
   ];
 }
@@ -284,7 +285,7 @@ export function registerCheck(program: Command) {
           for (const line of r.build_log) info(dim(line));
           console.log('');
         }
-        const [summary, ...nextSteps] = formatCompileOnlySuccess(totalFiles, sourceBytes(collected));
+        const [summary, ...nextSteps] = formatCompileOnlySuccess(totalFiles, sourceBytes(collected), projectId);
         success(summary);
         for (const line of nextSteps) info(line);
       } catch (err) {

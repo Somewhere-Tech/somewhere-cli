@@ -683,9 +683,9 @@ test('init creates the green starter, --bare stays minimal, and existing source 
     });
     assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
     assert.deepEqual(JSON.parse(created.stdout), project);
-    assert.match(readFileSync(join(empty, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
+    assert.match(readFileSync(join(empty, 'api/greeting.ts'), 'utf8'), /sw\.db\.from/);
     assert.match(readFileSync(join(empty, 'db/schema.ts'), 'utf8'), /greetings: table/);
-    assert.match(readFileSync(join(empty, 'AGENTS.md'), 'utf8'), /somewhere verify --url <live> --flow flow\.json/);
+    assert.match(readFileSync(join(empty, 'AGENTS.md'), 'utf8'), /somewhere verify --flow flow\.json/);
     assert.equal(
       readFileSync(join(empty, 'CLAUDE.md'), 'utf8'),
       'Read AGENTS.md for project instructions.\n',

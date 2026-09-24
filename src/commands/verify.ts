@@ -2,7 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
-import { getToken, loadProjectConfig } from '../lib/config.js';
+import { getToken, loadConfig, loadProjectConfig, loadTempSession } from '../lib/config.js';
 import {
   normalizeBrowserActions,
   type BrowserRequestExpectationResult,
@@ -87,6 +87,34 @@ interface ResolvedViewport {
 export interface VerificationTarget {
   project_id?: string;
   url?: string;
+}
+
+interface ProjectOrigins {
+  prod?: string | null;
+  prod_fallback?: string | null;
+  dev?: string | null;
+}
+
+/** A directory link is a hint, never proof that the current login owns a URL. */
+export async function linkedVerifyTarget(
+  url: string,
+  client: ApiClient,
+  linkedProjectId?: string,
+): Promise<string | undefined> {
+  if (!linkedProjectId) return undefined;
+  let origin: string;
+  try { origin = new URL(url).origin; } catch { return undefined; }
+  try {
+    const urls = await client.call<ProjectOrigins>('GET', `/projects/${encodeURIComponent(linkedProjectId)}/urls`);
+    return [urls.prod, urls.prod_fallback, urls.dev].some((candidate) => {
+      if (!candidate) return false;
+      try { return new URL(candidate).origin === origin; } catch { return false; }
+    }) ? linkedProjectId : undefined;
+  } catch {
+    // Failed ownership lookups confer no authority. The browser route remains
+    // the final authority for any explicitly supplied project.
+    return undefined;
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -430,7 +458,7 @@ export function registerVerify(program: Command): void {
   program
     .command('verify [target]')
     .description('Run one browser flow at desktop and phone size, report every step and health signal, and capture both screenshots.')
-    .option('--project <ref>', 'Project to verify. Defaults to the linked project when --url is omitted.')
+    .option('--project <ref>', 'Project to verify. With --url, use this when the directory is unlinked or points to another project.')
     .option('--url <url>', 'Live or local URL to verify.')
     .option('--flow <file.json>', 'Flow JSON with actions, session seeds, expect_requests, visible_only, and viewports. Omit for the default health check.')
     .option('--session <session-id>', 'Existing app session value to seed as localStorage sw_auth in every viewport.')
@@ -453,8 +481,31 @@ For the complete flow and action schema, run: somewhere docs browser
     .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean }) => {
       try {
         const url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);
-        const project = opts.project ?? (url ? undefined : target ?? loadProjectConfig()?.project_id);
+        const local = !!url && isLoopbackUrl(url);
+        const linkedProjectId = loadProjectConfig()?.project_id;
+        const config = loadConfig();
+        const primaryUsable = !!config?.token && (!config.temporary
+          || !config.temp_expires_at || Date.parse(config.temp_expires_at) > Date.now());
+        let client: ApiClient | undefined = local || !primaryUsable ? undefined : new ApiClient(getToken());
+        let project = opts.project ?? (target && !/^https?:\/\//i.test(target) ? target : undefined)
+          ?? (url ? undefined : linkedProjectId);
         if (!url && !project) throw new Error('Nothing to verify. Pass --url, --project, or run from a linked project directory.');
+        if (url && !local && !opts.project) {
+          if (!project && client) project = await linkedVerifyTarget(url, client, linkedProjectId);
+          if (!project) {
+            const temporary = loadTempSession();
+            if (temporary?.project?.project_id && temporary.token
+                && (!temporary.temp_expires_at || Date.parse(temporary.temp_expires_at) > Date.now())) {
+              const tempClient = new ApiClient(temporary.token);
+              const tempProject = await linkedVerifyTarget(url, tempClient, temporary.project.project_id);
+              if (tempProject) {
+                project = tempProject;
+                client = tempClient;
+              }
+            }
+          }
+        }
+        if (!local && !client) client = new ApiClient(getToken());
         const loadedFlow = loadVerifyFlow(opts.flow);
         const flow: VerifyFlow = {
           ...loadedFlow,
@@ -462,11 +513,10 @@ For the complete flow and action schema, run: somewhere docs browser
           ...(cliCookies.length ? { cookies: [...(loadedFlow.cookies ?? []), ...cliCookies] } : {}),
         };
         assertSessionSeedSize(flow);
-        const local = !!url && isLoopbackUrl(url);
         const report = await runVerification(
           { ...(project ? { project_id: project } : {}), ...(url ? { url } : {}) },
           flow,
-          local ? undefined : new ApiClient(getToken()),
+          client,
         );
         if (opts.json) console.log(JSON.stringify(report, null, 2));
         else for (const line of formatVerifyReport(report)) console.log(line);
@@ -478,7 +528,11 @@ For the complete flow and action schema, run: somewhere docs browser
           process.exit(1);
         }
         if (cause instanceof CliApiError) {
-          error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)}`);
+          if (cause.code === 'BROWSER_ORIGIN_NOT_AUTHORIZED') {
+            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)} To drive an app you own, rerun with --project <your-project-id> (for example: somewhere verify --project <your-project-id> --url <your-app-url> --flow flow.json).`);
+          } else {
+            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)}`);
+          }
         } else {
           error(cause instanceof Error ? cause.message : String(cause));
         }

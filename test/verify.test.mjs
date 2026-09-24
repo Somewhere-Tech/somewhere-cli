@@ -319,3 +319,133 @@ test('deploy --verify runs the flow after deploy and includes its structured rep
   assert.equal(payload.verification.passed, true);
   assert.equal(payload.verification.screenshots.length, 2);
 });
+
+test('verify URL keeps linked ownership only for authenticated matching origins', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      const token = req.headers.authorization;
+      if (req.method === 'GET' && req.url === '/v1/projects/linked/urls') {
+        requests.push({ kind: 'lookup', token });
+        res.end(JSON.stringify({ ok: true, data: {
+          prod_fallback: 'https://linked.somewhere.site',
+          prod: 'https://custom.example',
+        } }));
+        return;
+      }
+      if (req.method === 'GET' && req.url === '/v1/projects/temp/urls') {
+        requests.push({ kind: 'temp-lookup', token });
+        res.end(JSON.stringify({ ok: true, data: { prod_fallback: 'https://temp.somewhere.site' } }));
+        return;
+      }
+      if (req.method === 'POST' && req.url === '/v1/browser/test') {
+        const body = JSON.parse(raw);
+        requests.push({ kind: 'browser', token, body });
+        if (body.project_id === 'linked' && body.url.startsWith('https://other.somewhere.site')) {
+          res.statusCode = 400;
+          res.end(JSON.stringify({ ok: false, error: 'VALIDATION_ERROR', message: 'url origin is not routed to this project' }));
+          return;
+        }
+        if (body.actions.length && !body.project_id) {
+          res.statusCode = 403;
+          res.end(JSON.stringify({ ok: false, error: 'BROWSER_ORIGIN_NOT_AUTHORIZED', message: 'Project context is required.' }));
+          return;
+        }
+        res.end(JSON.stringify({ ok: true, data: browserReport({
+          steps: body.actions.map((action, step) => ({ step, action: Object.keys(action)[0], ok: true })),
+          request_expectations: [],
+        }) }));
+        return;
+      }
+      res.statusCode = 404;
+      res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND', message: req.url }));
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const { port } = server.address();
+  const app = mkdtempSync(join(tmpdir(), 'sw-verify-context-app-'));
+  const configDir = mkdtempSync(join(tmpdir(), 'sw-verify-context-config-'));
+  writeFileSync(join(app, '.somewhere.json'), JSON.stringify({ project_id: 'linked', name: 'linked', subdomain: 'linked' }));
+  writeFileSync(join(app, 'flow.json'), JSON.stringify({ actions: [{ click: '#save' }], viewports: ['desktop'] }));
+  writeFileSync(join(app, 'inspect.json'), JSON.stringify({ viewports: ['desktop'] }));
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ token: 'smt_primary', user: { email: '', username: '' } }));
+  const env = {
+    ...process.env,
+    SOMEWHERE_CONFIG_DIR: configDir,
+    SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1`,
+    CI: '1',
+    SOMEWHERE_NO_NOTIFICATIONS: '1',
+  };
+  async function run(args) {
+    return await new Promise((resolvePromise) => {
+      const child = spawn(process.execPath, [join(process.cwd(), 'dist/index.js'), 'verify', ...args], { cwd: app, env });
+      let stdout = '';
+      let stderr = '';
+      child.stdout.on('data', (chunk) => { stdout += chunk; });
+      child.stderr.on('data', (chunk) => { stderr += chunk; });
+      child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
+    });
+  }
+  try {
+    let result = await run(['--url', 'https://linked.somewhere.site/account', '--flow', 'flow.json', '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(requests.at(-1).body.project_id, 'linked');
+    assert.equal(requests.at(-1).body.url, 'https://linked.somewhere.site/account');
+
+    result = await run(['--url', 'https://custom.example/account', '--flow', 'flow.json', '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(requests.at(-1).body.project_id, 'linked');
+
+    rmSync(join(app, '.somewhere.json'));
+    result = await run(['--url', 'https://linked.somewhere.site', '--flow', 'flow.json']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /BROWSER_ORIGIN_NOT_AUTHORIZED/);
+    assert.equal(requests.at(-1).body.project_id, undefined);
+    writeFileSync(join(app, '.somewhere.json'), JSON.stringify({ project_id: 'linked', name: 'linked', subdomain: 'linked' }));
+
+    result = await run(['--url', 'https://third-party.example', '--flow', 'inspect.json', '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(requests.at(-1).body.project_id, undefined);
+
+    const beforeDenied = requests.length;
+    result = await run(['--url', 'https://third-party.example', '--flow', 'flow.json']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /BROWSER_ORIGIN_NOT_AUTHORIZED, HTTP 403/);
+    assert.match(result.stderr, /--project <your-project-id>/);
+    assert.equal(requests.length, beforeDenied + 2);
+    assert.equal(requests.at(-1).body.project_id, undefined);
+
+    const beforeSeed = requests.length;
+    result = await run(['--url', 'https://third-party.example', '--flow', 'inspect.json', '--cookie', 'session=secret']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /needs --project/);
+    assert.equal(requests.length, beforeSeed + 1, 'no browser request may receive a seed for an unrelated origin');
+    assert.equal(requests.at(-1).kind, 'lookup');
+
+    result = await run(['--project', 'linked', '--url', 'https://other.somewhere.site', '--flow', 'flow.json']);
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /not routed to this project/);
+    assert.equal(requests.at(-1).body.project_id, 'linked');
+
+    result = await run(['--project', 'linked', '--url', 'https://linked.somewhere.site', '--flow', 'flow.json', '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(requests.at(-1).body.project_id, 'linked');
+
+    writeFileSync(join(configDir, 'temp-session.json'), JSON.stringify({
+      token: 'smt_temporary',
+      temp_expires_at: new Date(Date.now() + 60_000).toISOString(),
+      project: { project_id: 'temp', name: 'temp', subdomain: 'temp' },
+    }));
+    result = await run(['--url', 'https://temp.somewhere.site', '--flow', 'flow.json', '--json']);
+    assert.equal(result.status, 0, result.stderr);
+    assert.equal(requests.at(-1).body.project_id, 'temp');
+    assert.equal(requests.at(-1).token, 'Bearer smt_temporary');
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+    rmSync(app, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  }
+});

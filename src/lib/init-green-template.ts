@@ -8,7 +8,7 @@ const PACKAGE_JSON = `{
   "type": "module",
   "scripts": {
     "dev": "somewhere dev",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "somewhere typecheck"
   },
   "dependencies": {
     "react": "19.2.7",
@@ -52,35 +52,19 @@ const RUNTIME_TYPES = `export interface QueryResult<T> {
 
 export interface SomewhereRuntime {
   db: {
-    query<T>(sql: string, params?: unknown[]): Promise<QueryResult<T>>;
+    from<T>(table: string, options: { limit: number }): Promise<QueryResult<T>>;
   };
 }
 `;
 
-const SCHEMA_TYPES = `declare module 'somewhere/db' {
-  interface Column {}
-  interface Table {}
-  interface Scope {}
-
-  export function schema(tables: Record<string, Table>): unknown;
-  export function table(
-    columns: Record<string, Column>,
-    options: { scope: Scope },
-  ): Table;
-  export function id(): Column;
-  export function text(options?: { default?: string; nullable?: boolean }): Column;
-  export function shared(): Scope;
-}
-`;
-
-const SCHEMA = `import { id, schema, shared, table, text } from 'somewhere/db';
+const SCHEMA = `import { id, schema, serverOnly, table, text } from 'somewhere/db';
 
 export default schema({
   greetings: table({
     id: id(),
     message: text({ default: 'Your full-stack app is ready.' }),
   }, {
-    scope: shared(),
+    scope: serverOnly(),
   }),
 });
 `;
@@ -95,9 +79,7 @@ export default async function greeting(
   _req: Request,
   sw: SomewhereRuntime,
 ): Promise<Response> {
-  const result = await sw.db.query<GreetingRow>(
-    'SELECT message FROM greetings ORDER BY id LIMIT 1',
-  );
+  const result = await sw.db.from<GreetingRow>('greetings', { limit: 1 });
 
   return Response.json({
     message: result.data[0]?.message ?? 'Your full-stack app is ready.',
@@ -169,11 +151,13 @@ code { color: #0e6542; }
 
 const README = `# somewhere.tech starter
 
-This project starts green: a typed React page calls a typed server function,
-and the function reads the table declared in \`db/schema.ts\`.
+This project starts green: a typed React page calls a typed public greeting
+function. It reads the server-only table declared in \`db/schema.ts\` and
+shows a fallback message while the table is empty. The endpoint exposes only
+the greeting message; add caller authorization before serving private data.
 
 \`\`\`sh
-npm run typecheck
+somewhere typecheck
 somewhere deploy-check .
 somewhere deploy
 somewhere browser
@@ -203,6 +187,5 @@ export function createGreenTemplate(): InitScaffoldFile[] {
     { path: 'db/schema.ts', content: SCHEMA },
     { path: 'types/app.ts', content: APP_TYPES },
     { path: 'types/runtime.ts', content: RUNTIME_TYPES },
-    { path: 'types/somewhere-db.d.ts', content: SCHEMA_TYPES },
   ];
 }

@@ -212,10 +212,10 @@ test('authentic nested --run fixtures share one human/JSON exit verdict', () => 
 });
 
 test('compile-only success names what passed and points to a real flow check', () => {
-  const output = formatCompileOnlySuccess(3, 2048).join('\n');
+  const output = formatCompileOnlySuccess(3, 2048, 'proj_fixture').join('\n');
   assert.match(output, /Platform compile passed/);
   assert.match(output, /Runtime behavior, auth, data access, and user flows were not exercised/);
-  assert.match(output, /somewhere verify --url https:\/\/your-app\.somewhere\.site --flow flow\.json/);
+  assert.match(output, /somewhere verify --project proj_fixture --flow flow\.json/);
   assert.match(output, /somewhere advisor "<question>"/);
   assert.doesNotMatch(output, /safe to deploy|oracle/i);
 });

@@ -97,7 +97,6 @@ test('default green starter is a small typed frontend, function, and schema', ()
     'tsconfig.json',
     'types/app.ts',
     'types/runtime.ts',
-    'types/somewhere-db.d.ts',
   ]);
 
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
@@ -122,9 +121,11 @@ test('default green starter is a small typed frontend, function, and schema', ()
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
 
-  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query<GreetingRow>/);
+  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.from<GreetingRow>/);
+  assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.server/);
+  assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
   assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /export default schema\(/);
-  assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /scope: shared\(\)/);
+  assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /scope: serverOnly\(\)/);
 
   const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
@@ -137,8 +138,9 @@ test('default green starter is a small typed frontend, function, and schema', ()
     'db/schema.ts',
     'somewhere typecheck',
     'somewhere deploy',
+    'flow.json',
+    'somewhere verify --flow flow.json',
     'somewhere dev',
-    'somewhere verify --url <live> --flow flow.json',
     'somewhere email test-inbox <addr>',
     'somewhere cron run <id>',
     'somewhere errors',
@@ -155,11 +157,7 @@ test('default green starter is a small typed frontend, function, and schema', ()
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /sw\.db\.from\('posts'/);
-  assert.doesNotMatch(
-    agents.slice(agents.indexOf('export default async function')),
-    /sw\.auth\.fromRequest/,
-  );
+  assert.match(agents, /A custom endpoint still enforces its own caller policy/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,
