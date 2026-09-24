@@ -56,6 +56,8 @@ jobs:
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
+      # Match publish.yml's npm for trusted publishing and shrinkwrap support.
+      - run: npm install -g npm@11.19.0
 
       - name: Compare package.json version against npm
         id: compare

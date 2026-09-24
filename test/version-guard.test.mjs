@@ -3,6 +3,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -19,6 +20,24 @@ import {
 function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
+
+test('both CLI publishers pin the same npm before release gates and keep provenance', () => {
+  const workflows = ['publish.yml', 'version-guard.yml'].map((file) =>
+    readFileSync(fileURLToPath(new URL(`../.github/workflows/${file}`, import.meta.url)), 'utf8')
+  );
+  const pins = workflows.map((workflow) => workflow.match(/^\s+- run: npm install -g npm@(\d+\.\d+\.\d+)$/m));
+  assert.ok(pins.every(Boolean), 'each publisher must pin npm');
+  assert.equal(pins[0][1], pins[1][1]);
+  for (const [index, workflow] of workflows.entries()) {
+    assert.ok(pins[index].index < workflow.search(/^\s+(?:- run: )?npm ci$/m));
+    assert.ok(pins[index].index < workflow.indexOf('npm publish --provenance --access public'));
+    assert.match(workflow, /^  id-token: write\b/m);
+  }
+  const guard = workflows[1];
+  assert.ok(guard.indexOf('node scripts/version-guard.mjs') < guard.indexOf('npm ci'));
+  assert.match(guard, /- name: Gate \(build \+ tests\)\n\s+if: steps\.compare\.outputs\.mode == 'release'/);
+  assert.match(guard, /- name: Publish to npm \(provenance\)\n\s+if: steps\.compare\.outputs\.mode == 'release'/);
+});
 
 test('version guard accepts unrelated descendants and rejects release-input drift', () => {
   const root = mkdtempSync(join(tmpdir(), 'somewhere-version-guard-'));
