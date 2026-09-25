@@ -186,17 +186,24 @@ var require_declared_data_contract = __commonJS({
         const names = /* @__PURE__ */ new Set();
         for (const relation of declared) {
           record(relation, `${table.name}.relation`);
-          if (Object.keys(relation).some((key) => !["name", "table", "fk", "parentKey"].includes(key))) fail(`${table.name}.relation`);
-          const { name, table: childName, fk, parentKey } = relation;
-          if (![name, childName, fk, parentKey].every((value) => typeof value === "string" && identifier.test(value)) || names.has(name)) {
+          if (Object.keys(relation).some((key) => !["name", "kind", "table", "fk", "parentKey"].includes(key))) fail(`${table.name}.relation`);
+          const { name, kind, table: relatedName, fk, parentKey } = relation;
+          if (![name, relatedName, fk, parentKey].every((value) => typeof value === "string" && identifier.test(value)) || names.has(name)) {
             fail(`${table.name}.relation`);
           }
+          if (kind !== void 0 && kind !== "hasMany" && kind !== "belongsTo") fail(`${table.name}.relation`);
           names.add(name);
-          const declaredChild = schema[childName];
-          if (!declaredChild || !Array.isArray(declaredChild.columns) || parentKey !== table.primaryKey || !declaredChild.columns.some((column) => column && column.n === fk)) fail(`${table.name}.relation`);
-          const child = tableByName.get(childName);
+          const related = schema[relatedName];
+          if (!related || !Array.isArray(related.columns)) fail(`${table.name}.relation`);
+          const declaring = schema[table.name];
+          if (kind === "belongsTo") {
+            if (!declaring.columns.some((column) => column && column.n === fk) || !related.columns.some((column) => column && column.n === parentKey)) fail(`${table.name}.relation`);
+            continue;
+          }
+          if (parentKey !== table.primaryKey || !related.columns.some((column) => column && column.n === fk)) fail(`${table.name}.relation`);
+          const child = tableByName.get(relatedName);
           if (table.client.read !== false && child && child.client.read !== false) {
-            relations.push({ name, table: childName, fk, parentKey });
+            relations.push({ name, table: relatedName, fk, parentKey });
           }
         }
         if (relations.length) table.relations = relations.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
@@ -232,6 +239,20 @@ var require_declared_data_contract = __commonJS({
           operations.push(`list(options?: { limit?: number; after?: ${id}; where?: ${shape(columns, equality, "update")} }): Promise<{ data: ${row}[]; next: ${id} | null; has_more: boolean }>`);
           operations.push(`get(id: ${id}): Promise<{ data: ${row} | null }>`);
           methods.push("list", "get");
+          const numeric = equality.filter((field) => ["integer", "number"].includes(columns.find((column) => column.n === field).t));
+          const fieldUnion = (list) => list.map((field) => JSON.stringify(field)).join(" | ");
+          const aggregateOptions = ["count?: true"];
+          if (numeric.length) aggregateOptions.push(`sum?: ${fieldUnion(numeric)}`, `avg?: ${fieldUnion(numeric)}`);
+          if (equality.length) {
+            aggregateOptions.push(`min?: ${fieldUnion(equality)}`, `max?: ${fieldUnion(equality)}`);
+            aggregateOptions.push(`groupBy?: Array<${fieldUnion(equality)}>`);
+          }
+          aggregateOptions.push(`where?: ${shape(columns, equality, "update")}`);
+          aggregateOptions.push("having?: Record<string, { eq?: number; ne?: number; lt?: number; lte?: number; gt?: number; gte?: number }>");
+          aggregateOptions.push(`order?: string | [string, 'asc' | 'desc'] | Array<[string, 'asc' | 'desc']>`);
+          aggregateOptions.push("limit?: number");
+          operations.push(`aggregate(options: { ${aggregateOptions.join("; ")} }): Promise<{ data: Array<Record<string, number | string | boolean | null>>; has_more?: boolean }>`);
+          methods.push("aggregate");
         }
         const mutation = client.read === false ? "{ count: number; changes: number }" : `{ data: ${row} | null; count: number; changes: number }`;
         if (client.create !== null) {
@@ -272,7 +293,7 @@ var require_declared_data_contract = __commonJS({
       const runtime = `const contract=${JSON.stringify(contract_digest)};
 class DataError extends Error{constructor(status,payload){super(payload&&typeof payload.message==="string"?payload.message:payload&&typeof payload.error==="string"?payload.error:"Data operation failed");this.name="DataError";this.status=status;this.code=payload&&typeof payload.error==="string"?payload.error:null}}
 const invoke=async(table,operation,input)=>{const response=await fetch("/__sw/data",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,contract,table,operation})});const payload=await response.json().catch(()=>{throw new DataError(response.status,{error:"INVALID_DATA_RESPONSE",message:"Data operation returned an invalid response"})});if(!response.ok)throw new DataError(response.status,payload);return payload};
-const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];})));
+const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];})));
 export{data,DataError};
 `;
       return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration } };
@@ -352,6 +373,7 @@ function shared(): SomewhereSchemaDeclaration.Scope;
 function serverOnly(): SomewhereSchemaDeclaration.Scope;
 function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete'> }): SomewhereSchemaDeclaration.MemberScope;
 function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
+function belongsTo(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
 function removed(): SomewhereSchemaDeclaration.ColumnMarker;
 function removedTable(): SomewhereSchemaDeclaration.TableMarker;
 function exported(): SomewhereSchemaDeclaration.TableMarker;
@@ -418,8 +440,9 @@ type SomewhereDbWriteIntent =
   | ({ op: 'update'; table: string } & SomewhereDbUpdate)
   | { op: 'remove'; table: string; where?: SomewhereDbWhere | null };
 interface SomewhereDbResult {
-  // Composed results preserve the database representation. They do not use
-  // the browser client's boolean/JSON normalization or its field projection.
+  // Composed results return db/schema.ts's declared types, as the browser data
+  // client does: boolean columns as true/false, json columns as their value,
+  // blob columns as byte arrays. Raw query/batch rows are exactly as stored.
   data: Record<string, unknown>[];
   error: null;
   count: number;
@@ -428,7 +451,18 @@ interface SomewhereDbResult {
   live_delivery?: { delivery: 'invalidated' }
     | { delivery: 'resync_required'; reason: string };
 }
+interface SomewhereRawDbStatement {
+  sql: string;
+  params?: readonly unknown[];
+}
+interface SomewhereRawBatchResult {
+  data: Record<string, unknown>[];
+  changes: number;
+  last_row_id: number | string | null;
+}
 interface SomewhereServerDb {
+  query(sql: string, params?: readonly unknown[]): Promise<SomewhereDbResult>;
+  batch(statements: readonly SomewhereRawDbStatement[]): Promise<SomewhereRawBatchResult[]>;
   from(table: string, options?: SomewhereDbReadOptions | null): Promise<SomewhereDbResult>;
   count(table: string, options?: SomewhereDbCountOptions | null): Promise<{ data: number; error: null }>;
   insert(table: string, values: SomewhereDbValues, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult>;
@@ -445,9 +479,37 @@ interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count'> {
   delete(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
   readonly server: SomewhereServerDb;
 }
-// Deliberately describes the composed database subset. Other sw namespaces
-// are not inferred from code or copied from the unrelated developer SDK.
-interface SomewhereRuntimeContext { readonly db: SomewhereCallerDb }
+interface SomewhereAuthUser {
+  id: string;
+  email: string;
+  role?: string;
+  display_name?: string | null;
+  [key: string]: unknown;
+}
+interface SomewhereAuthCredentials { email: string; password: string }
+type SomewhereCookieLoginResult =
+  | { user: SomewhereAuthUser; mfa_required?: never; mfa_token?: never }
+  | { mfa_required: true; mfa_token: string; user?: never };
+type SomewhereAuthSession = {
+  user: SomewhereAuthUser;
+  refresh_token: string;
+  session_token?: string;
+  expires_in?: number;
+} & ({ token: string; access_token?: string } | { token?: string; access_token: string });
+interface SomewhereRuntimeAuth {
+  loginWithCookie(req: Request, email: string, password: string): Promise<SomewhereCookieLoginResult>;
+  loginWithCookie(req: Request, credentials: SomewhereAuthCredentials): Promise<SomewhereCookieLoginResult>;
+  loginWithCookie(credentials: SomewhereAuthCredentials): Promise<SomewhereCookieLoginResult>;
+  setSessionCookies(access: string, refresh: string): void;
+  readonly mfa: {
+    challenge(options: { mfa_token: string; code: string }): Promise<SomewhereAuthSession>;
+    challengeWithCookie(options: { mfa_token: string; code: string }): Promise<{ user: SomewhereAuthUser }>;
+  };
+}
+// Deliberately describes the composed runtime subset. Namespaces are added
+// only when their customer contract is explicitly typed here; none are
+// inferred from code or copied from the unrelated developer SDK.
+interface SomewhereRuntimeContext { readonly db: SomewhereCallerDb; readonly auth: SomewhereRuntimeAuth }
 interface __SomewhereTypedRequest<Input> extends Request { json(): Promise<Input> }
 type ServerFunction<Contract extends { input: unknown; output: unknown }> =
   (req: __SomewhereTypedRequest<Contract["input"]>, sw: SomewhereRuntimeContext) =>
@@ -713,10 +775,17 @@ function bakedRelationsFromDeclared(value) {
     if (typeof rel.table !== "string" || !SAFE_SCOPE_IDENTIFIER.test(rel.table)) continue;
     if (typeof rel.fk !== "string" || !SAFE_SCOPE_IDENTIFIER.test(rel.fk)) continue;
     if (typeof rel.parentKey !== "string" || !SAFE_SCOPE_IDENTIFIER.test(rel.parentKey)) continue;
+    if (rel.kind !== void 0 && rel.kind !== "hasMany" && rel.kind !== "belongsTo") continue;
     const name = rel.name.toLowerCase();
     if (seen.has(name)) continue;
     seen.add(name);
-    out.push({ name, table: rel.table.toLowerCase(), fk: rel.fk.toLowerCase(), parentKey: rel.parentKey.toLowerCase() });
+    out.push({
+      name,
+      ...rel.kind === "belongsTo" ? { kind: "belongsTo" } : {},
+      table: rel.table.toLowerCase(),
+      fk: rel.fk.toLowerCase(),
+      parentKey: rel.parentKey.toLowerCase()
+    });
   }
   return out.length > 0 ? out : void 0;
 }
@@ -745,6 +814,63 @@ function bakedMemberFromDeclared(scope) {
     o = operations.length === allowed.length ? void 0 : operations;
   }
   return { g, m: s.membership.toLowerCase(), u: s.memberUser.toLowerCase(), mg, ...o !== void 0 ? { o } : {} };
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-relations.ts
+function validateDeclaredRelations(tables, tableByName, knownColumns, markedGone, errors) {
+  const columnByName = (t, col) => t.columns.find((c) => c.name === col);
+  for (const t of tables) {
+    if (t.relations.length === 0) continue;
+    const rootNames = knownColumns(t);
+    for (const rel of t.relations) {
+      if (rel.name === "__proto__" || rel.name === "prototype" || rel.name === "constructor") {
+        errors.push(
+          `Relation "${t.name}"."${rel.name}" uses a reserved object name. Choose a relation name that can be returned as an ordinary row field.`
+        );
+      } else if (rootNames.has(rel.name)) {
+        errors.push(
+          `Relation "${t.name}"."${rel.name}" has the same name as a column on "${t.name}". Choose a different relation name so nesting related rows cannot overwrite the root column.`
+        );
+      }
+      const related = tableByName.get(rel.table);
+      if (!related) {
+        const marked = markedGone(rel.table);
+        errors.push(
+          marked ? `Relation "${t.name}"."${rel.name}" targets "${rel.table}", which this file marks ${marked}. Remove the relation before the table can go.` : `Relation "${t.name}"."${rel.name}" targets ${rel.kind === "hasMany" ? "child" : "parent"} table "${rel.table}", which is not declared in db/schema.ts. A relation can only target a managed table in the same declaration.`
+        );
+        continue;
+      }
+      const keySide = rel.kind === "hasMany" ? t : related;
+      const fkSide = rel.kind === "hasMany" ? related : t;
+      const idCol = keySide.columns.find((c) => c.helper === "id");
+      if (!idCol) {
+        errors.push(
+          rel.kind === "hasMany" ? `Table "${t.name}" declares relation "${rel.name}" but has no id() column to join on. A hasMany relation joins the child's foreign key to this table's primary key \u2014 declare an id() column.` : `Relation "${t.name}"."${rel.name}" belongsTo "${rel.table}", but "${rel.table}" has no id() column to join on. A belongsTo relation joins this table's foreign key to the parent's primary key \u2014 declare an id() column on "${rel.table}".`
+        );
+      } else {
+        rel.parentKey = idCol.name;
+      }
+      const fkCol = columnByName(fkSide, rel.fk);
+      if (!fkCol) {
+        errors.push(
+          `Relation "${t.name}"."${rel.name}" joins on "${fkSide.name}"."${rel.fk}", but "${fkSide.name}" has no column "${rel.fk}". The foreign key must be a real column on "${fkSide.name}".`
+        );
+        continue;
+      }
+      if (fkCol.references !== keySide.name) {
+        errors.push(
+          fkCol.references === null ? `Relation "${t.name}"."${rel.name}" joins on "${fkSide.name}"."${rel.fk}", but that column declares no foreign key. Declare it as ${rel.fk}: <type>({ references: '${keySide.name}' }) so the join key is a proven foreign key, not a free-form join.` : `Relation "${t.name}"."${rel.name}" joins on "${fkSide.name}"."${rel.fk}", but that column references "${fkCol.references}", not "${keySide.name}". The foreign key must reference the table that holds the primary key of this relation.`
+        );
+      } else if (idCol) {
+        const expectedHelper = idCol.uuid ? "text" : "integer";
+        if (fkCol.helper !== expectedHelper) {
+          errors.push(
+            `Relation "${t.name}"."${rel.name}" joins "${fkSide.name}"."${rel.fk}" to "${keySide.name}"."${idCol.name}", but their key types do not match. Use ${expectedHelper}() for the foreign key so fetched rows can be stitched to the ${idCol.uuid ? "text" : "whole-number"} key exactly.`
+          );
+        }
+      }
+    }
+  }
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
@@ -1328,26 +1454,28 @@ function readRelations(r, tableName) {
     seen.add(name);
     r.expectPunct(":", `after relation "${key.name}" on table "${tableName}"`);
     const callee = r.expectIdent(`for relation "${key.name}" on table "${tableName}"`);
-    if (callee.value !== "hasMany") {
-      throw new SchemaTsError(`line ${callee.line}: relation "${key.name}" on table "${tableName}" uses "${callee.value}()", which is not supported. Only hasMany('child_table', 'foreign_key') is available.`);
+    if (callee.value !== "hasMany" && callee.value !== "belongsTo") {
+      throw new SchemaTsError(`line ${callee.line}: relation "${key.name}" on table "${tableName}" uses "${callee.value}()", which is not supported. Use hasMany('child_table', 'foreign_key') or belongsTo('parent_table', 'foreign_key').`);
     }
-    r.expectPunct("(", 'after "hasMany"');
-    const childTok = r.next();
-    if (childTok.kind !== "string") throw new SchemaTsError(`line ${childTok.line}: hasMany() for relation "${key.name}" on table "${tableName}" needs the child table name as a quoted string first.`);
-    r.expectPunct(",", `after the child table in hasMany() for relation "${key.name}" on table "${tableName}" \u2014 hasMany('child_table', 'foreign_key')`);
+    const kind = callee.value;
+    const side = kind === "hasMany" ? "child" : "parent";
+    r.expectPunct("(", `after "${kind}"`);
+    const relatedTok = r.next();
+    if (relatedTok.kind !== "string") throw new SchemaTsError(`line ${relatedTok.line}: ${kind}() for relation "${key.name}" on table "${tableName}" needs the ${side} table name as a quoted string first.`);
+    r.expectPunct(",", `after the ${side} table in ${kind}() for relation "${key.name}" on table "${tableName}" \u2014 ${kind}('${side}_table', 'foreign_key')`);
     const fkTok = r.next();
-    if (fkTok.kind !== "string") throw new SchemaTsError(`line ${fkTok.line}: hasMany() for relation "${key.name}" on table "${tableName}" needs the child foreign-key column as a quoted string second.`);
+    if (fkTok.kind !== "string") throw new SchemaTsError(`line ${fkTok.line}: ${kind}() for relation "${key.name}" on table "${tableName}" needs the foreign-key column as a quoted string second.`);
     r.tryPunct(",");
-    r.expectPunct(")", `closing hasMany() for relation "${key.name}" on table "${tableName}"`);
-    const childTable = childTok.value.toLowerCase();
+    r.expectPunct(")", `closing ${kind}() for relation "${key.name}" on table "${tableName}"`);
+    const relatedTable = relatedTok.value.toLowerCase();
     const fk = fkTok.value.toLowerCase();
-    if (!SAFE_IDENT.test(childTable) || childTable.length > MAX_NAME_LENGTH) {
-      throw new SchemaTsError(`line ${childTok.line}: hasMany() child table "${childTok.value}" for relation "${key.name}" on table "${tableName}" is not a valid table name.`);
+    if (!SAFE_IDENT.test(relatedTable) || relatedTable.length > MAX_NAME_LENGTH) {
+      throw new SchemaTsError(`line ${relatedTok.line}: ${kind}() ${side} table "${relatedTok.value}" for relation "${key.name}" on table "${tableName}" is not a valid table name.`);
     }
     if (!SAFE_IDENT.test(fk) || fk.length > MAX_NAME_LENGTH) {
-      throw new SchemaTsError(`line ${fkTok.line}: hasMany() foreign key "${fkTok.value}" for relation "${key.name}" on table "${tableName}" is not a valid column name.`);
+      throw new SchemaTsError(`line ${fkTok.line}: ${kind}() foreign key "${fkTok.value}" for relation "${key.name}" on table "${tableName}" is not a valid column name.`);
     }
-    out.push({ name, table: childTable, fk, parentKey: "" });
+    out.push({ name, kind, table: relatedTable, fk, parentKey: "" });
     if (!r.tryPunct(",")) {
       r.expectPunct("}", `closing "relations" of table "${tableName}"`);
       break;
@@ -1801,57 +1929,7 @@ function extractSchemaTs(source) {
         }
       }
     }
-    const columnByName = (t, col) => t.columns.find((c) => c.name === col);
-    for (const t of tables) {
-      if (t.relations.length === 0) continue;
-      const idCol = t.columns.find((c) => c.helper === "id");
-      const rootNames = knownColumns(t);
-      for (const rel of t.relations) {
-        if (rel.name === "__proto__" || rel.name === "prototype" || rel.name === "constructor") {
-          errors.push(
-            `Relation "${t.name}"."${rel.name}" uses a reserved object name. Choose a relation name that can be returned as an ordinary row field.`
-          );
-        } else if (rootNames.has(rel.name)) {
-          errors.push(
-            `Relation "${t.name}"."${rel.name}" has the same name as a column on "${t.name}". Choose a different relation name so nesting child rows cannot overwrite the root column.`
-          );
-        }
-        if (!idCol) {
-          errors.push(
-            `Table "${t.name}" declares relation "${rel.name}" but has no id() column to join on. A hasMany relation joins the child's foreign key to this table's primary key \u2014 declare an id() column.`
-          );
-        } else {
-          rel.parentKey = idCol.name;
-        }
-        const child = tableByName.get(rel.table);
-        if (!child) {
-          const marked = removedTables.includes(rel.table) || exportedTables.includes(rel.table);
-          errors.push(
-            marked ? `Relation "${t.name}"."${rel.name}" targets "${rel.table}", which this file marks ${removedTables.includes(rel.table) ? "removedTable()" : "exported()"}. Remove the relation before the table can go.` : `Relation "${t.name}"."${rel.name}" targets child table "${rel.table}", which is not declared in db/schema.ts. A relation can only target a managed table in the same declaration.`
-          );
-          continue;
-        }
-        const fkCol = columnByName(child, rel.fk);
-        if (!fkCol) {
-          errors.push(
-            `Relation "${t.name}"."${rel.name}" joins on "${rel.table}"."${rel.fk}", but "${rel.table}" has no column "${rel.fk}". The foreign key must be a real column on the child table.`
-          );
-          continue;
-        }
-        if (fkCol.references !== t.name) {
-          errors.push(
-            fkCol.references === null ? `Relation "${t.name}"."${rel.name}" joins on "${rel.table}"."${rel.fk}", but that column declares no foreign key. Declare it as ${rel.fk}: <type>({ references: '${t.name}' }) so the join key is a proven foreign key, not a free-form join.` : `Relation "${t.name}"."${rel.name}" joins on "${rel.table}"."${rel.fk}", but that column references "${fkCol.references}", not "${t.name}". The foreign key must reference the table that declares the relation.`
-          );
-        } else if (idCol) {
-          const expectedHelper = idCol.uuid ? "text" : "integer";
-          if (fkCol.helper !== expectedHelper) {
-            errors.push(
-              `Relation "${t.name}"."${rel.name}" joins "${rel.table}"."${rel.fk}" to "${t.name}"."${idCol.name}", but their key types do not match. Use ${expectedHelper}() for the foreign key so fetched child rows can be stitched to the ${idCol.uuid ? "text" : "whole-number"} parent id exactly.`
-            );
-          }
-        }
-      }
-    }
+    validateDeclaredRelations(tables, tableByName, knownColumns, (table) => removedTables.includes(table) ? "removedTable()" : exportedTables.includes(table) ? "exported()" : null, errors);
     if (errors.length > 0) return { ok: false, errors };
     return {
       ok: true,
@@ -1892,8 +1970,18 @@ function canonicalTableShape(t) {
     uniques: t.uniques,
     ...t.removedColumns.length > 0 ? { removedColumns: t.removedColumns } : {},
     // conditional: a relation-free table keeps its slice-1 generation id. Ordered
-    // by name (readRelations sorts) so the shape is deterministic.
-    ...t.relations.length > 0 ? { relations: t.relations.map((rel) => ({ name: rel.name, table: rel.table, fk: rel.fk, parentKey: rel.parentKey })) } : {}
+    // by name (readRelations sorts) so the shape is deterministic. `kind` is
+    // likewise conditional — absent means hasMany, so a declaration that uses
+    // only hasMany keeps the generation id the composed-joins slice minted.
+    ...t.relations.length > 0 ? {
+      relations: t.relations.map((rel) => ({
+        name: rel.name,
+        table: rel.table,
+        fk: rel.fk,
+        parentKey: rel.parentKey,
+        ...rel.kind === "belongsTo" ? { kind: "belongsTo" } : {}
+      }))
+    } : {}
   };
 }
 

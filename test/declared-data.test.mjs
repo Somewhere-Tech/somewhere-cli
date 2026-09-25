@@ -108,7 +108,7 @@ declare const sw: SomewhereRuntimeContext;
 sw.db.server.tx([{ op: 'query', sql: 'DELETE FROM notes' }]);
 sw.db.server.tx(async () => []);
 sw.db.server.from('notes', { asServer: true });
-sw.db.server.query('DELETE FROM notes');
+sw.db.server.query('DELETE FROM notes', [], { asServer: true });
 sw.db.from('notes', { asServer: false });
 sw.db.count('notes', { asServer: false });
 data.server;

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Regenerate (or prove byte parity with) the platform's parser and generator.
 import { createHash } from 'node:crypto';
-import { readFileSync, writeFileSync } from 'node:fs';
+import { readFileSync, realpathSync, writeFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { join, relative, resolve } from 'node:path';
 
@@ -9,7 +9,8 @@ const [sourceRoot, mode] = process.argv.slice(2);
 if (!sourceRoot || (mode && mode !== '--check')) {
   throw new Error('Usage: node scripts/vendor-declared-data.mjs <platform-source> [--check]');
 }
-const root = resolve(sourceRoot);
+// Real path: esbuild reports its inputs relative to the resolved root (macOS /tmp).
+const root = realpathSync(resolve(sourceRoot));
 const compile = join(root, 'worker/containers/compile');
 const require = createRequire(join(compile, 'package.json'));
 const esbuild = require('esbuild');
