@@ -76,7 +76,7 @@ async function withServer(handler, fn) {
   }
 }
 
-test('deploy sends an explicit empty function map only for requested non-static replacement', async () => {
+test('a full deploy sends its complete function map as the replacement; partial scopes keep omitted functions unless asked (pfb_f320d7733b8c)', async () => {
   const testHome = mkdtempSync(join(tmpdir(), 'sw-replace-functions-home-'));
   const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-replace-functions-fixture-'));
   writeLogin(testHome);
@@ -105,14 +105,63 @@ test('deploy sends an explicit empty function map only for requested non-static 
     }
   });
   assert.equal(bodies.length, 5);
-  assert.equal(Object.hasOwn(bodies[0], 'functions'), false, 'ordinary omission preserves existing functions');
-  assert.equal(Object.hasOwn(bodies[0], 'replace_functions'), false);
-  assert.deepEqual(bodies[1].functions, {}, 'full replacement explicitly removes the function half');
+  assert.deepEqual(bodies[0].functions, {}, 'a plain full deploy: the directory is the complete function set');
+  assert.equal(bodies[0].replace_functions, true);
+  assert.deepEqual(bodies[1].functions, {}, '--replace-functions on a full deploy is the same request');
   assert.equal(bodies[1].replace_functions, true);
   assert.deepEqual(bodies[2].functions, {}, 'functions-only replacement also transmits intent');
   assert.deepEqual(bodies[2].files, {});
+  assert.equal(bodies[2].replace_functions, true);
   assert.equal(Object.hasOwn(bodies[3], 'functions'), false, 'static scope never sends functions');
   assert.equal(Object.hasOwn(bodies[4], 'functions'), false, 'ordinary functions-only omission preserves');
+  assert.equal(Object.hasOwn(bodies[4], 'replace_functions'), false, 'functions-only keeps omitted functions by default');
+});
+
+test('deploy output names removed and kept functions, and says nothing when there are none (pfb_f320d7733b8c)', async () => {
+  const testHome = mkdtempSync(join(tmpdir(), 'sw-function-report-home-'));
+  const fixtureDir = mkdtempSync(join(tmpdir(), 'sw-function-report-fixture-'));
+  writeLogin(testHome);
+  writeProject(fixtureDir);
+  writeFixture(fixtureDir);
+  mkdirSync(join(fixtureDir, 'api', '_lib'), { recursive: true });
+  writeFileSync(join(fixtureDir, 'api', '_lib', 'club.ts'), 'export const club = 1;\n');
+  writeFileSync(join(fixtureDir, 'api', 'vote.ts'), 'export default async function () { return Response.json({ ok: true }); }\n');
+  const reports = [
+    { removed_functions: ['api/_lib.ts'] },
+    { preserved_functions: ['api/_lib.ts'] },
+    {},
+  ];
+  const bodies = [];
+  const outputs = [];
+  await withServer((req, res) => {
+    let body = '';
+    req.on('data', chunk => { body += chunk; });
+    req.on('end', () => {
+      if (req.method === 'POST' && req.url === '/v1/deploy') {
+        bodies.push(JSON.parse(body));
+        sendJson(res, 200, { ok: true, data: {
+          version: bodies.length, files: 1, url: 'https://fixture.somewhere.site', has_functions: true,
+          ...reports[bodies.length - 1],
+        } });
+      } else sendJson(res, 404, { ok: false, error: 'NOT_FOUND', message: req.url });
+    });
+  }, async apiUrl => {
+    for (const flags of [[], ['--scope', 'functions'], []]) {
+      const result = await run(['deploy', ...flags], {
+        cwd: fixtureDir, env: { HOME: testHome, USERPROFILE: testHome, SOMEWHERE_API_URL: apiUrl },
+      });
+      assert.equal(result.status, 0, `${flags.join(' ')}: ${result.stdout}\n${result.stderr}`);
+      outputs.push(result.stdout + result.stderr);
+    }
+  });
+  assert.deepEqual(Object.keys(bodies[0].functions).sort(), ['api/_lib/club.ts', 'api/vote.ts']);
+  assert.equal(bodies[0].replace_functions, true);
+  assert.match(outputs[0], /Removed 1 function\(s\) no longer in this directory: api\/_lib\.ts\./);
+  assert.doesNotMatch(outputs[0], /Kept \d+ function/);
+  assert.equal(Object.hasOwn(bodies[1], 'replace_functions'), false);
+  assert.match(outputs[1], /Kept 1 function\(s\) not in this directory: api\/_lib\.ts \(pass --replace-functions to drop them\)\./);
+  assert.doesNotMatch(outputs[1], /Removed \d+ function/);
+  assert.doesNotMatch(outputs[2], /Removed \d+ function|Kept \d+ function/, 'no removed or kept functions → no line');
 });
 
 function sendJson(res, status, payload) {

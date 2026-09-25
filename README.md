@@ -131,7 +131,7 @@ deploys but does not undeploy the current site.
 | `--scope functions` | Deploy only the backend functions; leave the site untouched |
 | `--scope static` | Deploy only the site; leave functions untouched |
 | `--dry-run` | Show what would change (added / modified / removed) without deploying |
-| `--replace-functions` | Drop deployed functions not present locally (repo-as-truth; default keeps them) |
+| `--replace-functions` | Drop deployed functions not present locally. A full deploy already does this and names each removed function; use it with `--scope functions`, which otherwise keeps them |
 | `--project <id>` | Deploy to a specific project instead of the linked one |
 | `--force` | Overwrite remote changes even when this machine has an older deployed version |
 | `--yes` | Skip the `--force` confirmation prompt |

@@ -357,7 +357,7 @@ export function registerDeploy(program: Command) {
     )
     .option(
       '--replace-functions',
-      'Delete deployed functions that are not in this directory (repo-as-truth). Default keeps them.',
+      'Delete deployed functions that are not in this directory. A full deploy already does; use it with --scope functions, which otherwise keeps them.',
     )
     .option(
       '--prebuilt',
@@ -710,11 +710,16 @@ export function registerDeploy(program: Command) {
         if (scope !== 'functions' && Object.keys(binaryFiles).length > 0) {
           body.binary_files = binaryFiles;
         }
-        if (scope !== 'static' && (opts.replaceFunctions || Object.keys(functions).length > 0)) {
+        // A full deploy sends the whole directory, so its functions are the
+        // complete set: a deployed function no longer here is removed and named
+        // in the output (pfb_f320d7733b8c). --scope functions keeps the ones it
+        // leaves out unless --replace-functions is passed.
+        const replaceFunctions = Boolean(opts.replaceFunctions) || !scope;
+        if (scope !== 'static' && (replaceFunctions || Object.keys(functions).length > 0)) {
           body.functions = functions;
         }
         if (scope) body.scope = scope;
-        if (opts.replaceFunctions) body.replace_functions = true;
+        if (replaceFunctions) body.replace_functions = true;
         if (opts.dryRun) body.dry_run = true;
         // --prebuilt (alias --allow-bundled) opts out of the raw-source
         // contract: the deploy keeps pre-built / bundled output as-is instead
@@ -839,6 +844,13 @@ export function registerDeploy(program: Command) {
         if (result.preserved_functions && result.preserved_functions.length > 0) {
           warn(
             `Kept ${result.preserved_functions.length} function(s) not in this directory: ${result.preserved_functions.slice(0, 5).join(', ')}${result.preserved_functions.length > 5 ? ', …' : ''} (pass --replace-functions to drop them).`,
+          );
+        }
+        // Functions this deploy removed because they are no longer in the
+        // directory — named, so a rename never leaves a silent leftover.
+        if (result.removed_functions && result.removed_functions.length > 0) {
+          warn(
+            `Removed ${result.removed_functions.length} function(s) no longer in this directory: ${result.removed_functions.join(', ')}.`,
           );
         }
 
@@ -1025,6 +1037,7 @@ export interface DeployResult {
   build_log?: string[];
   warnings?: string[];
   preserved_functions?: string[];
+  removed_functions?: string[];
   function_errors?: Array<{ route?: string; error?: string } | string>;
   runtime_fixes?: Array<{ notice_id: string; title: string; message: string }>;
   status?: string;
