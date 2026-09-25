@@ -13,6 +13,7 @@ import {
 import { installInitDependencies } from '../lib/init-install.js';
 import { canWriteInitScaffold, writeInitScaffold, writeMissingGuideFiles } from '../lib/init-scaffold.js';
 import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from '../lib/init-agent-guide.js';
+import { createAuthTemplate } from '../lib/init-auth-template.js';
 import { createGreenTemplate } from '../lib/init-green-template.js';
 import { formatNextActions, nextActions, type NextActionContext } from '../lib/next-actions.js';
 import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
@@ -22,7 +23,15 @@ interface InitOptions {
   link?: boolean;
   project?: string;
   bare?: boolean;
+  template?: string;
   json?: boolean;
+}
+
+const INIT_TEMPLATES = ['auth', 'minimal'] as const;
+type InitTemplateName = (typeof INIT_TEMPLATES)[number];
+
+function starterFiles(name: InitTemplateName) {
+  return name === 'minimal' ? createGreenTemplate() : createAuthTemplate();
 }
 
 interface LinkProject {
@@ -40,18 +49,25 @@ export function registerInit(program: Command) {
     .option('--link', 'Link to an existing project instead of creating one')
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
     .option('--bare', 'Create and link only: no starter source or dependencies (AGENTS.md/CLAUDE.md are still added when absent)')
+    .option('--template <name>', 'Starter to write: auth (default, cookie sign-in) or minimal (no sign-in)', 'auth')
     .option('--json', 'Print the created or linked project as JSON')
     .addHelpText(
       'after',
       '\nRecommended for a new app: run `somewhere init` in an empty directory.\n'
-        + 'The starter is a deployable React + TypeScript app: src/ with a services/ layer,\n'
-        + 'a typed api/greeting.ts function, db/schema.ts, types/, tsconfig.json, and an\n'
-        + 'AGENTS.md workflow (typecheck, deploy, verify --flow). It has no auth, email, or\n'
-        + 'cron code; add those with `somewhere docs <topic>`.\n'
+        + 'The starter is a deployable React + TypeScript app with cookie sign-in: the SDK\n'
+        + 'client in src/services/auth.ts, the SDK\'s packaged handler as a one-line\n'
+        + 'api/auth/[...path].ts, a protected api/greeting.ts (sw.endpoint), db/schema.ts,\n'
+        + 'and an AGENTS.md workflow (typecheck, deploy, verify). `--template minimal` writes\n'
+        + 'the same app without sign-in.\n'
         + '\nA directory that already has files is linked and left untouched. Use --bare\n'
         + 'only to bring your own layout; existing AGENTS.md/CLAUDE.md are never replaced.\n',
     )
     .action(async (opts: InitOptions) => {
+      const template = (opts.template ?? 'auth') as InitTemplateName;
+      if (!INIT_TEMPLATES.includes(template)) {
+        error(`Unknown --template ${opts.template}. Use one of: ${INIT_TEMPLATES.join(', ')}.`);
+        process.exit(2);
+      }
       if (opts.project && !opts.link) {
         error('--project requires --link.');
         process.exit(1);
@@ -156,7 +172,7 @@ export function registerInit(program: Command) {
           saveMcpConfig(dir);
           if (!hasGlobalMcpConfig()) saveGlobalMcpConfig();
           if (shouldScaffold) {
-            writeInitScaffold(dir, createGreenTemplate());
+            writeInitScaffold(dir, starterFiles(template));
             await installInitDependencies({ cwd: dir, quiet: true });
           } else if (opts.bare) {
             writeBareGuide(dir);
@@ -176,7 +192,7 @@ export function registerInit(program: Command) {
         saveMcpConfig(dir);
 
         if (shouldScaffold) {
-          const scaffold = writeInitScaffold(dir, createGreenTemplate());
+          const scaffold = writeInitScaffold(dir, starterFiles(template));
           success(`Full-stack starter written (${scaffold.created.length} files)`);
           info('Installing pinned dependencies with `npm install`…');
           await installInitDependencies({ cwd: dir, quiet: false });
