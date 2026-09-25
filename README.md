@@ -183,8 +183,9 @@ platform.
 
 `somewhere preview` sends every save to a private URL, reachable only by you
 until you share the link. The build is the one production would get. The
-database is a separate copy of your schema with none of your production rows,
-so nothing you try in a preview can touch real data. After each update the
+database starts as a separate copy of your production data, rows included, so
+you test against real-shaped data and nothing you try in a preview can change
+production rows. After each update the
 command prints that URL and the `somewhere promote` command that makes those
 exact bytes live. Reach for it when you want a URL to send someone, or when the
 agent doing the work reaches the platform over MCP and has no local machine to
@@ -200,11 +201,13 @@ or signed in as someone else — gets a 404.
 
 A preview is built against your live version, so a project that has never been
 published has nothing for the first one to build on. On such a project
-`somewhere preview` publishes once — it says so before it does — and every
-preview after that stays private to you and never changes what is live.
+`somewhere preview` asks before publishing once (`--publish-first` gives that
+consent up front in a script), and every preview after that stays private to you
+and never changes what is live.
 
-`somewhere preview` is on the Pro and Scale plans. `somewhere dev` runs the same
-app on your machine on every plan, and deploying is unaffected on every plan.
+`somewhere preview` is included on the Builder, Pro and Scale plans. `somewhere
+dev` runs the same app on your machine on every plan, and deploying is
+unaffected on every plan.
 
 `somewhere dev --cloud` still starts the same loop and points you at the new
 name. `somewhere dev --local` is accepted and does what bare `somewhere dev`
