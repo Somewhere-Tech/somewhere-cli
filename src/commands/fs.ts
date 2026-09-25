@@ -7,7 +7,7 @@ import { Command } from 'commander';
 import type { Response as UndiciResponse } from 'undici';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { error, printJson, success, table } from '../lib/output.js';
+import { error, platformErrorEnvelope, printJson, success, table } from '../lib/output.js';
 
 interface FsCommandOptions {
   project?: string;
@@ -50,6 +50,7 @@ interface ApiEnvelope<T> {
   data?: T;
   error?: string;
   message?: string;
+  hint?: string;
 }
 
 export function registerFs(program: Command): void {
@@ -130,15 +131,15 @@ export function registerFs(program: Command): void {
       }
     });
 
-  fs.command('ls <remote>')
-    .description('List a directory in project storage')
+  fs.command('ls [remote]')
+    .description('List a directory in project storage (defaults to the root, /)')
     .option('--project <slug>', 'Project slug or ID (defaults to the linked project)')
     .option('--json', 'Print the raw directory response as JSON')
-    .action(async (remote: string, opts: FsCommandOptions) => {
+    .action(async (remote: string | undefined = '/', opts: FsCommandOptions) => {
       try {
         const project = resolveProject(opts.project);
         const client = new ApiClient(getToken());
-        const response = await client.callStream('GET', fsPath(project, remote), undefined, {
+        const response = await client.callStream('GET', fsPath(project, remote, { allowRoot: true }), undefined, {
           timeoutMs: LONG_CALL_TIMEOUT_MS,
         });
         const contentType = response.headers.get('content-type') ?? '';
@@ -208,8 +209,10 @@ function resolveProject(explicit?: string): string {
   return linked.project_id;
 }
 
-function fsPath(project: string, remote: string): string {
+function fsPath(project: string, remote: string, opts: { allowRoot?: boolean } = {}): string {
   const path = remote.replace(/^\/+/, '');
+  // `/` is a directory you can list, never a file you can read or write.
+  if (!path && opts.allowRoot) return `/fs/${encodeURIComponent(project)}/`;
   if (!path) {
     throw new CliApiError('INVALID_REMOTE_PATH', 'Remote path is required.', 0);
   }
@@ -259,6 +262,12 @@ async function readEnvelope<T>(response: UndiciResponse): Promise<T> {
     payload.error ?? 'UNKNOWN',
     payload.message ?? `File API request failed (HTTP ${response.status}).`,
     response.status,
+    undefined,
+    typeof payload.hint === 'string' ? payload.hint : undefined,
+    {
+      requestId: response.headers.get('x-request-id') ?? undefined,
+      traceId: response.headers.get('x-trace-id') ?? undefined,
+    },
   );
 }
 
@@ -267,7 +276,7 @@ function fail(reason: unknown, json?: boolean): never {
     ? reason
     : new CliApiError('CLI_ERROR', reason instanceof Error ? reason.message : String(reason), 0);
   if (json) {
-    printJson({ ok: false, error: err.code, message: err.message, status: err.statusCode });
+    printJson({ ok: false, error: err.code, message: err.message, status: err.statusCode, ...(platformErrorEnvelope(err)?.extra ?? {}) });
   } else {
     error(err.message);
   }

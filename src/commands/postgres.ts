@@ -4,7 +4,7 @@ import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken } from '../lib/config.js';
 import { resolveProjectRef } from '../lib/platform-command.js';
-import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, platformErrorEnvelope, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 
 /**
  * `somewhere postgres` — bind the developer's OWN Neon database to a project.
@@ -185,7 +185,7 @@ function reportError(err: unknown, json: boolean | undefined): void {
     const uncertain = err.code === CREATE_UNCERTAIN;
     if (json) {
       printJsonError(err.code, err.message, {
-        ...(err.hint ? { hint: err.hint } : {}),
+        ...platformErrorEnvelope(err)?.extra,
         // An agent reading --json must see "do not retry" without parsing prose.
         ...(uncertain ? { outcome: 'unknown', guidance: CREATE_RECONCILE_GUIDANCE } : {}),
       });

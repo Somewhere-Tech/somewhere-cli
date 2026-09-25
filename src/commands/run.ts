@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { bold, dim, error, red, teal } from '../lib/output.js';
+import { bold, dim, error, red, teal, warn } from '../lib/output.js';
 
 interface RunResult {
   result: unknown;
@@ -63,7 +63,13 @@ export function registerRun(program: Command) {
           error('--timeout must be a positive number of milliseconds.');
           process.exit(1);
         }
-        if (timeoutMs > MAX_TIMEOUT_MS) timeoutMs = MAX_TIMEOUT_MS;
+        if (timeoutMs > MAX_TIMEOUT_MS) {
+          // Say so: a silent cap made a 60 s script look like it died at random.
+          const notice = `--timeout ${timeoutMs} is above the ${MAX_TIMEOUT_MS} ms limit for \`somewhere run\`; the script runs with ${MAX_TIMEOUT_MS} ms.`;
+          if (opts.json) process.stderr.write(`${notice}\n`);
+          else warn(notice);
+          timeoutMs = MAX_TIMEOUT_MS;
+        }
       }
 
       let r: RunResult;
@@ -81,9 +87,9 @@ export function registerRun(program: Command) {
         );
       } catch (err) {
         if (err instanceof CliApiError) {
-          error(`${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`);
+          error(`${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`, err);
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
         }
         process.exit(1);
       }

@@ -219,7 +219,7 @@ export async function runPreviewPhase<T>(
     return result;
   } catch (err) {
     const state = previewPlatformState(err);
-    error(`${label} failed after ${elapsedLabel(Date.now() - startedAt)}${state ? ` — platform state: ${state}` : ''}`);
+    error(`${label} failed after ${elapsedLabel(Date.now() - startedAt)}${state ? ` — platform state: ${state}` : ''}`, err);
     throw err;
   } finally {
     clearInterval(heartbeat);
@@ -289,7 +289,8 @@ export function registerPreview(program: Command) {
         + 'rows. Nothing your users see changes — production keeps serving what you last promoted, until '
         + 'you run `somewhere promote`. Reach for this when you want the real hosted app in front of you, '
         + 'or when your agent reaches the platform over MCP and cannot serve on localhost. '
-        + 'Available on the Pro and Scale plans; `somewhere dev` provides frontend hot reload against the deployed backend.',
+        + 'The plans that include it are listed at https://somewhere.tech/pricing; '
+        + '`somewhere dev` provides frontend hot reload against the deployed backend.',
     )
     .option('--project <id>', 'Override project ID')
     .option(
@@ -316,7 +317,7 @@ export function registerDev(program: Command) {
         const target = await getDeployedProjectServingUrl(client, projectId);
         await startFrontendDev(process.cwd(), target, Number(opts.port), opts.open);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -653,7 +654,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
       process.exit(1);
     }
     if (!(isBuildError(err) && renderBuildError(err, cwd))) {
-      error(err instanceof Error ? err.message : String(err));
+      error(err instanceof Error ? err.message : String(err), err);
     }
     error('Could not publish the first version, so the private preview has nothing to build on.');
     process.exit(1);
@@ -721,7 +722,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
   } catch (err) {
     spinner?.fail('Initial sync failed');
     if (!(isBuildError(err) && renderBuildError(err, cwd))) {
-      error(err instanceof Error ? err.message : String(err));
+      error(err instanceof Error ? err.message : String(err), err);
     }
     process.exit(1);
   }
@@ -958,7 +959,7 @@ async function deployBatch(
       const handoff = await mintPreviewHandoff(client, projectId, draftId, nextCandidate);
       printPreviewHandoff(handoff);
     } catch (err) {
-      error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`);
+      error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`, err);
       printPreviewIdentity(draftId, nextCandidate, projectId);
     }
     return nextCandidate;
@@ -977,7 +978,7 @@ async function deployBatch(
       throw new PreviewFinishedError(finished);
     }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     return null;
   }
 }

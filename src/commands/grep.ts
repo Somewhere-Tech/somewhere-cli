@@ -61,7 +61,7 @@ export function registerGrep(program: Command): void {
           process.stderr.write('Results truncated. Narrow --glob or pattern, or raise --max-results.\n');
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

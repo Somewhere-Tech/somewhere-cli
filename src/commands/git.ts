@@ -263,7 +263,7 @@ export function registerGit(program: Command) {
           if (links.live_url) info(`Live: ${teal(links.live_url)}`);
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -299,7 +299,7 @@ export function registerGit(program: Command) {
           console.log('');
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -328,7 +328,7 @@ export function registerGit(program: Command) {
         if (opts.json) printJson({ disconnected: true, project_id: ref });
         else success('GitHub disconnected. The current deployed site is unchanged.');
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

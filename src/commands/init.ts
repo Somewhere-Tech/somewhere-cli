@@ -103,7 +103,7 @@ export function registerInit(program: Command) {
         try {
           await linkExisting(client, dir, opts.project, Boolean(opts.json));
         } catch (err) {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
           process.exit(1);
         }
         return;
@@ -199,7 +199,7 @@ export function registerInit(program: Command) {
         printNext({ stage: 'init', scaffolded: shouldScaffold });
       } catch (err) {
         spinner?.fail('Failed to create project');
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });

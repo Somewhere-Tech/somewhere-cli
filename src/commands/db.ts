@@ -79,7 +79,7 @@ export function registerDb(program: Command) {
         info(dim(`${r.data.length} row${r.data.length === 1 ? '' : 's'}${r.duration_ms != null ? ` · ${r.duration_ms}ms` : ''}`));
       } catch (err) {
         spinner?.fail('Query failed');
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -165,7 +165,7 @@ export function registerDb(program: Command) {
         }
       } catch (err) {
         spinner?.fail('Dump failed');
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -213,7 +213,7 @@ export function registerDb(program: Command) {
           rows.map((t) => [teal(t.name), t.row_count != null ? String(t.row_count) : dim('—')]),
         );
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });

@@ -9,7 +9,7 @@ import {
   saveProjectDeployState,
   type ProjectConfigEntry,
 } from '../lib/config.js';
-import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, platformErrorEnvelope, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 import { getProjectServingUrl } from '../lib/project-urls.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { isRecord, unwrapPlatformData } from '../lib/platform-command.js';
@@ -311,9 +311,9 @@ export function registerPromote(program: Command) {
         });
         if (opts.json) {
           if (err instanceof CliApiError) {
-            printJsonError(err.code, message);
+            printJsonError(err.code, message, platformErrorEnvelope(err)?.extra);
           } else {
-            printJsonError('ERROR', message);
+            printJsonError('CLI_ERROR', message);
           }
           process.exit(1);
         }

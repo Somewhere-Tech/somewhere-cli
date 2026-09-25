@@ -300,7 +300,7 @@ export function registerAuth(program: Command) {
         email = me.email ?? '';
         username = me.username ?? '';
       } catch (err) {
-        error(`Token is not valid: ${err instanceof Error ? err.message : String(err)}`);
+        error(`Token is not valid: ${err instanceof Error ? err.message : String(err)}`, err);
         process.exit(1);
       }
       saveConfig({ token, user: { email, username } });
@@ -420,7 +420,7 @@ export function registerAuth(program: Command) {
         if (outputCreated && !wroteOutput) {
           try { unlinkSync(destination); } catch { /* best effort */ }
         }
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -500,7 +500,7 @@ async function runDeviceLogin(): Promise<void> {
       await runLegacyLogin();
       return;
     }
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     process.exit(1);
   }
 }
@@ -520,7 +520,7 @@ async function runLegacyLogin(): Promise<void> {
     process.exit(0);
   } catch (err) {
     spinner.fail('Login failed');
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     process.exit(1);
   }
 }

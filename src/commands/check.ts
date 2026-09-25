@@ -301,7 +301,7 @@ export function registerCheck(program: Command) {
             `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
           );
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
         }
         process.exit(1);
       }

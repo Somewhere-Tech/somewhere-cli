@@ -24,7 +24,7 @@ import {
 import { collectFiles, formatBytes } from '../lib/files.js';
 import { mintTempAccount } from '../lib/temp-auth.js';
 import { ensureClaimHandoff } from '../lib/claim-handoff.js';
-import { dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
+import { dim, error, green, info, platformErrorEnvelope, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
@@ -509,7 +509,7 @@ export function registerDeploy(program: Command) {
             };
           } catch (err) {
             powSpinner?.fail('Could not create a temporary session');
-            error(err instanceof Error ? err.message : String(err));
+            error(err instanceof Error ? err.message : String(err), err);
             process.exit(1);
           }
         }
@@ -579,7 +579,7 @@ export function registerDeploy(program: Command) {
             projectId = created.id;
           } catch (err) {
             createSpinner?.fail('Could not create a temporary project');
-            error(err instanceof Error ? err.message : String(err));
+            error(err instanceof Error ? err.message : String(err), err);
             process.exit(1);
           }
         } else {
@@ -992,10 +992,7 @@ export function registerDeploy(program: Command) {
           // name is one we cannot find either (tsk_9c5ed7f8).
           const reference = formatErrorReference(err.meta);
           if (opts.json) {
-            printJsonError(err.code, err.message, {
-              ...(err.meta.requestId ? { request_id: err.meta.requestId } : {}),
-              ...(err.meta.traceId ? { trace_id: err.meta.traceId } : {}),
-            });
+            printJsonError(err.code, err.message, platformErrorEnvelope(err)?.extra);
           } else {
             error(
               `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
@@ -1003,7 +1000,7 @@ export function registerDeploy(program: Command) {
             if (reference) info(dim(reference));
           }
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
         }
         process.exit(1);
       }

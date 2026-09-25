@@ -94,7 +94,7 @@ export function registerAdvisor(program: Command): void {
           process.stdout.write(answer.endsWith('\n') ? answer : `${answer}\n`);
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

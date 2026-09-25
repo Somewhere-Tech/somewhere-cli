@@ -8,7 +8,7 @@ import {
   truncateText,
   unwrapPlatformData,
 } from '../lib/platform-command.js';
-import { dim, error, printJson, printJsonError, success, table } from '../lib/output.js';
+import { dim, error, platformErrorEnvelope, printJson, printJsonError, success, table } from '../lib/output.js';
 
 interface ProjectOptions {
   project?: string;
@@ -92,7 +92,7 @@ async function runCronTool(
     if (json) printJson(value);
     else human(value);
   } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     process.exitCode = 1;
   }
 }
@@ -188,7 +188,9 @@ function printWaitedJob(job: JobView, timedOut: boolean, timeoutSeconds: number)
   if (timingText) console.log(dim(timingText));
 }
 
-function platformErrorParts(err: unknown): { code: string; message: string } {
+function platformErrorParts(err: unknown): { code: string; message: string; extra?: Record<string, unknown> } {
+  const platform = platformErrorEnvelope(err);
+  if (platform) return platform;
   const message = err instanceof Error ? err.message : String(err);
   const match = /^([A-Z][A-Z0-9_]+):\s*(.+)$/s.exec(message);
   return match ? { code: match[1], message: match[2] } : { code: 'CLI_ERROR', message };
@@ -201,9 +203,14 @@ function cronRunUnavailable(err: unknown): boolean {
   return code === 'NOT_FOUND' && !/^Scheduled task not found\.?$/i.test(message.trim());
 }
 
-function printTypedCronError(code: string, message: string, json: boolean | undefined): void {
-  if (json) printJsonError(code, message);
-  else error(`${code}: ${message}`);
+function printTypedCronError(
+  code: string,
+  message: string,
+  json: boolean | undefined,
+  extra?: Record<string, unknown>,
+): void {
+  if (json) printJsonError(code, message, extra);
+  else error(`${code}: ${message}${typeof extra?.hint === 'string' ? ` Next: ${extra.hint}` : ''}`);
   process.exitCode = 1;
 }
 
@@ -347,8 +354,8 @@ export function registerCron(program: Command): void {
           printTypedCronError('CRON_RUN_NOT_AVAILABLE', CRON_RUN_UNAVAILABLE, opts.json);
           return;
         }
-        const { code, message } = platformErrorParts(err);
-        printTypedCronError(code, message, opts.json);
+        const { code, message, extra } = platformErrorParts(err);
+        printTypedCronError(code, message, opts.json, extra);
       }
     });
 
@@ -380,7 +387,7 @@ export function registerCron(program: Command): void {
         ]);
         await runCronTool('cron_create', args, opts.json, (value) => printCronMutation('Scheduled trigger created', value));
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -411,7 +418,7 @@ export function registerCron(program: Command): void {
         }
         await runCronTool('cron_update', args, opts.json, (value) => printCronMutation('Scheduled trigger updated', value));
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

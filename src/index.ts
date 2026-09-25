@@ -137,7 +137,7 @@ try {
       process.exitCode = err.exitCode || 1;
     }
   } else if (err instanceof Error) {
-    error(err.message);
+    error(err.message, err);
     process.exitCode = 1;
   } else {
     throw err;

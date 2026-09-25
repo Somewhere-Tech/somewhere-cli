@@ -27,9 +27,53 @@ export function success(msg: string) {
   console.log(`${green('✓')} ${msg}`);
 }
 
-export function error(msg: string) {
+/**
+ * The platform's own refusal, exactly as it should reach `--json`.
+ *
+ * Both error types that carry one (the API's CliApiError and an MCP tool's
+ * PlatformToolError) are matched by shape rather than imported: output.ts sits
+ * below client.ts in the import graph. Anything else — a bad flag, a missing
+ * file — originated in the CLI and has no code of its own.
+ */
+export function platformErrorEnvelope(
+  cause: unknown,
+): { code: string; message: string; extra: Record<string, unknown> } | null {
+  if (!(cause instanceof Error)) return null;
+  if (cause.name !== 'CliApiError' && cause.name !== 'PlatformToolError') return null;
+  const typed = cause as Error & {
+    code?: unknown;
+    detail?: unknown;
+    hint?: unknown;
+    data?: unknown;
+    meta?: { requestId?: string; traceId?: string; retry?: boolean; retryAfterMs?: number };
+  };
+  if (typeof typed.code !== 'string' || !typed.code) return null;
+  const meta = typed.meta ?? {};
+  return {
+    code: typed.code,
+    message: typeof typed.detail === 'string' ? typed.detail : typed.message,
+    extra: {
+      ...(typeof typed.hint === 'string' && typed.hint ? { hint: typed.hint } : {}),
+      ...(meta.requestId ? { request_id: meta.requestId } : {}),
+      ...(meta.traceId ? { trace_id: meta.traceId } : {}),
+      ...(typeof meta.retry === 'boolean' ? { retry: meta.retry } : {}),
+      ...(typeof meta.retryAfterMs === 'number' ? { retry_after_ms: meta.retryAfterMs } : {}),
+      ...(typed.data && typeof typed.data === 'object' ? { data: typed.data } : {}),
+    },
+  };
+}
+
+/**
+ * Print a failure. `cause` is the error behind it, when there is one: in
+ * `--json` mode a platform refusal keeps its own code, message, hint and
+ * request id, and only a failure that began in the CLI says CLI_ERROR.
+ */
+export function error(msg: string, cause?: unknown) {
   if (jsonOutputMode) {
-    if (!jsonErrorWritten) printJsonError('CLI_ERROR', stripAnsi(msg));
+    if (jsonErrorWritten) return;
+    const platform = platformErrorEnvelope(cause);
+    if (platform) printJsonError(platform.code, platform.message, platform.extra);
+    else printJsonError('CLI_ERROR', stripAnsi(msg));
     return;
   }
   console.error(`${red('✗')} ${msg}`);

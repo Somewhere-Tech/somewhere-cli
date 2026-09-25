@@ -57,7 +57,7 @@ export function registerCall(program: Command): void {
         const next = /unknown tool|not found/i.test(message)
           ? ' Run `somewhere call --list` to see exact tool names.'
           : '';
-        error(`${message}${next}`);
+        error(`${message}${next}`, err);
         process.exitCode = 1;
       }
     });
