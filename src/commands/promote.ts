@@ -99,6 +99,10 @@ interface PromoteResult {
   preview_id?: string;
   active_release_id?: string;
   release_id?: string;
+  /** Production functions the preview lacked that stayed live (the default). */
+  preserved_functions?: string[];
+  /** Production functions removed because --prune was passed. */
+  removed_functions?: string[];
 }
 
 export function promoteSurfaceFromResponse(
@@ -128,6 +132,10 @@ export function registerPromote(program: Command) {
     .option('-p, --project <id>', 'Project ID (defaults to the linked project)')
     .option('-m, --message <msg>', 'Release notes for this version')
     .option('-y, --yes', 'Skip confirmation prompt')
+    .option(
+      '--prune',
+      'Remove production functions the preview does not include. By default they stay live.',
+    )
     .option('--json', 'Print the raw promote response as JSON')
     .action(async (draftId: string, candidateReleaseId: string, opts) => {
       const client = new ApiClient(getToken());
@@ -197,6 +205,7 @@ export function registerPromote(program: Command) {
           message: opts.message,
           preview_session_id: draftId,
           preview_id: candidateReleaseId,
+          ...(opts.prune ? { replace_functions: true } : {}),
         });
         spinner?.stop();
         if (deployStateEntry) {
@@ -220,6 +229,14 @@ export function registerPromote(program: Command) {
         // Name the preview session this version was promoted from, when known.
         const fromDraft = draftId ?? r.promoted_draft_id;
         if (fromDraft) info(dim(`Promoted from preview session ${teal(fromDraft)}`));
+        const kept = r.preserved_functions ?? [];
+        if (kept.length > 0) {
+          info(`Kept ${kept.length} production function(s) the preview did not include: ${kept.join(', ')} (pass --prune to remove them).`);
+        }
+        const removed = r.removed_functions ?? [];
+        if (removed.length > 0) {
+          warn(`Removed ${removed.length} production function(s) the preview did not include: ${removed.join(', ')}.`);
+        }
         // The app moved; the data did not. Said here, unprompted, because the
         // alternative is a developer discovering it by opening an empty
         // production page and repeating their whole acceptance pass.
