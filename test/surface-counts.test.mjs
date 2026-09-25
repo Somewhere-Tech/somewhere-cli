@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import {
+  countFunctionRoutes,
   countFromResponse,
   countPublishSurface,
   formatPublishSurface,
@@ -148,4 +149,17 @@ test('deploy still reports honestly when it has no local tree to count', () => {
   assert.equal(formatted.staticFileCount, null);
   assert.equal(formatted.headline, 'Static files deployed (1 KB)');
   assert.doesNotMatch(JSON.stringify(formatted), /undefined/);
+});
+
+// ── `_` helpers are uploaded but are not functions (pfb_f59a163c7083) ────────
+
+test('a `_`-prefixed helper under api/ is not counted as a function', () => {
+  const functions = { 'api/club.ts': 'x', 'api/rounds/[id].ts': 'x', 'api/_lib.ts': 'x', 'api/_lib/club.ts': 'x' };
+  assert.equal(countFunctionRoutes(functions), 2);
+  assert.equal(formatPublishSurface(countPublishSurface({ files: { 'index.html': 'x' }, functions })), '1 static file + 2 functions');
+});
+
+test('routes, dynamic routes and underscores inside a name are still counted', () => {
+  const functions = { 'api/club.ts': 'x', 'api/rounds/[id].ts': 'x', 'api/auth/[...path].ts': 'x', 'api/close_round.ts': 'x' };
+  assert.equal(countFunctionRoutes(functions), 4);
 });

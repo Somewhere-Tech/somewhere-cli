@@ -28,7 +28,7 @@ import { dim, error, green, info, platformErrorEnvelope, printJson, printJsonErr
 import type { CliConfig, ProjectConfig } from '../types.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
-import { countFromResponse, formatPublishSurface } from '../lib/surface-counts.js';
+import { countFromResponse, countFunctionRoutes, formatPublishSurface } from '../lib/surface-counts.js';
 import {
   formatVerifyReport,
   loadVerifyFlow,
@@ -780,7 +780,7 @@ export function registerDeploy(program: Command) {
         const hasFunctionErrors = functionErrors.length > 0;
         const formatted = formatDeploySuccess(result, {
           scope,
-          functionCount: Object.keys(functions).length,
+          functionCount: countFunctionRoutes(functions),
           staticFileCount: Object.keys(files).length + Object.keys(binaryFiles).length,
           totalBytes,
           linkedProject: await linkedProjectWithSubdomain(client, result, targetProjectConfig),

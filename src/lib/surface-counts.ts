@@ -85,8 +85,19 @@ export function countPublishSurface(collected: {
   return {
     staticFiles:
       Object.keys(collected.files).length + Object.keys(collected.binaryFiles ?? {}).length,
-    functions: Object.keys(collected.functions ?? {}).length,
+    functions: countFunctionRoutes(collected.functions ?? {}),
   };
+}
+
+/**
+ * Functions are the files that become routes. A file or folder whose name
+ * starts with `_` (`api/_lib.ts`, `api/_lib/db.ts`) is an import-only helper
+ * the platform never publishes, so it is uploaded but not counted.
+ */
+export function countFunctionRoutes(functions: Record<string, unknown>): number {
+  return Object.keys(functions)
+    .filter((path) => !path.split('/').some((segment) => segment.startsWith('_')))
+    .length;
 }
 
 /**
