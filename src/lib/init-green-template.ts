@@ -55,6 +55,29 @@ export interface SomewhereRuntime {
     from<T>(table: string, options: { limit: number }): Promise<QueryResult<T>>;
   };
 }
+
+export interface EndpointInput {
+  body: unknown;
+  user: { id: string; email?: string | null } | null;
+  headers: Headers;
+  params: Record<string, string>;
+  request: Request;
+}
+
+export interface EndpointConfig {
+  auth?: 'none' | 'optional' | 'required';
+  body?: Record<string, unknown>;
+  rateLimit?: string;
+  handler(input: EndpointInput, sw: SomewhereRuntime): Promise<unknown>;
+}
+
+declare global {
+  // sw.endpoint wraps a function with sign-in checks, body validation and
+  // rate limits: docs({ topic: 'sw.endpoint' }).
+  const sw: {
+    endpoint(config: EndpointConfig): (req: Request, sw: SomewhereRuntime) => Promise<Response>;
+  };
+}
 `;
 
 const SCHEMA = `import { id, schema, serverOnly, table, text } from 'somewhere/db';
@@ -69,22 +92,17 @@ export default schema({
 });
 `;
 
-const API = `import type { SomewhereRuntime } from '../types/runtime';
-
-interface GreetingRow {
+const API = `interface GreetingRow {
   message: string;
 }
 
-export default async function greeting(
-  _req: Request,
-  sw: SomewhereRuntime,
-): Promise<Response> {
-  const result = await sw.db.from<GreetingRow>('greetings', { limit: 1 });
-
-  return Response.json({
-    message: result.data[0]?.message ?? 'Your full-stack app is ready.',
-  });
-}
+export default sw.endpoint({
+  auth: 'none',
+  handler: async (_input, sw) => {
+    const result = await sw.db.from<GreetingRow>('greetings', { limit: 1 });
+    return { message: result.data[0]?.message ?? 'Your full-stack app is ready.' };
+  },
+});
 `;
 
 const SERVICE = `import type { GreetingResponse } from '../../types/app';

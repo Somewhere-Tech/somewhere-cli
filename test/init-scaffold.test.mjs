@@ -121,6 +121,7 @@ test('default green starter is a small typed frontend, function, and schema', ()
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
 
+  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /export default sw\.endpoint\(\{/);
   assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.from<GreetingRow>/);
   assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.server/);
   assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
@@ -135,20 +136,24 @@ test('default green starter is a small typed frontend, function, and schema', ()
   assert.equal(claude.trimEnd().split('\n').length, 1);
 
   const workflowOrder = [
+    'somewhere deploy',
+    'somewhere verify',
+    '--flow flow.json',
+    'somewhere browser',
+    'somewhere logs --tail 10',
+    'somewhere errors',
+    '<name>@<subdomain>.test.somewhere.site',
+    'somewhere email test-inbox <addr>',
+    'sw.endpoint({ auth, body, rateLimit, handler })',
+    "createSomewhereAuth()` from `@somewhere-tech/sdk/auth",
+    'somewhere docs <topic>',
+    'somewhere advisor "<question>"',
     'db/schema.ts',
     'somewhere typecheck',
-    'somewhere deploy',
-    'flow.json',
-    'somewhere verify --flow flow.json',
+    'Promise.all',
+    '`owner()`\n' + 'tables need no auth guard',
     'somewhere dev',
-    'somewhere email test-inbox <addr>',
-    'somewhere cron run <id>',
-    'somewhere errors',
-    'Reads issued together travel together',
-    '`owner()` tables need no auth guard',
-    'somewhere docs <topic>',
-    'https://somewhere.tech/start.txt',
-    'somewhere advisor "<question>"',
+    'somewhere cron run <id> --wait',
   ];
   let previous = -1;
   for (const marker of workflowOrder) {
@@ -157,7 +162,7 @@ test('default green starter is a small typed frontend, function, and schema', ()
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /A custom endpoint still enforces its own caller policy/);
+  assert.match(agents, /a custom endpoint enforces its own caller policy/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,

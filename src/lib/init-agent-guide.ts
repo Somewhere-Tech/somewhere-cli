@@ -2,36 +2,33 @@
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
-1. Declare application tables in \`db/schema.ts\`. Choose \`owner()\` (own rows),
-   \`shared()\` (cross-user rows), or \`serverOnly()\`, and add a \`client\` block for
-   browser access. See \`docs({ topic: 'declared-data' })\`.
-2. Add a \`tsconfig.json\` for TypeScript source, then run \`somewhere typecheck\`.
-   The CLI generates declaration types from \`db/schema.ts\`; it does not need
-   hand-written module stubs. See the complete files in \`/start.txt\`.
-3. Deploy raw source with \`somewhere deploy\`; do not build first. The CLI links
-   the directory to the project it created.
-4. Write a \`flow.json\` that submits data and checks the rendered result. From
-   the linked directory run \`somewhere verify --flow flow.json\` to exercise it
-   at desktop and phone sizes. \`/start.txt\` includes a working flow.
+The loop, after every change:
 
-Use \`somewhere dev\` for optional local UI work after the first deploy. For
-sign-in, read \`somewhere email test-inbox <addr>\`. For a scheduled function on a
-plan with cron, run \`somewhere cron run <id> --wait\` (plain \`cron run\` only
-queues it). On a temporary project, use \`somewhere logs --tail 10\` to diagnose
-failures. \`somewhere errors\` requires a claimed project and a signed-in account.
+1. \`somewhere deploy\` — raw source; do not build first. It prints the live URL.
+2. \`somewhere verify\` — the live app at desktop and phone sizes, with
+   screenshots and console/network health. \`somewhere verify --flow flow.json\`
+   fills and clicks (\`/start.txt\` has a flow); \`somewhere browser\` inspects a page.
+3. \`somewhere logs --tail 10\`, then \`somewhere errors\` (claimed project,
+   signed in): read the failure before guessing.
+4. Email flows: sign up as \`<name>@<subdomain>.test.somewhere.site\`, then
+   \`somewhere email test-inbox <addr>\` prints the message and its magic link.
 
-### Two habits that keep the app fast and scoped
+Use these before writing your own:
+- \`sw.endpoint({ auth, body, rateLimit, handler })\` — sign-in check,
+  validation and rate limits for a function.
+- \`createSomewhereAuth()\` from \`@somewhere-tech/sdk/auth\` — the sign-in
+  client (\`signUp\`, \`signIn\`, \`signOut\`).
+- \`somewhere docs <topic>\` for a contract; \`somewhere advisor "<question>"\`
+  for uncertain architecture. Without a shell: MCP \`docs({ topic })\`,
+  \`advisor({ question })\`; \`catalog\` finds tools.
 
-**Reads issued together travel together:** independent reads go in one
-\`Promise.all\` — one round trip, not one each.
-
-**\`owner()\` tables need no auth guard.** Structured calls scope rows to the
-request identity. A custom endpoint still enforces its own caller policy.
-
-Ordinary lookups: \`somewhere docs <topic>\` or
-\`https://somewhere.tech/start.txt\`; uncertain architecture or composition:
-\`somewhere advisor "<question>"\`. Without a shell: MCP \`docs({ topic })\`,
-\`advisor({ question })\`; \`catalog\` finds tools.
+Data: declare tables in \`db/schema.ts\` — \`owner()\` (own rows), \`shared()\`, or
+\`serverOnly()\`, plus a \`client\` block for browser access
+(\`docs({ topic: 'declared-data' })\`) — and run \`somewhere typecheck\`; types
+come from the schema. Independent reads go in one \`Promise.all\`. \`owner()\`
+tables need no auth guard; a custom endpoint enforces its own caller policy.
+\`somewhere dev\` is optional local UI work; \`somewhere cron run <id> --wait\`
+runs a scheduled job (plain \`cron run\` only queues it).
 
 No account yet? \`npx @somewhere-tech/cli deploy\` publishes a temporary app and
 prints its live URL, claim URL, and expiry. On a hosted VM, after consent,
