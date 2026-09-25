@@ -49,6 +49,17 @@ export class ApiClient {
     return this.call<T>('POST', '/run', body, undefined, { ...opts, baseUrl: RUNNER_BASE_URL });
   }
 
+  /** Run one handler from inline function source (`deploy-check --run`). Rooted
+   *  at RUNNER_BASE_URL for the same loop-protection reason as callRunner: the
+   *  /v1 API cannot dispatch a handler, only the runner can. Body: { project_id,
+   *  functions, path, method, headers?, body?, timeout_ms? }. */
+  async checkHandler<T = unknown>(
+    body: unknown,
+    opts?: { timeoutMs?: number },
+  ): Promise<T> {
+    return this.call<T>('POST', '/check-handler', body, undefined, { ...opts, baseUrl: RUNNER_BASE_URL });
+  }
+
   /** Authenticated API call. On a 401 API_KEY_EXPIRED — the short-lived
    *  cli-pair access key timed out — and with a stored refresh token, this
    *  swaps in a fresh access key via POST /v1/keys/cli-pair/refresh and

@@ -230,8 +230,9 @@ test('deploy-check help distinguishes compile-only mode from explicit --run exec
   assert.match(help, /does not exercise functions,\s+auth, data access, or browser flows/);
   assert.match(help, /--run <path>[\s\S]+Check one handler from collected function source\s+\(default\s+GET\)/);
   assert.match(help, /static\/client files are not checked/i);
-  assert.match(help, /can write data or call services/);
-  assert.match(help, /Exits nonzero\s+for handler preparation errors, handler errors,\s+and HTTP 4xx\/5xx/);
+  assert.match(help, /no\s+database\s+and\s+no\s+network\s+access,\s+so\s+database\s+calls\s+are\s+refused/);
+  assert.match(help, /can\s+write\s+data\s+or\s+call\s+services/);
+  assert.match(help, /Exits\s+nonzero\s+for\s+handler\s+preparation\s+errors,\s+handler\s+errors,\s+and\s+HTTP\s+4xx\/5xx/);
   assert.doesNotMatch(help, /safe to deploy|oracle/i);
 });
 

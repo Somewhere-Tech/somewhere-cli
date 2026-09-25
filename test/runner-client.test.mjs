@@ -52,4 +52,15 @@ test('callRunner POSTs /run on the runner host with bearer auth and unwraps the 
   assert.equal(out.duration_ms, 12);
 });
 
+test('checkHandler POSTs /check-handler on the runner host, never the /v1 API', async () => {
+  const client = new ApiClient('smt_test_key');
+  const body = { project_id: 'p1', functions: { 'api/hello.ts': 'export default () => new Response()' }, path: '/api/hello', method: 'GET' };
+  await client.checkHandler(body);
+
+  assert.equal(server.lastRequest.method, 'POST');
+  assert.equal(server.lastRequest.url, '/check-handler');
+  assert.equal(server.lastRequest.auth, 'Bearer smt_test_key');
+  assert.deepEqual(server.lastRequest.body, body);
+});
+
 test.after(() => server.close());
