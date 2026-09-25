@@ -145,7 +145,7 @@ export function registerEnv(program: Command) {
           printJson(result);
           return;
         }
-        success(`${key} updated`);
+        success(`${key} set`);
       } catch (err) {
         error(err instanceof Error ? err.message : String(err));
         process.exit(1);
