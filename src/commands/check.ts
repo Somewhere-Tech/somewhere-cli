@@ -28,7 +28,7 @@ export interface CheckResult {
   build_log?: string[];
 }
 
-/** POST /v1/deploy/check/run — compile-then-invoke. Carries `errors` when the
+/** POST <runner>/check-handler — compile-then-invoke. Carries `errors` when the
  *  compile failed before the handler could run; otherwise the handler's
  *  response and logs. */
 export interface CheckRunResult extends CheckResult {
@@ -72,7 +72,7 @@ export function buildCheckBody(
   return body;
 }
 
-/** The handler-check body accepted by POST /deploy/check/run. That worker
+/** The handler-check body accepted by the runner's POST /check-handler. That
  * endpoint accepts inline function source and a top-level request spec; static
  * client files are outside this mode's contract. */
 export function buildCheckRunBody(
@@ -303,7 +303,7 @@ export function registerCheck(program: Command) {
     .option('--project <ref>', 'Project to check against (defaults to the linked project).')
     .option(
       '--run <path>',
-      'Check one handler from collected function source (default GET). Handler code runs against isolated dev bindings and can write data or call services. Static/client files are not checked. Exits nonzero for handler preparation errors, handler errors, and HTTP 4xx/5xx.',
+      'Check one handler from collected function source (default GET) without deploying. Once the project is deployed, or when your plan does not include preview, the handler runs with no database and no network access, so database calls are refused; otherwise it runs against the development database and can write data or call services. Static/client files are not checked. Exits nonzero for handler preparation errors, handler errors, and HTTP 4xx/5xx.',
     )
     .option('-X, --method <method>', 'HTTP method for --run (default GET).')
     .option('-d, --body <json>', 'Request body for --run.')
@@ -366,11 +366,8 @@ export function registerCheck(program: Command) {
           };
           if (opts.body !== undefined) request.body = opts.body;
 
-          const r = await client.call<CheckRunResult>(
-            'POST',
-            '/deploy/check/run',
+          const r = await client.checkHandler<CheckRunResult>(
             buildCheckRunBody(collected, projectId, request),
-            undefined,
             { timeoutMs: LONG_CALL_TIMEOUT_MS },
           );
           spinner?.stop();
