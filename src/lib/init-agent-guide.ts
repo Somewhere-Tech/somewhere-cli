@@ -16,9 +16,9 @@ export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
 Use \`somewhere dev\` for optional local UI work after the first deploy. For
 sign-in, read \`somewhere email test-inbox <addr>\`. For a scheduled function on a
-plan with cron, run \`somewhere cron run <id>\`. On a temporary project, use
-\`somewhere logs --tail 10\` to diagnose failures. \`somewhere errors\` requires
-a claimed project and a signed-in account.
+plan with cron, run \`somewhere cron run <id> --wait\` (plain \`cron run\` only
+queues it). On a temporary project, use \`somewhere logs --tail 10\` to diagnose
+failures. \`somewhere errors\` requires a claimed project and a signed-in account.
 
 ### Two habits that keep the app fast and scoped
 
