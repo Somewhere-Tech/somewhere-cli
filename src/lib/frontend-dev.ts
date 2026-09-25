@@ -1,6 +1,7 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { createRequire } from 'node:module';
 import { realpathSync } from 'node:fs';
+import { createConnection, createServer as createNetServer, type Server as NetServer, type Socket } from 'node:net';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { declaredDataPlugin } from './declared-data.js';
@@ -71,6 +72,40 @@ export function frontendProxy(target: string, localOrigin: string) {
   };
 }
 
+/**
+ * `localhost` resolves to ::1 first on many machines, and Vite binds exactly one
+ * address, so a browser opening http://localhost:<port> could be refused while
+ * the server sat on 127.0.0.1. Relay the IPv6 loopback to the IPv4 one so both
+ * families reach the same server — loopback only, never a wildcard address.
+ * Resolves null where the machine has no IPv6 loopback.
+ */
+export async function relayIpv6Loopback(port: number): Promise<NetServer | null> {
+  const sockets = new Set<Socket>();
+  const relay = createNetServer((client) => {
+    const upstream = createConnection({ host: '127.0.0.1', port });
+    for (const socket of [client, upstream]) {
+      sockets.add(socket);
+      socket.on('close', () => sockets.delete(socket));
+    }
+    client.pipe(upstream).pipe(client);
+    client.on('error', () => upstream.destroy());
+    upstream.on('error', () => client.destroy());
+  });
+  // An open HMR socket must not hold the relay (and so `somewhere dev`) open.
+  const closeRelay = relay.close.bind(relay);
+  relay.close = (callback?: (err?: Error) => void) => {
+    for (const socket of sockets) socket.destroy();
+    return closeRelay(callback);
+  };
+  return new Promise((resolvePromise, rejectPromise) => {
+    relay.once('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'EADDRNOTAVAIL' || error.code === 'EAFNOSUPPORT') resolvePromise(null);
+      else rejectPromise(error);
+    });
+    relay.listen({ host: '::1', port, ipv6Only: true }, () => resolvePromise(relay));
+  });
+}
+
 export async function startFrontendDev(cwd: string, target: string, port = 8787, open = false): Promise<FrontendDevServer> {
   if (!Number.isInteger(port) || port < 1 || port > 65535) throw new Error('Port must be an integer from 1 through 65535.');
   // Match Vite's resolved file identities, including macOS /var -> /private/var.
@@ -99,6 +134,8 @@ export async function startFrontendDev(cwd: string, target: string, port = 8787,
     }],
   });
   try { await server.listen(); } catch (error) { await server.close(); throw error; }
+  let relay: NetServer | null;
+  try { relay = await relayIpv6Loopback(port); } catch (error) { await server.close(); throw error; }
   console.log(`Frontend hot reload: ${localOrigin}`);
   console.log(`API requests use the deployed backend: ${origin}`);
   console.log('Backend changes require somewhere deploy or somewhere preview.');
@@ -106,6 +143,7 @@ export async function startFrontendDev(cwd: string, target: string, port = 8787,
   server.close = async () => {
     process.removeListener('SIGINT', close);
     process.removeListener('SIGTERM', close);
+    await new Promise<void>((resolvePromise) => (relay ? relay.close(() => resolvePromise()) : resolvePromise()));
     return closeServer();
   };
   const close = () => { void server.close().catch((error: unknown) => {
