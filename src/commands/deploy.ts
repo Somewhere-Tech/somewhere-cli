@@ -1046,7 +1046,10 @@ export function formatDeployTiming(input: {
     ['cli file collection', input.collectionMs],
     ['cli sign-in, project and packaging', input.preparationMs],
     ['upload + server total', input.requestMs],
-    ...Object.entries(stage).sort(([a], [b]) => a.localeCompare(b)),
+    // A stage the server did not measure is left out rather than shown as 0s.
+    ...Object.entries(stage)
+      .filter((entry): entry is [string, number] => typeof entry[1] === 'number' && Number.isFinite(entry[1]))
+      .sort(([a], [b]) => a.localeCompare(b)),
   ];
   return rows.map(([name, ms]) => `  ${name}: ${(Math.max(0, ms) / 1000).toFixed(2)}s`);
 }

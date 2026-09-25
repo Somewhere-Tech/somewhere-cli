@@ -99,3 +99,19 @@ test('formats the server release trace alongside CLI start-up, collection, prepa
     ],
   );
 });
+
+test('deploy timing leaves out server stages that are missing or not numbers', () => {
+  const cliRows = [
+    '  cli start-up: 0.30s',
+    '  cli file collection: 0.01s',
+    '  cli sign-in, project and packaging: 0.40s',
+    '  upload + server total: 5.00s',
+  ];
+  const base = { startupMs: 300, collectionMs: 10, preparationMs: 400, requestMs: 5000 };
+  assert.deepEqual(formatDeployTiming(base), cliRows);
+  assert.deepEqual(formatDeployTiming({ ...base, stageTimingMs: null }), cliRows);
+  assert.deepEqual(
+    formatDeployTiming({ ...base, stageTimingMs: { release_storage_write: null, postverify_render: '12', activation: 120 } }),
+    [...cliRows, '  activation: 0.12s'],
+  );
+});
