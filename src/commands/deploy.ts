@@ -773,7 +773,7 @@ export function registerDeploy(program: Command) {
           functionCount: Object.keys(functions).length,
           staticFileCount: Object.keys(files).length + Object.keys(binaryFiles).length,
           totalBytes,
-          linkedProject: targetProjectConfig,
+          linkedProject: await linkedProjectWithSubdomain(client, result, targetProjectConfig),
         });
         if (opts.timing && !opts.json) {
           printDeployTiming({ collectionMs, requestMs, stageTimingMs: result.stage_timing_ms });
@@ -1077,6 +1077,33 @@ export interface FormattedDeploySuccess {
 
 const PROJECT_SITE_DOMAIN = 'somewhere.site';
 
+/**
+ * The deploy response names the project but not its address. When the link
+ * file has no subdomain (a hand-written `{"project_id": ...}`), read it from
+ * the project record so the success line can still print the live URL. A
+ * failed lookup only loses the URL; the deploy already succeeded.
+ */
+export async function linkedProjectWithSubdomain(
+  client: Pick<ApiClient, 'call'>,
+  result: DeployResult,
+  linked: Pick<ProjectConfig, 'project_id' | 'subdomain'> | undefined,
+): Promise<Pick<ProjectConfig, 'project_id' | 'subdomain'> | undefined> {
+  if (!linked || !result.project_id || result.project_id !== linked.project_id) return linked;
+  if (typeof result.url === 'string' && result.url.trim()) return linked;
+  if (typeof linked.subdomain === 'string' && linked.subdomain.trim()) return linked;
+  try {
+    const project = await client.call<{ subdomain?: unknown }>(
+      'GET',
+      `/projects/${encodeURIComponent(result.project_id)}`,
+    );
+    return typeof project?.subdomain === 'string' && project.subdomain.trim()
+      ? { ...linked, subdomain: project.subdomain.trim() }
+      : linked;
+  } catch {
+    return linked;
+  }
+}
+
 export function formatDeploySuccess(
   result: DeployResult,
   options: DeploySuccessFormatOptions,
@@ -1108,10 +1135,16 @@ export function formatDeploySuccess(
 
   const responseUrl =
     typeof result.url === 'string' && result.url.trim() ? result.url.trim() : null;
+  // A hand-written link file may carry only project_id; never read a missing
+  // subdomain as if it were a string.
+  const linkedSubdomain = typeof options.linkedProject?.subdomain === 'string'
+    ? options.linkedProject.subdomain.trim()
+    : '';
   const subdomain =
     result.project_id &&
-      result.project_id === options.linkedProject?.project_id
-      ? options.linkedProject.subdomain.trim()
+      result.project_id === options.linkedProject?.project_id &&
+      linkedSubdomain
+      ? linkedSubdomain
       : null;
   const liveUrl = responseUrl ??
     (subdomain && /^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/i.test(subdomain)
