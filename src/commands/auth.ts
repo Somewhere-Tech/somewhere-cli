@@ -34,7 +34,7 @@ import {
 import { getDeviceId, getDeviceKeyName } from '../lib/device.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
 import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
-import { resolveProjectRef } from '../lib/platform-command.js';
+import { isRecord, resolveProjectRef } from '../lib/platform-command.js';
 
 async function readAuthToken(): Promise<string> {
   const envToken = process.env.SOMEWHERE_TOKEN?.trim();
@@ -151,6 +151,22 @@ async function loginAction(opts: { legacy?: boolean; signup?: boolean }): Promis
   await runDeviceLogin();
 }
 
+/**
+ * The plan's display name from the public plan table, keyed by the tier id, so
+ * a new or renamed plan never shows up as the wrong one (pfb_b69363269589).
+ * An unreadable table or an id it does not list prints the id itself.
+ */
+export async function readPlanName(client: Pick<ApiClient, 'call'>, tierId: string): Promise<string> {
+  try {
+    const pricing = await client.call<Record<string, unknown>>('GET', '/pricing', undefined, undefined, { timeoutMs: 5_000 });
+    const tiers: unknown[] = isRecord(pricing) && Array.isArray(pricing.tiers) ? pricing.tiers : [];
+    const match = tiers.filter(isRecord).find((tier) => tier.id === tierId);
+    return match && typeof match.name === 'string' && match.name.length > 0 ? match.name : tierId;
+  } catch {
+    return tierId;
+  }
+}
+
 export function registerAuth(program: Command) {
   program
     .command('login')
@@ -235,7 +251,7 @@ export function registerAuth(program: Command) {
           return;
         }
 
-        const tier = r.user.effective_tier === 'builder' ? 'Builder' : 'Free';
+        const tier = await readPlanName(client, r.user.effective_tier);
         console.log(`${teal(r.user.email)}  ${dim(`(${tier})`)}`);
         if (r.user.name) info(dim(r.user.name));
         if (r.user.username) info(dim(`@${r.user.username}`));

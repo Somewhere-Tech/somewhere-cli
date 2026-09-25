@@ -136,8 +136,20 @@ export function table(
   }
 }
 
-export function timeAgo(dateStr: string): string {
-  const diff = Date.now() - new Date(dateStr).getTime();
+// "2026-09-25 22:05:45" — the database's UTC timestamp, written without a zone.
+const ZONELESS_TIMESTAMP = /^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/;
+
+/** Epoch milliseconds for an API timestamp. Zoneless strings are UTC, never the
+ *  machine's local time (pfb_b69363269589); ISO with Z/offset and epoch numbers
+ *  keep their own meaning. */
+export function parseApiTime(value: string | number): number {
+  if (typeof value === 'number') return value;
+  const text = value.trim();
+  return new Date(ZONELESS_TIMESTAMP.test(text) ? `${text.replace(' ', 'T')}Z` : text).getTime();
+}
+
+export function timeAgo(dateStr: string | number): string {
+  const diff = Date.now() - parseApiTime(dateStr);
   const mins = Math.floor(diff / 60_000);
   if (mins < 1) return 'just now';
   if (mins < 60) return `${mins}m ago`;
