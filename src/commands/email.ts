@@ -2,11 +2,11 @@ import { Command } from 'commander';
 import { shellQuote } from '../lib/next-actions.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import { compactRecord, isRecord, resolveProjectRef, unwrapPlatformData } from '../lib/platform-command.js';
-import { dim, error, printJson, printJsonError, success } from '../lib/output.js';
+import { dim, error, platformErrorEnvelope, printJson, printJsonError, success } from '../lib/output.js';
 
 interface EmailSendOptions {
   project?: string;
-  from: string;
+  from?: string;
   subject: string;
   text?: string;
   html?: string;
@@ -85,7 +85,9 @@ function testInboxUnavailable(err: unknown): boolean {
     || (/NOT_FOUND/i.test(message) && /email_test_inbox|tool/i.test(message));
 }
 
-function platformErrorParts(err: unknown): { code: string; message: string } {
+function platformErrorParts(err: unknown): { code: string; message: string; extra?: Record<string, unknown> } {
+  const platform = platformErrorEnvelope(err);
+  if (platform) return platform;
   const message = err instanceof Error ? err.message : String(err);
   const match = /^([A-Z][A-Z0-9_]+):\s*(.+)$/s.exec(message);
   return match ? { code: match[1], message: match[2] } : { code: 'CLI_ERROR', message };
@@ -109,14 +111,14 @@ export function registerEmail(program: Command): void {
     .description('Send transactional email and inspect project test messages')
     .addHelpText(
       'after',
-      '\nExamples:\n  somewhere email send alice@example.com --from hello@myapp.com --subject "Welcome" --text "You are in." --project my-app\n  somewhere email test-inbox robot@my-app.test.somewhere.site --project my-app\n',
+      '\nExamples:\n  somewhere email send alice@example.com --subject "Welcome" --text "You are in."\n  somewhere email send alice@example.com --from hello@myapp.com --subject "Welcome" --text "You are in." --project my-app\n  somewhere email test-inbox robot@my-app.test.somewhere.site --project my-app\n',
     );
 
   email
     .command('send <recipient>')
     .description('Send one transactional email')
-    .requiredOption('-p, --project <project>', 'Project slug or ID')
-    .requiredOption('--from <sender>', 'Sender on a verified project domain')
+    .option('-p, --project <project>', 'Project slug or ID; defaults to the linked project')
+    .option('--from <sender>', "Sender on a verified project domain; omit to send from the project's managed sender")
     .requiredOption('--subject <subject>', 'Subject line')
     .option('--text <body>', 'Plaintext body')
     .option('--html <body>', 'HTML body')
@@ -137,7 +139,7 @@ export function registerEmail(program: Command): void {
         if (opts.json) printJson(value);
         else success(`Email sent to ${recipient}.`);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
@@ -160,12 +162,12 @@ export function registerEmail(program: Command): void {
           if (opts.json) printJsonError('EMAIL_TEST_INBOX_NOT_AVAILABLE', TEST_INBOX_UNAVAILABLE);
           else error(`EMAIL_TEST_INBOX_NOT_AVAILABLE: ${TEST_INBOX_UNAVAILABLE}`);
         } else {
-          const { code, message } = platformErrorParts(err);
+          const { code, message, extra } = platformErrorParts(err);
           const next = code === 'VALIDATION_ERROR' ? testInboxNextCommand(message, opts.project) : null;
           const hint = 'The test inbox stores platform auth email (verification, magic link, password reset)'
             + ' sent to that domain. Sign up or sign in with such an address first, then run:';
-          if (opts.json) printJsonError(code, message, next ? { hint, next_command: next } : undefined);
-          else error(`${code}: ${message}${next ? `\n${hint}\n  ${next}` : ''}`);
+          if (opts.json) printJsonError(code, message, next ? { ...extra, hint, next_command: next } : extra);
+          else error(`${code}: ${message}${typeof extra?.hint === 'string' ? ` Next: ${extra.hint}` : ''}${next ? `\n${hint}\n  ${next}` : ''}`);
         }
         process.exitCode = 1;
       }

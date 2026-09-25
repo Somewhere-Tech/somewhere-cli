@@ -529,12 +529,12 @@ For the complete flow and action schema, run: somewhere docs browser
         }
         if (cause instanceof CliApiError) {
           if (cause.code === 'BROWSER_ORIGIN_NOT_AUTHORIZED') {
-            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)} To drive an app you own, rerun with --project <your-project-id> (for example: somewhere verify --project <your-project-id> --url <your-app-url> --flow flow.json).`);
+            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)} To drive an app you own, rerun with --project <your-project-id> (for example: somewhere verify --project <your-project-id> --url <your-app-url> --flow flow.json).`, cause);
           } else {
-            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)}`);
+            error(`${cause.message} ${dim(`[${cause.code}${cause.statusCode ? `, HTTP ${cause.statusCode}` : ''}]`)}`, cause);
           }
         } else {
-          error(cause instanceof Error ? cause.message : String(cause));
+          error(cause instanceof Error ? cause.message : String(cause), cause);
         }
         process.exit(1);
       }

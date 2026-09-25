@@ -5,6 +5,7 @@ import {
   isRecord,
   unwrapPlatformData,
 } from '../lib/platform-command.js';
+import { loadProjectConfig } from '../lib/config.js';
 import { error, printJson, table } from '../lib/output.js';
 
 interface UsageOptions {
@@ -19,13 +20,14 @@ function displayCost(cents: unknown): string {
 export function registerUsage(program: Command): void {
   program
     .command('usage [project]')
-    .description('Show deploy, AI, proxy, and email usage for one project or the account')
+    .description('Show deploy, AI, proxy, and email usage for a project (defaults to the linked project) or the account')
     .option('--period <period>', 'Time period such as 7d or 30d', '30d')
     .option('--json', 'Print the complete response as JSON')
     .action(async (project: string | undefined, opts: UsageOptions) => {
       try {
+        // No argument means the linked project; outside one, the whole account.
         const value = await callPlatformTool('usage_summary', compactRecord([
-          ['project_id', project],
+          ['project_id', project ?? loadProjectConfig()?.project_id],
           ['period', opts.period],
         ]), { allTools: true });
         if (opts.json) {
@@ -48,7 +50,7 @@ export function registerUsage(program: Command): void {
           ['Emails sent', String(totals.emails_sent ?? 0)],
         ]);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

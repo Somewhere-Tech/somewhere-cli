@@ -21,6 +21,12 @@ export class PlatformToolError extends Error {
   constructor(
     public readonly tool: string,
     message: string,
+    /** The platform's own error code, message, fix and request id, when the
+     *  tool answered with its JSON envelope — `message` above flattens them. */
+    public readonly code?: string,
+    public readonly detail?: string,
+    public readonly hint?: string,
+    public readonly meta: { requestId?: string; traceId?: string } = {},
   ) {
     super(message);
     this.name = 'PlatformToolError';
@@ -151,6 +157,23 @@ function textFromResult(result: CallToolResult): string {
     .join('\n');
 }
 
+export function platformToolErrorFromText(name: string, text: string): PlatformToolError {
+  const message = toolErrorMessage(text);
+  try {
+    const parsed = JSON.parse(text) as Record<string, unknown>;
+    const field = (key: string): string | undefined =>
+      typeof parsed[key] === 'string' && parsed[key] ? parsed[key] as string : undefined;
+    const code = field('error');
+    if (!code) return new PlatformToolError(name, message);
+    return new PlatformToolError(name, message, code, field('message') ?? text, field('next_step') ?? field('hint'), {
+      requestId: field('request_id'),
+      traceId: field('trace_id'),
+    });
+  } catch {
+    return new PlatformToolError(name, message);
+  }
+}
+
 function toolErrorMessage(text: string): string {
   try {
     const parsed = JSON.parse(text) as {
@@ -184,7 +207,7 @@ export async function callPlatformToolRaw(
     client.callTool({ name, arguments: invocationArgs }));
   const typed = result as CallToolResult;
   if (typed.isError) {
-    throw new PlatformToolError(name, toolErrorMessage(textFromResult(typed)));
+    throw platformToolErrorFromText(name, textFromResult(typed));
   }
   return typed;
 }

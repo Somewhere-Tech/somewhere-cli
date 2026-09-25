@@ -80,9 +80,10 @@ export function registerPull(program: Command) {
         if (err instanceof CliApiError) {
           error(
             `${err.message} ${dim(err.statusCode ? `[${err.code}, HTTP ${err.statusCode}]` : `[${err.code}]`)}`,
+            err,
           );
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
         }
         process.exit(1);
       }

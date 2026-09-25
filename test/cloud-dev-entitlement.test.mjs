@@ -68,7 +68,8 @@ test('an account without private previews is refused and nothing is published', 
     (err) => {
       assert.ok(err instanceof CloudDevUnavailableError);
       assert.equal(err.code, 'CLOUD_DEV_NOT_ENABLED');
-      assert.match(err.message, /Pro and Scale plans/);
+      assert.match(err.message, /not included in this account's plan/);
+      assert.doesNotMatch(err.message, /Pro|Scale|Builder/, 'plan names come from the platform, never typed here');
       return true;
     },
   );

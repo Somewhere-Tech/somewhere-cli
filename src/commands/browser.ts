@@ -447,7 +447,7 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
       timeoutMs: BROWSER_TIMEOUT_MS,
     });
   } catch (err) {
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     process.exit(1);
   }
 
@@ -623,7 +623,7 @@ export function registerBrowser(program: Command) {
             `${err.message} ${dim(`[${err.code}${err.statusCode ? `, HTTP ${err.statusCode}` : ''}]`)}`,
           );
         } else {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
         }
         process.exit(1);
       }

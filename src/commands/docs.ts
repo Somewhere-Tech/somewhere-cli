@@ -282,7 +282,7 @@ export function registerDocs(program: Command) {
           }
           console.log(`\n${dim('No account yet? Start with: somewhere docs start')}`);
         } catch (e) {
-          error(e instanceof Error ? e.message : String(e));
+          error(e instanceof Error ? e.message : String(e), e);
           process.exitCode = 1;
         }
         return;
@@ -356,6 +356,7 @@ export function registerDocs(program: Command) {
             authenticatedFailure
               ? `${publicFailure} Authenticated docs also failed: ${authenticatedFailure}`
               : publicFailure,
+            e,
           );
           process.exitCode = 1;
         }
@@ -377,7 +378,7 @@ export function registerDocs(program: Command) {
         }
         await writeResponseBodyToStdout(res);
       } catch (e) {
-        error(`Could not reach ${DOCS_BASE} — check your connection. (${e instanceof Error ? e.message : String(e)})`);
+        error(`Could not reach ${DOCS_BASE} — check your connection. (${e instanceof Error ? e.message : String(e)})`, e);
         process.exit(1);
       }
     });

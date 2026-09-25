@@ -126,7 +126,7 @@ export function registerLogs(program: Command) {
           await new Promise(() => {}); // hang forever
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });

@@ -219,7 +219,7 @@ export async function runPreviewPhase<T>(
     return result;
   } catch (err) {
     const state = previewPlatformState(err);
-    error(`${label} failed after ${elapsedLabel(Date.now() - startedAt)}${state ? ` — platform state: ${state}` : ''}`);
+    error(`${label} failed after ${elapsedLabel(Date.now() - startedAt)}${state ? ` — platform state: ${state}` : ''}`, err);
     throw err;
   } finally {
     clearInterval(heartbeat);
@@ -317,15 +317,15 @@ export function registerDev(program: Command) {
         const target = await getDeployedProjectServingUrl(client, projectId);
         await startFrontendDev(process.cwd(), target, Number(opts.port), opts.open);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });
 }
 
 export const CLOUD_DEV_UNAVAILABLE_MESSAGE =
-  '`somewhere preview` is available on the Pro and Scale plans. '
-  + 'This account is on a plan that does not include it.';
+  '`somewhere preview` is not included in this account\'s plan. '
+  + 'Plans that include hosted previews are listed at https://somewhere.tech/pricing.';
 
 /**
  * Does this account have private previews?
@@ -685,7 +685,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
       process.exit(1);
     }
     if (!(isBuildError(err) && renderBuildError(err, cwd))) {
-      error(err instanceof Error ? err.message : String(err));
+      error(err instanceof Error ? err.message : String(err), err);
     }
     error('Could not publish the first version, so the private preview has nothing to build on.');
     process.exit(1);
@@ -753,7 +753,7 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
   } catch (err) {
     spinner?.fail('Initial sync failed');
     if (!(isBuildError(err) && renderBuildError(err, cwd))) {
-      error(err instanceof Error ? err.message : String(err));
+      error(err instanceof Error ? err.message : String(err), err);
     }
     process.exit(1);
   }
@@ -990,7 +990,7 @@ async function deployBatch(
       const handoff = await mintPreviewHandoff(client, projectId, draftId, nextCandidate);
       printPreviewHandoff(handoff);
     } catch (err) {
-      error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`);
+      error(`Preview updated, but its capability URL could not be created: ${err instanceof Error ? err.message : String(err)}`, err);
       printPreviewIdentity(draftId, nextCandidate, projectId);
     }
     return nextCandidate;
@@ -1009,7 +1009,7 @@ async function deployBatch(
       throw new PreviewFinishedError(finished);
     }
     console.log(`${dim(stamp())} ${label} ${red('✗ failed')} ${dim(`(${secs}s)`)}`);
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     return null;
   }
 }

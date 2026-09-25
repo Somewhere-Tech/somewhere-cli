@@ -7,6 +7,7 @@ import {
   dim,
   error,
   info,
+  platformErrorEnvelope,
   printJson,
   statusDot,
   success,
@@ -55,7 +56,7 @@ export function registerProject(program: Command) {
         info(`Status: ${statusDot(p.status)}`);
       } catch (err) {
         spinner?.fail('Failed');
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -80,8 +81,9 @@ export function registerProject(program: Command) {
     .option('--json', 'Print the raw project response as JSON')
     .action(async (nameOrId: string | undefined, opts) => {
       const client = new ApiClient(getToken());
-      const id = nameOrId ?? 'default';
       try {
+        // No argument means the linked project, like every other project command.
+        const id = resolveProjectRef(nameOrId);
         const p = await client.call<Record<string, unknown>>(
           'GET',
           `/projects/${encodeURIComponent(id)}`,
@@ -98,7 +100,7 @@ export function registerProject(program: Command) {
         if (servingUrl) info(`URL:       ${servingUrl}`);
         if (p.created_at) info(`Created:   ${String(p.created_at)}`);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -133,7 +135,7 @@ export function registerProject(program: Command) {
       try {
         projectRef = resolveProjectRef(opts.project);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
       try {
@@ -144,7 +146,7 @@ export function registerProject(program: Command) {
         }
         printAllowedOrigins(result);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -165,7 +167,7 @@ export function registerProject(program: Command) {
       try {
         projectRef = resolveProjectRef(opts.project);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
       // Accept both `set a b` and `set a,b` — an agent that has read one form
@@ -198,7 +200,7 @@ export function registerProject(program: Command) {
           : 'Cleared — no other addresses are allowed.');
         printAllowedOrigins(result);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -387,8 +389,7 @@ function renderDeleteError(err: unknown, json?: boolean): void {
         ok: false,
         error: err.code,
         message: err.message,
-        ...(err.data ? { data: err.data } : {}),
-        ...(err.hint ? { hint: err.hint } : {}),
+        ...platformErrorEnvelope(err)?.extra,
       });
       return;
     }
@@ -397,7 +398,7 @@ function renderDeleteError(err: unknown, json?: boolean): void {
     );
     return;
   }
-  error(err instanceof Error ? err.message : String(err));
+  error(err instanceof Error ? err.message : String(err), err);
 }
 
 async function listProjects(opts: { json?: boolean } = {}) {
@@ -437,7 +438,7 @@ async function listProjects(opts: { json?: boolean } = {}) {
     );
   } catch (err) {
     spinner?.fail('Failed');
-    error(err instanceof Error ? err.message : String(err));
+    error(err instanceof Error ? err.message : String(err), err);
     process.exit(1);
   }
 }

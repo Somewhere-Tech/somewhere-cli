@@ -51,7 +51,7 @@ export function registerEnv(program: Command) {
           console.log(`  ${teal(v.key)}`);
         }
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -82,7 +82,7 @@ export function registerEnv(program: Command) {
         }>('GET', '/env', undefined, { project_id: pid });
         keys = result.keys ?? result.vars ?? [];
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
 
@@ -136,7 +136,7 @@ export function registerEnv(program: Command) {
       const client = new ApiClient(getToken());
       const pid = resolveProjectId(opts.project);
       try {
-        const result = await client.call('POST', '/env', {
+        const result = await client.call<{ warnings?: unknown }>('POST', '/env', {
           project_id: pid,
           key,
           value,
@@ -145,9 +145,15 @@ export function registerEnv(program: Command) {
           printJson(result);
           return;
         }
-        success(`${key} updated`);
+        // The platform does not say whether the key already existed, so "set"
+        // is the word that is true either way.
+        success(`${key} set`);
+        // The platform's own warnings — a VITE_ value becoming public browser
+        // code — used to reach --json only.
+        const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
+        for (const w of warnings) if (typeof w === 'string') warn(w);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });
@@ -172,7 +178,7 @@ export function registerEnv(program: Command) {
         }
         success(`${key} deleted`);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });

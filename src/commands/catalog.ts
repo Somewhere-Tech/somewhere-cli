@@ -162,7 +162,7 @@ export function registerCatalog(program: Command): void {
         }
         printCatalog(parseCatalogResponse(await callPlatformHelpTool('catalog', {})));
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
       }
     });

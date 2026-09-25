@@ -269,6 +269,8 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       ['cron', 'update', 'cron_1', '--disable', '--json'],
       ['cron', 'delete', 'cron_1', '--json'],
       ['email', 'send', 'alice@example.com', '--project', 'platform', '--from', 'hello@example.com', '--subject', 'Welcome', '--text', 'You are in.', '--json'],
+      // No --from: the platform sends from the project's managed sender.
+      ['email', 'send', 'alice@example.com', '--project', 'platform', '--subject', 'Welcome', '--text', 'You are in.', '--json'],
       ['email', 'test-inbox', 'robot@platform.test.somewhere.site', '--project', 'platform', '--json'],
     ];
     for (const command of commands) {
@@ -288,6 +290,7 @@ test('generic and Tier-1 commands are thin adapters over the full MCP tool surfa
       { name: 'cron_update', arguments: { cron_id: 'cron_1', enabled: false } },
       { name: 'cron_delete', arguments: { cron_id: 'cron_1' } },
       { name: 'email_send', arguments: { project_id: 'platform', to: 'alice@example.com', from: 'hello@example.com', subject: 'Welcome', text: 'You are in.' } },
+      { name: 'email_send', arguments: { project_id: 'platform', to: 'alice@example.com', subject: 'Welcome', text: 'You are in.' } },
       { name: 'email_test_inbox', arguments: { project_id: 'platform', address: 'robot@platform.test.somewhere.site' } },
     ]);
 

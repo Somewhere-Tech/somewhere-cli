@@ -4,7 +4,7 @@ import { stat } from 'node:fs/promises';
 import { extname, resolve } from 'node:path';
 import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { getToken } from '../lib/config.js';
-import { error, printJson } from '../lib/output.js';
+import { error, platformErrorEnvelope, printJson } from '../lib/output.js';
 
 interface ApiCommandOptions {
   data?: string;
@@ -103,7 +103,7 @@ export function registerApi(program: Command) {
           });
           process.exit(1);
         } catch (err) {
-          error(err instanceof Error ? err.message : String(err));
+          error(err instanceof Error ? err.message : String(err), err);
           process.exit(1);
         }
       }
@@ -116,7 +116,7 @@ export function registerApi(program: Command) {
           process.stdout.write(r.body.endsWith('\n') ? r.body : r.body + '\n');
           if (!r.ok) process.exitCode = 1;
         } catch (err) {
-          error(String(err));
+          error(String(err), err);
           process.exit(1);
         }
         return;
@@ -128,9 +128,16 @@ export function registerApi(program: Command) {
       } catch (err) {
         if (err instanceof Error && 'code' in err) {
           const apiErr = err as Error & { code: string; statusCode: number };
-          printJson({ ok: false, error: apiErr.code, message: apiErr.message, status: apiErr.statusCode });
+          const platform = platformErrorEnvelope(err);
+          printJson({
+            ok: false,
+            error: apiErr.code,
+            message: platform?.message ?? apiErr.message,
+            status: apiErr.statusCode,
+            ...(platform?.extra ?? {}),
+          });
         } else {
-          error(String(err));
+          error(String(err), err);
         }
         process.exit(1);
       }

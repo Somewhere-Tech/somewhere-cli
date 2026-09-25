@@ -46,7 +46,7 @@ export function registerOpen(program: Command) {
         info(`Opening ${dim(servingUrl)}...`);
         await _open(servingUrl);
       } catch (err) {
-        error(err instanceof Error ? err.message : String(err));
+        error(err instanceof Error ? err.message : String(err), err);
         process.exit(1);
       }
     });

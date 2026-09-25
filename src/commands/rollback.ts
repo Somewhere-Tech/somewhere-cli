@@ -3,7 +3,7 @@ import ora from '../lib/spinner.js';
 import prompts from 'prompts';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
-import { dim, error, info, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
+import { dim, error, info, platformErrorEnvelope, printJson, printJsonError, success, teal, warn } from '../lib/output.js';
 import { chooseProjectRef, projectRefConflictMessage } from '../lib/project-ref.js';
 
 interface RollbackResult {
@@ -112,9 +112,9 @@ export function registerRollback(program: Command) {
         const message = rollbackErrorMessage(err);
         if (opts.json) {
           if (err instanceof CliApiError) {
-            printJsonError(err.code, message);
+            printJsonError(err.code, message, platformErrorEnvelope(err)?.extra);
           } else {
-            printJsonError('ERROR', message);
+            printJsonError('CLI_ERROR', message);
           }
           process.exit(1);
         }
