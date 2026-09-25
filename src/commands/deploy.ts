@@ -394,17 +394,21 @@ export function registerDeploy(program: Command) {
     .option('--json', 'Print the raw deploy response as JSON')
     .option('--timing', 'Print collection, upload, release, activation, and verification timings')
     .action(async (dir: string | undefined, opts) => {
+      // performance.now() counts from process start, so this is the real
+      // start-up cost (runtime boot + module load) before the command ran.
+      const startupMs = performance.now();
       const targetDir = resolveTargetDir(dir);
 
       // Reject an empty deploy before authentication, temporary-account minting,
       // project provisioning, notices, or upload. The API's generic object-shape
       // error arrives after all of those side effects and gives a first-time
       // caller no useful next step.
-      const collectionStartedAt = Date.now();
+      const collectionStartedAt = performance.now();
       const collected = collectFiles(targetDir, {
         include: (opts.include as string[] | undefined) ?? [],
       });
-      const collectionMs = Date.now() - collectionStartedAt;
+      const collectionEndedAt = performance.now();
+      const collectionMs = collectionEndedAt - collectionStartedAt;
       const { files, binaryFiles, functions, skipped, excluded } = collected;
       if (
         Object.keys(files).length === 0
@@ -756,14 +760,15 @@ export function registerDeploy(program: Command) {
           return;
         }
 
-        const requestStartedAt = Date.now();
+        const requestStartedAt = performance.now();
+        const preparationMs = requestStartedAt - collectionEndedAt;
         const result = await callDeployWithRetry<DeployResult>(client, body, {
           spinner,
           json: Boolean(opts.json),
           dryRun: false,
           baseText: spinner?.text ?? 'Deploying...',
         });
-        const requestMs = Date.now() - requestStartedAt;
+        const requestMs = performance.now() - requestStartedAt;
 
         spinner?.stop();
         const functionErrors = result.function_errors ?? [];
@@ -776,7 +781,7 @@ export function registerDeploy(program: Command) {
           linkedProject: await linkedProjectWithSubdomain(client, result, targetProjectConfig),
         });
         if (opts.timing && !opts.json) {
-          printDeployTiming({ collectionMs, requestMs, stageTimingMs: result.stage_timing_ms });
+          printDeployTiming({ startupMs, collectionMs, preparationMs, requestMs, stageTimingMs: result.stage_timing_ms });
         }
         let verification: VerifyReport | undefined;
         if (opts.verify && !hasFunctionErrors) {
@@ -1029,13 +1034,17 @@ export interface DeployResult {
 }
 
 export function formatDeployTiming(input: {
+  startupMs: number;
   collectionMs: number;
+  preparationMs: number;
   requestMs: number;
   stageTimingMs?: Record<string, number> | null;
 }): string[] {
   const stage = input.stageTimingMs ?? {};
   const rows: Array<[string, number]> = [
-    ['cli collection/packaging', input.collectionMs],
+    ['cli start-up', input.startupMs],
+    ['cli file collection', input.collectionMs],
+    ['cli sign-in, project and packaging', input.preparationMs],
     ['upload + server total', input.requestMs],
     ...Object.entries(stage).sort(([a], [b]) => a.localeCompare(b)),
   ];
@@ -1043,7 +1052,9 @@ export function formatDeployTiming(input: {
 }
 
 function printDeployTiming(input: {
+  startupMs: number;
   collectionMs: number;
+  preparationMs: number;
   requestMs: number;
   stageTimingMs?: Record<string, number> | null;
 }): void {

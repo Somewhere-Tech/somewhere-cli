@@ -80,15 +80,19 @@ test('reports missing deploy fields honestly without rendering undefined', () =>
   assert.doesNotMatch(JSON.stringify(formatted), /undefined/);
 });
 
-test('formats the server release trace alongside CLI collection and upload time', () => {
+test('formats the server release trace alongside CLI start-up, collection, preparation and upload time', () => {
   assert.deepEqual(
     formatDeployTiming({
+      startupMs: 310,
       collectionMs: 12,
+      preparationMs: 480,
       requestMs: 7600,
       stageTimingMs: { postverify_render: 5100, release_storage_write: 340 },
     }),
     [
-      '  cli collection/packaging: 0.01s',
+      '  cli start-up: 0.31s',
+      '  cli file collection: 0.01s',
+      '  cli sign-in, project and packaging: 0.48s',
       '  upload + server total: 7.60s',
       '  postverify_render: 5.10s',
       '  release_storage_write: 0.34s',
