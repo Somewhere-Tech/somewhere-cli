@@ -126,7 +126,9 @@ test('cron list and run use canonical cron_id fields and run a named task once',
 
     const named = await run(['cron', 'run', 'Daily digest', '--project', 'platform'], env);
     assert.equal(named.status, 0, named.stderr);
-    assert.match(named.stdout, /ran once, see history/);
+    assert.match(named.stdout, /queued \(not finished yet\)\. Job job_once/);
+    assert.match(named.stdout, /Pass --wait/);
+    assert.doesNotMatch(named.stdout, /ran once/);
     assert.match(named.stdout, /cron_daily\s+Job job_once\s+queued\s+trigger: manual/);
 
     const direct = await run(['cron', 'run', 'cron_daily', '--json'], env);
@@ -258,4 +260,99 @@ test('cron list and name resolution default to the linked project; --all stays e
     { name: 'cron_list', arguments: {} },
     { name: 'cron_list', arguments: { project_id: 'proj_linked' } },
   ]);
+});
+
+test('cron run --wait polls the job until it finishes and prints the result', async () => {
+  const home = credentialHome('sw-cron-wait-home-');
+  const calls = [];
+  let polls = 0;
+  await withFixture((params) => {
+    calls.push(params.name);
+    if (params.name === 'cron_run') {
+      return toolSuccess({ cron_id: 'cron_daily', job_id: 'job_wait', status: 'queued', trigger: 'manual' });
+    }
+    assert.equal(params.name, 'job_get');
+    assert.deepEqual(params.arguments, { job_id: 'job_wait' });
+    polls += 1;
+    // indeterminate is reported briefly during dispatch; --wait keeps polling.
+    const status = polls === 1 ? 'queued' : polls === 2 ? 'indeterminate' : 'complete';
+    return toolSuccess({
+      job_id: 'job_wait',
+      status,
+      result: status === 'complete' ? { due: 1, sent: 1 } : null,
+      error: null,
+      created_at: '2026-09-25T00:25:37.000Z',
+      started_at: polls > 1 ? '2026-09-25T00:25:37.200Z' : null,
+      completed_at: status === 'complete' ? '2026-09-25T00:25:40.800Z' : null,
+    });
+  }, async (url) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url };
+    const human = await run(['cron', 'run', 'cron_daily', '--wait'], env);
+    assert.equal(human.status, 0, human.stderr);
+    assert.match(human.stdout, /job job_wait complete/);
+    assert.match(human.stdout, /Result: \{"due":1,"sent":1\}/);
+    assert.match(human.stdout, /completed 2026-09-25T00:25:40.800Z/);
+
+    polls = 0;
+    const json = await run(['cron', 'run', 'cron_daily', '--wait', '--json'], env);
+    assert.equal(json.status, 0, json.stderr);
+    const parsed = JSON.parse(json.stdout);
+    assert.equal(parsed.ok, true);
+    assert.equal(parsed.data.job_id, 'job_wait');
+    assert.equal(parsed.data.job.status, 'complete');
+    assert.deepEqual(parsed.data.job.result, { due: 1, sent: 1 });
+  });
+  assert.deepEqual(calls, ['cron_run', 'job_get', 'job_get', 'job_get', 'cron_run', 'job_get', 'job_get', 'job_get']);
+});
+
+test('cron run --wait exits non-zero on a failed job and on timeout', async () => {
+  const home = credentialHome('sw-cron-wait-fail-home-');
+  let mode = 'failed';
+  await withFixture((params) => {
+    if (params.name === 'cron_run') {
+      return toolSuccess({ cron_id: 'cron_daily', job_id: 'job_x', status: 'queued', trigger: 'manual' });
+    }
+    if (mode === 'failed') {
+      return toolSuccess({ job_id: 'job_x', status: 'failed', result: null, error: 'boom', error_code: 'HANDLER_ERROR' });
+    }
+    return toolSuccess({ job_id: 'job_x', status: 'running', result: null, error: null });
+  }, async (url) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url };
+
+    const failed = await run(['cron', 'run', 'cron_daily', '--wait'], env);
+    assert.equal(failed.status, 1);
+    assert.match(failed.stderr, /did not succeed: job job_x failed/);
+    assert.match(failed.stdout, /Error: HANDLER_ERROR: boom/);
+
+    const failedJson = await run(['cron', 'run', 'cron_daily', '--wait', '--json'], env);
+    assert.equal(failedJson.status, 1);
+    const failedParsed = JSON.parse(failedJson.stdout);
+    assert.equal(failedParsed.error, 'CRON_RUN_JOB_FAILED');
+    assert.equal(failedParsed.data.job.error, 'boom');
+
+    mode = 'running';
+    const timedOut = await run(['cron', 'run', 'cron_daily', '--wait', '--timeout', '1', '--json'], env);
+    assert.equal(timedOut.status, 1);
+    const timedOutParsed = JSON.parse(timedOut.stdout);
+    assert.equal(timedOutParsed.error, 'CRON_RUN_WAIT_TIMEOUT');
+    assert.equal(timedOutParsed.data.job.status, 'running');
+  });
+});
+
+test('cron run rejects --timeout without --wait before calling the platform', async () => {
+  const home = credentialHome('sw-cron-timeout-usage-home-');
+  const calls = [];
+  await withFixture((params) => {
+    calls.push(params.name);
+    return toolSuccess({});
+  }, async (url) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url };
+    const result = await run(['cron', 'run', 'cron_daily', '--timeout', '5', '--json'], env);
+    assert.equal(result.status, 1);
+    assert.equal(JSON.parse(result.stdout).error, 'USAGE_ERROR');
+    const bad = await run(['cron', 'run', 'cron_daily', '--wait', '--timeout', 'soon', '--json'], env);
+    assert.equal(bad.status, 1);
+    assert.equal(JSON.parse(bad.stdout).error, 'USAGE_ERROR');
+  });
+  assert.deepEqual(calls, []);
 });

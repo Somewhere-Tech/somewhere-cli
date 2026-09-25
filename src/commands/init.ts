@@ -64,6 +64,16 @@ export function registerInit(program: Command) {
         error('--name <name> is required with --json.');
         process.exit(1);
       }
+      // No one can answer a prompt in a non-interactive shell (an agent's exec
+      // tool, a script, a pipe): fail fast with the flag instead of waiting.
+      if (!process.stdin.isTTY) {
+        if (!opts.link && !opts.name) {
+          failNonInteractive('Pass --name <project-name> to create a project in a non-interactive shell (e.g. `somewhere init --name my-app`).');
+        }
+        if (opts.link && !opts.project) {
+          failNonInteractive('Pass --project <ref> to link a project in a non-interactive shell (e.g. `somewhere init --link --project my-app`).');
+        }
+      }
 
       const token = getToken();
       const client = new ApiClient(token);
@@ -75,6 +85,9 @@ export function registerInit(program: Command) {
         if (opts.json) {
           error(`This directory is already linked to ${existing.name}.`);
           process.exit(1);
+        }
+        if (!process.stdin.isTTY) {
+          failNonInteractive(`This directory is already linked to ${existing.name}. Run init in an empty directory, or relink with \`somewhere init --link --project <ref>\`.`);
         }
         warn(`This directory is already linked to ${teal(existing.name)}`);
         const { overwrite } = await prompts({
@@ -190,6 +203,12 @@ export function registerInit(program: Command) {
         process.exit(1);
       }
     });
+}
+
+/** Exit 2 (usage) before any prompt that a non-interactive shell cannot answer. */
+function failNonInteractive(message: string): never {
+  error(message);
+  process.exit(2);
 }
 
 export async function linkExisting(

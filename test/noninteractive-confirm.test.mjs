@@ -129,3 +129,49 @@ test('rollback --yes is unaffected by the non-interactive guard (still reaches t
   assert.equal(result.status, 1, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
   assert.doesNotMatch(result.stderr, /non-interactive shell/);
 });
+
+// init prompts for a project name, a subdomain, an overwrite confirmation and
+// a project to link. None of those can be answered without a terminal, so each
+// path fails fast with the flag that replaces it (exit 2, before any network).
+function initSetup(prefix, { linked = false } = {}) {
+  const HOME = mkdtempSync(join(tmpdir(), `${prefix}-home-`));
+  const cwd = mkdtempSync(join(tmpdir(), `${prefix}-fixture-`));
+  writeLogin(HOME);
+  if (linked) writeProject(cwd);
+  return { env: { HOME, USERPROFILE: HOME, SOMEWHERE_API_URL: DEAD_API }, cwd };
+}
+
+test('init without --name fails fast in a non-interactive shell', async () => {
+  const { env, cwd } = initSetup('sw-noninteractive-init');
+  const result = await run(['init'], { cwd, env });
+
+  assert.equal(result.status, 2, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stderr, /Pass --name <project-name>/);
+  assert.doesNotMatch(result.stdout, /Project name/);
+});
+
+test('init --link without --project fails fast in a non-interactive shell', async () => {
+  const { env, cwd } = initSetup('sw-noninteractive-init-link');
+  const result = await run(['init', '--link'], { cwd, env });
+
+  assert.equal(result.status, 2, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stderr, /Pass --project <ref>/);
+});
+
+test('init in an already-linked directory fails fast instead of asking to overwrite', async () => {
+  const { env, cwd } = initSetup('sw-noninteractive-init-linked', { linked: true });
+  const result = await run(['init', '--name', 'another-app'], { cwd, env });
+
+  assert.equal(result.status, 2, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.match(result.stderr, /already linked to noninteractive/);
+  assert.doesNotMatch(result.stdout, /Overwrite\?/);
+});
+
+test('init --name is unaffected by the non-interactive guard (still reaches the API)', async () => {
+  const { env, cwd } = initSetup('sw-noninteractive-init-named');
+  const result = await run(['init', '--name', 'guard-pass', '--bare'], { cwd, env });
+
+  // Reaches the dead API rather than the guard.
+  assert.notEqual(result.status, 2, `stdout:\n${result.stdout}\nstderr:\n${result.stderr}`);
+  assert.doesNotMatch(result.stderr, /non-interactive shell/);
+});

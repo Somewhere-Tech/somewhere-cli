@@ -42,12 +42,30 @@ interface CronRow extends Record<string, unknown> {
   name?: string;
 }
 
+interface CronRunOptions extends ProjectOptions {
+  wait?: boolean;
+  timeout?: string;
+}
+
 interface CronRunResult extends Record<string, unknown> {
   cron_id: string;
   job_id: string;
   status: string;
   trigger: string;
 }
+
+interface JobView extends Record<string, unknown> {
+  job_id: string;
+  status: string;
+}
+
+const DEFAULT_WAIT_TIMEOUT_SECONDS = 120;
+const WAIT_POLL_INTERVAL_MS = 1000;
+/** Statuses job_get reports once a job can no longer change. `indeterminate`
+ *  is deliberately absent: it also appears briefly while a job is being
+ *  dispatched, so --wait keeps polling it until the timeout. */
+const JOB_SUCCESS_STATUS = 'complete';
+const JOB_FAILURE_STATUSES = new Set(['failed', 'cancelled']);
 
 const CRON_RUN_UNAVAILABLE = 'Cron run is not available on this platform version yet.';
 
@@ -106,6 +124,68 @@ function cronRunResult(value: unknown): CronRunResult {
     throw new Error('cron_run returned an unexpected response.');
   }
   return data as CronRunResult;
+}
+
+function jobView(value: unknown): JobView {
+  const data = unwrapPlatformData(value);
+  if (!isRecord(data) || typeof data.job_id !== 'string' || typeof data.status !== 'string') {
+    throw new Error('job_get returned an unexpected response.');
+  }
+  return data as JobView;
+}
+
+function parseWaitTimeout(value: string | undefined): number {
+  if (value === undefined) return DEFAULT_WAIT_TIMEOUT_SECONDS;
+  const seconds = Number(value);
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new Error(`USAGE_ERROR: --timeout must be a positive number of seconds, got "${value}".`);
+  }
+  return seconds;
+}
+
+function isTerminalJobStatus(status: string): boolean {
+  return status === JOB_SUCCESS_STATUS || JOB_FAILURE_STATUSES.has(status);
+}
+
+/** Polls job_get until the job reaches a terminal status or the deadline
+ *  passes; returns the last job view either way. */
+async function waitForJob(jobId: string, timeoutSeconds: number): Promise<{ job: JobView; timedOut: boolean }> {
+  const deadline = Date.now() + timeoutSeconds * 1000;
+  for (;;) {
+    const job = jobView(await callPlatformTool('job_get', { job_id: jobId }, { allTools: true }));
+    if (isTerminalJobStatus(job.status)) return { job, timedOut: false };
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) return { job, timedOut: true };
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(WAIT_POLL_INTERVAL_MS, remaining)));
+  }
+}
+
+function formatJobValue(value: unknown): string {
+  return typeof value === 'string' ? value : JSON.stringify(value);
+}
+
+function printWaitedJob(job: JobView, timedOut: boolean, timeoutSeconds: number): void {
+  if (timedOut) {
+    error(`Job ${job.job_id} has not finished after ${timeoutSeconds}s (status: ${job.status}). It may still complete; check it with \`somewhere call job_get '{"job_id":"${job.job_id}"}'\`.`);
+  } else if (job.status === JOB_SUCCESS_STATUS) {
+    success(`Scheduled task finished: job ${job.job_id} complete.`);
+  } else {
+    error(`Scheduled task did not succeed: job ${job.job_id} ${job.status}.`);
+  }
+  if (job.result !== undefined && job.result !== null) console.log(`Result: ${formatJobValue(job.result)}`);
+  if (typeof job.error === 'string' && job.error.length > 0) {
+    console.log(`Error: ${typeof job.error_code === 'string' ? `${job.error_code}: ` : ''}${job.error}`);
+  }
+  if (isRecord(job.recovery) && typeof job.recovery.recovery_error === 'string') {
+    console.log(`Recovery: ${job.recovery.recovery_error}`);
+  }
+  const timings = compactRecord([
+    ['created', job.created_at],
+    ['started', job.started_at ?? undefined],
+    ['completed', job.completed_at ?? undefined],
+  ]);
+  const timingText = Object.entries(timings).map(([label, at]) => `${label} ${formatJobValue(at)}`).join('  ');
+  if (timingText) console.log(dim(timingText));
 }
 
 function platformErrorParts(err: unknown): { code: string; message: string } {
@@ -171,6 +251,7 @@ export function registerCron(program: Command): void {
       '\nExamples:\n  somewhere cron list                 # linked project; --all lists every project\n'
         + '  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
         + '  somewhere cron create "0 9 * * *" /api/daily-digest --project my-app --timezone America/Los_Angeles\n'
+        + '  somewhere cron run daily-digest --wait   # queue one run now and wait for its result\n'
         + '\nSchedules are read in UTC unless --timezone names an IANA zone.\n',
     );
 
@@ -211,22 +292,58 @@ export function registerCron(program: Command): void {
 
   cron
     .command('run <cron-id-or-name>')
-    .description('Run a scheduled task once now without changing its schedule')
+    .description('Queue one run of a scheduled task now without changing its schedule; --wait waits for it to finish')
     .option('-p, --project <project>', 'Project slug or ID used to resolve a task name; defaults to the linked project')
+    .option('--wait', 'Wait for the queued job to finish and print its result; exits non-zero on failure or timeout')
+    .option('--timeout <seconds>', `With --wait, how long to wait before giving up (default ${DEFAULT_WAIT_TIMEOUT_SECONDS})`)
     .option('--json', 'Print the complete response as JSON')
-    .action(async (target: string, opts: ProjectOptions) => {
+    .addHelpText(
+      'after',
+      '\nWithout --wait the command returns as soon as the job is queued; the task has not run yet,\n'
+        + 'so anything it writes may not be visible for a few seconds. Pass --wait before reading its effects.\n',
+    )
+    .action(async (target: string, opts: CronRunOptions) => {
+      let queued = false;
       try {
+        const timeoutSeconds = parseWaitTimeout(opts.timeout);
+        if (opts.timeout !== undefined && !opts.wait) {
+          throw new Error('USAGE_ERROR: --timeout only applies with --wait.');
+        }
         const cronId = await resolveCronRunId(target, opts.project);
         const value = await callPlatformTool('cron_run', { cron_id: cronId }, { allTools: true });
-        if (opts.json) {
-          printJson(value);
+        queued = true;
+        if (!opts.wait) {
+          if (opts.json) {
+            printJson(value);
+            return;
+          }
+          const result = cronRunResult(value);
+          success(`Scheduled task queued (not finished yet). Job ${result.job_id}.`);
+          console.log(dim(`Cron ${result.cron_id}  Job ${result.job_id}  ${result.status}  trigger: ${result.trigger}`));
+          console.log(dim('Pass --wait to wait for the run to finish and see its result.'));
           return;
         }
         const result = cronRunResult(value);
-        success('Scheduled task ran once, see history.');
-        console.log(dim(`Cron ${result.cron_id}  Job ${result.job_id}  ${result.status}  trigger: ${result.trigger}`));
+        if (!opts.json) console.log(dim(`Job ${result.job_id} queued for cron ${result.cron_id}; waiting up to ${timeoutSeconds}s…`));
+        const { job, timedOut } = await waitForJob(result.job_id, timeoutSeconds);
+        const succeeded = !timedOut && job.status === JOB_SUCCESS_STATUS;
+        if (!succeeded) process.exitCode = 1;
+        if (opts.json) {
+          const run = { cron_id: result.cron_id, job_id: result.job_id, trigger: result.trigger };
+          if (timedOut) {
+            printJsonError('CRON_RUN_WAIT_TIMEOUT', `Job ${job.job_id} has not finished after ${timeoutSeconds}s (status: ${job.status}).`, { data: { ...run, job } });
+          } else if (!succeeded) {
+            printJsonError('CRON_RUN_JOB_FAILED', `Job ${job.job_id} ${job.status}.`, { data: { ...run, job } });
+          } else {
+            printJson({ ok: true, data: { ...run, job } });
+          }
+          return;
+        }
+        printWaitedJob(job, timedOut, timeoutSeconds);
       } catch (err) {
-        if (cronRunUnavailable(err)) {
+        // Once cron_run has answered, a later error comes from job_get and
+        // says nothing about whether cron run exists on this platform.
+        if (!queued && cronRunUnavailable(err)) {
           printTypedCronError('CRON_RUN_NOT_AVAILABLE', CRON_RUN_UNAVAILABLE, opts.json);
           return;
         }
