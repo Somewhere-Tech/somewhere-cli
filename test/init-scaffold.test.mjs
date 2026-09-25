@@ -20,6 +20,8 @@ const { initInstallSpawnSpec, installInitDependencies, runInitInstall } =
   await import(`${moduleRoot}/lib/init-install.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createGreenTemplate } =
   await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { createAuthTemplate } =
+  await import(`${moduleRoot}/lib/init-auth-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { AGENT_WORKFLOW } =
   await import(`${moduleRoot}/lib/init-agent-guide.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createHappyPathTemplate } =
@@ -79,7 +81,7 @@ test('writer preflights every target and never partially overwrites a project', 
   assert.throws(() => readFileSync(join(dir, 'new.txt')), /ENOENT/);
 });
 
-test('default green starter is a small typed frontend, function, and schema', () => {
+test('minimal starter is a small typed frontend, function, and schema', () => {
   const { dir, result } = generateGreen();
   assert.deepEqual(result.created.sort(), [
     '.gitignore',
@@ -96,7 +98,6 @@ test('default green starter is a small typed frontend, function, and schema', ()
     'src/styles.css',
     'tsconfig.json',
     'types/app.ts',
-    'types/runtime.ts',
   ]);
 
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
@@ -121,7 +122,8 @@ test('default green starter is a small typed frontend, function, and schema', ()
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
 
-  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.from<GreetingRow>/);
+  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /export default sw\.endpoint\(\{/);
+  assert.match(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.from\('greetings'/);
   assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.server/);
   assert.doesNotMatch(readFileSync(join(dir, 'api/greeting.ts'), 'utf8'), /sw\.db\.query/);
   assert.match(readFileSync(join(dir, 'db/schema.ts'), 'utf8'), /export default schema\(/);
@@ -135,20 +137,27 @@ test('default green starter is a small typed frontend, function, and schema', ()
   assert.equal(claude.trimEnd().split('\n').length, 1);
 
   const workflowOrder = [
-    'db/schema.ts',
-    'somewhere typecheck',
     'somewhere deploy',
-    'flow.json',
-    'somewhere verify --flow flow.json',
-    'somewhere dev',
-    'somewhere email test-inbox <addr>',
-    'somewhere cron run <id>',
+    'somewhere verify',
+    '--flow flow.json',
+    'somewhere browser',
+    'somewhere logs --tail 10',
     'somewhere errors',
-    'Reads issued together travel together',
+    '<name>@<subdomain>.test.somewhere.site',
+    'somewhere email test-inbox <addr>',
+    "export { somewhereAuth as default } from '@somewhere-tech/sdk/server'",
+    "createSomewhereAuth()` from `@somewhere-tech/sdk/auth",
+    'db/schema.ts',
+    'somewhere:data',
+    'data.<table>.aggregate',
+    'sw.endpoint({ auth, body, rateLimit, handler })',
+    'somewhere typecheck',
+    'Promise.all',
     '`owner()` tables need no auth guard',
     'somewhere docs <topic>',
-    'https://somewhere.tech/start.txt',
     'somewhere advisor "<question>"',
+    'somewhere dev',
+    'somewhere cron run <id> --wait',
   ];
   let previous = -1;
   for (const marker of workflowOrder) {
@@ -157,14 +166,14 @@ test('default green starter is a small typed frontend, function, and schema', ()
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /A custom endpoint still enforces its own caller policy/);
+  assert.match(agents, /a custom\nendpoint enforces its own caller policy/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,
   );
 });
 
-test('default green starter typechecks before an agent edits it', async () => {
+test('minimal starter typechecks with generated declarations only', async () => {
   const { dir } = generateGreen();
   const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
   mkdirSync(typesDir, { recursive: true });
@@ -191,6 +200,146 @@ declare module 'react-dom/client' {
   const result = await runTypecheck(dir);
   assert.equal(result.ok, true, result.raw);
   assert.deepEqual(result.errors, []);
+});
+
+test('default starter signs users in with the SDK client and the packaged handler', () => {
+  const dir = tempDir();
+  const result = writeInitScaffold(dir, createAuthTemplate());
+  assert.deepEqual(result.created.sort(), [
+    '.gitignore',
+    'AGENTS.md',
+    'CLAUDE.md',
+    'README.md',
+    'api/auth/[...path].ts',
+    'api/greeting.ts',
+    'db/schema.ts',
+    'index.html',
+    'package.json',
+    'src/App.tsx',
+    'src/main.tsx',
+    'src/services/auth.ts',
+    'src/services/greeting.ts',
+    'src/styles.css',
+    'tsconfig.json',
+    'types/app.ts',
+  ]);
+  // The auth route is ONE line: the SDK's maintained handler, no pasted logic.
+  assert.equal(
+    readFileSync(join(dir, 'api/auth/[...path].ts'), 'utf8'),
+    "export { somewhereAuth as default } from '@somewhere-tech/sdk/server';\n",
+  );
+  const greeting = readFileSync(join(dir, 'api/greeting.ts'), 'utf8');
+  assert.match(greeting, /export default sw\.endpoint\(\{\n  auth: 'required',/);
+  assert.match(greeting, /rateLimit: '30\/minute'/);
+  assert.match(readFileSync(join(dir, 'src/services/auth.ts'), 'utf8'), /createSomewhereAuth\(\)/);
+  const app = readFileSync(join(dir, 'src/App.tsx'), 'utf8');
+  assert.match(app, /auth\.signIn\(\{ email, password \}\)/);
+  assert.match(app, /auth\.signUp\(\{ email, password \}\)/);
+  assert.doesNotMatch(app, /fetch\(/, 'components never fetch; services do');
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
+  assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.8.0');
+  for (const version of [...Object.values(pkg.dependencies), ...Object.values(pkg.devDependencies)]) {
+    assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
+  }
+  assert.doesNotMatch(Object.values(collectFiles(dir).files).join('\n'), /\bany\b/);
+});
+
+test('default starter typechecks with generated declarations only', async () => {
+  const dir = tempDir();
+  writeInitScaffold(dir, createAuthTemplate());
+  const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
+  mkdirSync(typesDir, { recursive: true });
+  writeFileSync(join(typesDir, 'index.d.ts'), `declare module 'react' {
+  export interface ReactNode {}
+  export interface FormEvent<T> { preventDefault(): void; currentTarget: T }
+  export const StrictMode: (props: { children?: ReactNode }) => JSX.Element;
+  export function useEffect(effect: () => void, dependencies: unknown[]): void;
+  export function useState<T>(initial: T): [T, (next: T) => void];
+}
+declare module 'react/jsx-runtime' {
+  namespace JSX {
+    interface Element {}
+    interface IntrinsicElements {
+      [name: string]: {
+        onChange?: (event: { target: { value: string } }) => void;
+        onClick?: () => void;
+        onSubmit?: (event: import('react').FormEvent<HTMLFormElement>) => void;
+        [prop: string]: unknown;
+      };
+    }
+  }
+  export function jsx(type: unknown, props: unknown): JSX.Element;
+  export function jsxs(type: unknown, props: unknown): JSX.Element;
+  export const Fragment: unknown;
+}
+declare module 'react-dom/client' {
+  export function createRoot(node: Element): { render(value: unknown): void };
+}
+declare module '@somewhere-tech/sdk/auth' {
+  export interface User { id: string; email: string | null }
+  export function createSomewhereAuth(): {
+    getCachedUser(): User | null;
+    getUser(): Promise<User | null>;
+    signIn(input: { email: string; password: string }): Promise<User>;
+    signUp(input: { email: string; password: string }): Promise<User>;
+    signOut(): Promise<void>;
+  };
+}
+declare module '@somewhere-tech/sdk/server' {
+  export function somewhereAuth(req: Request, sw: unknown): Promise<Response>;
+}
+`);
+
+  const result = await runTypecheck(dir);
+  assert.equal(result.ok, true, result.raw);
+  // sw.endpoint, sw.db and the tables come from the file typecheck generates.
+  const generated = readFileSync(join(dir, 'src/__somewhere_data.d.ts'), 'utf8');
+  assert.match(generated, /^\/\/ Generated by Somewhere from db\/schema\.ts\. Do not edit\./);
+  assert.match(generated, /declare const sw: \{/);
+  assert.equal(collectFiles(dir).files['src/__somewhere_data.d.ts'], undefined, 'the generated file is never deployed');
+});
+
+test('sw.endpoint declaration types auth, body and rate limit', async () => {
+  const dir = tempDir();
+  writeInitScaffold(dir, createGreenTemplate());
+  writeFileSync(join(dir, 'api/probe.ts'), `export const ok = sw.endpoint({
+  auth: 'required',
+  body: { title: 'string', note: 'string?', nested: { n: 'number' } },
+  rateLimit: '10/minute',
+  handler: async ({ body, user }) => ({ id: user.id, title: body.title.trim(), n: body.nested.n + 1, note: body.note }),
+});
+export const nullableUser = sw.endpoint({ auth: 'optional', handler: async ({ user }) => user.id });
+export const badRate = sw.endpoint({ rateLimit: 'ten per minute', handler: async () => null });
+export const wrongField = sw.endpoint({ body: { title: 'string' }, handler: async ({ body }) => { const n: number = body.title; return n; } });
+`);
+  const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
+  mkdirSync(typesDir, { recursive: true });
+  writeFileSync(join(typesDir, 'index.d.ts'), `declare module 'react' {
+  export interface ReactNode {}
+  export const StrictMode: (props: { children?: ReactNode }) => JSX.Element;
+  export function useEffect(effect: () => void, dependencies: unknown[]): void;
+  export function useState<T>(initial: T): [T, (next: T) => void];
+}
+declare module 'react/jsx-runtime' {
+  namespace JSX {
+    interface Element {}
+    interface IntrinsicElements { [name: string]: Record<string, unknown> }
+  }
+  export function jsx(type: unknown, props: unknown): JSX.Element;
+  export function jsxs(type: unknown, props: unknown): JSX.Element;
+  export const Fragment: unknown;
+}
+declare module 'react-dom/client' {
+  export function createRoot(node: Element): { render(value: unknown): void };
+}
+`);
+  const result = await runTypecheck(dir);
+  assert.equal(result.ok, false);
+  assert.deepEqual(result.errors.map((e) => `${e.file}:${e.line}:${e.code}`).sort(), [
+    'api/probe.ts:7:TS18047',
+    'api/probe.ts:8:TS2322',
+    'api/probe.ts:9:TS2322',
+  ]);
 });
 
 test('init dependency installation is required for a green completion', async () => {

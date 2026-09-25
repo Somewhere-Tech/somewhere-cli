@@ -44,19 +44,6 @@ const APP_TYPES = `export interface GreetingResponse {
 }
 `;
 
-const RUNTIME_TYPES = `export interface QueryResult<T> {
-  data: T[];
-  count: number;
-  changes: number;
-}
-
-export interface SomewhereRuntime {
-  db: {
-    from<T>(table: string, options: { limit: number }): Promise<QueryResult<T>>;
-  };
-}
-`;
-
 const SCHEMA = `import { id, schema, serverOnly, table, text } from 'somewhere/db';
 
 export default schema({
@@ -69,22 +56,14 @@ export default schema({
 });
 `;
 
-const API = `import type { SomewhereRuntime } from '../types/runtime';
-
-interface GreetingRow {
-  message: string;
-}
-
-export default async function greeting(
-  _req: Request,
-  sw: SomewhereRuntime,
-): Promise<Response> {
-  const result = await sw.db.from<GreetingRow>('greetings', { limit: 1 });
-
-  return Response.json({
-    message: result.data[0]?.message ?? 'Your full-stack app is ready.',
-  });
-}
+const API = `export default sw.endpoint({
+  auth: 'none',
+  handler: async (_input, sw) => {
+    const result = await sw.db.from('greetings', { limit: 1 });
+    const message = result.data[0]?.message;
+    return { message: typeof message === 'string' ? message : 'Your full-stack app is ready.' };
+  },
+});
 `;
 
 const SERVICE = `import type { GreetingResponse } from '../../types/app';
@@ -186,6 +165,5 @@ export function createGreenTemplate(): InitScaffoldFile[] {
     { path: 'api/greeting.ts', content: API },
     { path: 'db/schema.ts', content: SCHEMA },
     { path: 'types/app.ts', content: APP_TYPES },
-    { path: 'types/runtime.ts', content: RUNTIME_TYPES },
   ];
 }

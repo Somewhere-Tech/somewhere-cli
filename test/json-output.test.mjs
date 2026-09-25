@@ -699,6 +699,22 @@ test('init creates the green starter, --bare keeps only the workflow guide, and 
     assert.ok(deployCheckBody.files['db/schema.ts']);
     assert.ok(deployCheckBody.files['src/main.tsx']);
     assert.ok(deployCheckBody.functions['api/greeting.ts']);
+    assert.equal(
+      readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8'),
+      "export { somewhereAuth as default } from '@somewhere-tech/sdk/server';\n",
+      'the default starter signs users in with the packaged handler',
+    );
+    assert.ok(deployCheckBody.functions['api/auth/[...path].ts']);
+
+    const minimal = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-minimal-'));
+    const minimalResult = await run(['init', '--name', project.name, '--template', 'minimal', '--json'], { cwd: minimal, env });
+    assert.equal(minimalResult.status, 0, `stdout:\n${minimalResult.stdout}\nstderr:\n${minimalResult.stderr}`);
+    assert.match(readFileSync(join(minimal, 'api/greeting.ts'), 'utf8'), /auth: 'none'/);
+    assert.throws(() => readFileSync(join(minimal, 'api/auth/[...path].ts')), /ENOENT/);
+
+    const unknown = await run(['init', '--name', project.name, '--template', 'nope', '--json'], { cwd: mkdtempSync(join(tmpdir(), 'sw-json-init-unknown-')), env });
+    assert.equal(unknown.status, 2);
+    assert.match(unknown.stdout + unknown.stderr, /Unknown --template nope\. Use one of: auth, minimal\./);
 
     const bare = mkdtempSync(join(tmpdir(), 'sw-json-init-scaffold-bare-'));
     const bareResult = await run(['init', '--name', project.name, '--bare', '--json'], {
