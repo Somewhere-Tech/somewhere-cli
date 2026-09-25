@@ -44,8 +44,10 @@ const docsHandler = `export default async function (req: Request, sw: SomewhereR
   const batch = await sw.db.server.batch([{ sql: 'SELECT COUNT(*) AS n FROM rounds' }]);
   const login = await sw.auth.loginWithCookie(req, { email: 'reader@example.test', password: 'password' });
   const signedIn = login.mfa_required ? null : login.user.email;
+  const tally = await sw.db.aggregate('rounds', { count: true, sum: 'votes', groupBy: ['title'] });
+  const sent = await sw.email.send({ to: 'reader@example.test', subject: 'Round closed', text: 'The winner is in.' });
   await sw.db.remove('rounds', { where: { id } });
-  return Response.json({ open: open.data, total, raw: raw.data, own: own.count, n: batch[0].data, signedIn });
+  return Response.json({ open: open.data, total, raw: raw.data, own: own.count, n: batch[0].data, signedIn, tally: tally.data, sent: sent.id });
 }
 `;
 
