@@ -20,7 +20,7 @@ After every change:
 2. \`somewhere verify\` — desktop and phone screenshots, console and network
    health; \`somewhere verify --flow flow.json\` fills and clicks.
 3. \`somewhere browser\` inspects a page; \`somewhere logs --tail 10\`, then
-   \`somewhere errors\` (claimed project, signed in): read the failure first.
+   \`somewhere errors\`: read the failure first.
 4. Email: sign up as \`<name>@<subdomain>.test.somewhere.site\`, then
    \`somewhere email test-inbox <addr>\` prints the message and its magic link.
 
