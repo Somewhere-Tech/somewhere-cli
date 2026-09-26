@@ -137,6 +137,12 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
   assert.equal(claude.trimEnd().split('\n').length, 1);
 
   const workflowOrder = [
+    'somewhere init --name <slug>',
+    'rather than rebuilding sign-in',
+    'npx @somewhere-tech/cli deploy',
+    'somewhere docs <topic>',
+    'somewhere advisor "<question>"',
+    'somewhere typecheck',
     'somewhere deploy',
     'somewhere verify',
     '--flow flow.json',
@@ -145,19 +151,15 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
     'somewhere errors',
     '<name>@<subdomain>.test.somewhere.site',
     'somewhere email test-inbox <addr>',
+    'serves `index.html`',
     "export { somewhereAuth as default } from '@somewhere-tech/sdk/server'",
     "createSomewhereAuth()` from `@somewhere-tech/sdk/auth",
+    'email_verified: false',
+    'sw.auth.requireUser(req)',
+    'sw.endpoint({',
     'db/schema.ts',
     'somewhere:data',
-    'data.<table>.aggregate',
-    'sw.endpoint({ auth, body, rateLimit, handler })',
-    'somewhere typecheck',
     'Promise.all',
-    '`owner()` tables need no auth guard',
-    'somewhere docs <topic>',
-    'somewhere advisor "<question>"',
-    'somewhere dev',
-    'somewhere cron run <id> --wait',
   ];
   let previous = -1;
   for (const marker of workflowOrder) {
@@ -166,7 +168,7 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /a custom\nendpoint enforces its own caller policy/);
+  assert.match(agents, /no auth\nguard\)[\s\S]*a custom endpoint enforces its own caller policy/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,

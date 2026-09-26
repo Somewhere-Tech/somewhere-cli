@@ -106,6 +106,11 @@ export function App() {
   const [error, setError] = useState('');
   const [message, setMessage] = useState('');
 
+  // This page is the app's single entry and sign-in gate; build on it. Every
+  // extensionless path serves index.html, so add pages by routing on
+  // location.pathname here. getUser() reads /api/auth/me ({ user: null } when
+  // signed out, never a 401), and the Loading… state keeps the page from
+  // rendering blank.
   useEffect(() => {
     void auth.getUser().then(setUser).finally(() => setChecking(false));
   }, []);
