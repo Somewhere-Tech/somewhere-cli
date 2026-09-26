@@ -92,7 +92,7 @@ test('same compiler context types server writes without widening browser operati
 export type Contract = { input: { id: string }; output: { changes: number } };
 export default (async (req, sw) => {
   const { id } = await req.json();
-  await sw.db.server.insert('notes', { custom_owner: id, title: 'hello' });
+  await sw.db.server.insert('notes', { user_id: id, title: 'hello' });
   await sw.db.server.insert('inbox', { _sw_author_id: null, message: 'system' });
   const results = await sw.db.server.tx([
     { op: 'update', table: 'notes', set: { custom_owner: id }, where: { id } },

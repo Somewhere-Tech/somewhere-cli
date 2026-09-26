@@ -68,6 +68,7 @@ export interface DeclaredDataClient {
 }
 interface DeclaredDataGenerator {
   generateFromFiles(files: Record<string, string>): DeclaredDataClient | undefined;
+  declaredTablesFromFiles(files: Record<string, string>): string;
   SCHEMA_DECLARATION: string;
   RUNTIME_CONTEXT_DECLARATION: string;
 }
@@ -95,14 +96,20 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
     throw new Error(`Cannot overwrite ${declarationPath}; this path is reserved for the generated data declaration.`);
   }
   let client: DeclaredDataClient | undefined;
+  // Server reads and writes of the declared tables are typed from the same schema.
+  let tables: string;
   const generator = require('../../runtime/declared-data.cjs') as DeclaredDataGenerator;
-  try { client = generator.generateFromFiles({ 'db/schema.ts': readFileSync(schemaPath, 'utf8') }); }
+  try {
+    const files = { 'db/schema.ts': readFileSync(schemaPath, 'utf8') };
+    client = generator.generateFromFiles(files);
+    tables = generator.declaredTablesFromFiles(files);
+  }
   catch (error) {
     // Do not leave stale permissions and field types looking current in editors.
     if (previous !== undefined) rmSync(declarationPath);
     throw error;
   }
-  const declaration = GENERATED_DATA_HEADER + generator.RUNTIME_CONTEXT_DECLARATION + ENDPOINT_DECLARATION + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
+  const declaration = GENERATED_DATA_HEADER + generator.RUNTIME_CONTEXT_DECLARATION + tables + ENDPOINT_DECLARATION + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
   if (declaration !== previous) writeFileSync(declarationPath, declaration);
   return { client, declarationPath, schemaPath };
 }
