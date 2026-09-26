@@ -1,0 +1,321 @@
+// Multi-user verify journeys (tsk_f49ccbb75f994f1fb5179198087d24de): one run,
+// several isolated signed-in browsers, bounded existing browser calls, and every
+// actor browser closed however the run ends.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
+import { spawn, spawnSync } from 'node:child_process';
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+
+const {
+  VERIFY_JOURNEY_LIMITS,
+  createVerifyJourneyRun,
+  formatVerifyJourneyReport,
+  normalizeVerifyFlow,
+  normalizeVerifyJourney,
+  verifyFlowSchema,
+} = await import('../dist/commands/verify.js');
+const { normalizeBrowserActions } = await import('../dist/lib/browser-actions.js');
+const { CliApiError } = await import('../dist/lib/client.js');
+
+const SECRET_COOKIE = 'cookie-secret-8f2a';
+const SECRET_STORAGE = 'storage-secret-19cd';
+
+function report(overrides = {}) {
+  return {
+    passed: true,
+    final_url: 'https://club.somewhere.site/club',
+    console_errors: [],
+    page_errors: [],
+    failed_requests: [],
+    request_expectations: [],
+    steps: [{ step: 0, action: 'click', ok: true }],
+    screenshots: [{ label: 'page', fs_path: '/_browser_tests/r/page.jpg', url: 'https://api.test/s/page.jpg' }],
+    accessibility_layout: 'layout: no horizontal overflow; 0 small tap targets',
+    ...overrides,
+  };
+}
+
+/** A fake platform: records every call; `answer(body, n)` decides each run. */
+function fakeClient(answer = () => report()) {
+  const calls = [];
+  return {
+    calls,
+    runs: () => calls.filter((call) => call.body.project_id),
+    closes: () => calls.filter((call) => !call.body.project_id),
+    async call(method, path, body, _query, opts) {
+      assert.equal(method, 'POST');
+      assert.equal(path, '/browser/test');
+      calls.push({ body: structuredClone(body), opts });
+      if (!body.project_id) return { session_id: body.session_id, closed: true };
+      return answer(body, calls.filter((call) => call.body.project_id).length);
+    },
+  };
+}
+
+const bookclub = {
+  actors: {
+    alice: { cookies: [{ name: 'pref', value: SECRET_COOKIE }] },
+    bob: { auth: { user_id: 'usr_bob' }, local_storage: { theme: SECRET_STORAGE } },
+  },
+  journey: [
+    { as: 'alice', path: '/signup', actions: [{ fill: '#email', value: 'alice@example.test' }, { click: '#create' }] },
+    { as: 'bob', path: '/club', actions: [{ click: '#vote-1' }], expect_requests: [{ path: '/api/vote', status: 200 }] },
+    { as: 'alice', path: '/club', viewport: 'mobile', actions: [{ eval: "fetch('/api/state').then(r => r.status)" }] },
+    { as: 'bob', actions: [{ click: '#close' }], expect_requests: [{ path: '/api/close', status: 403 }] },
+  ],
+};
+
+test('a legitimate two-user journey runs in order, each actor in its own continued browser', async () => {
+  const journey = normalizeVerifyJourney(bookclub);
+  const client = fakeClient();
+  const run = createVerifyJourneyRun({ project_id: 'club' }, journey, client, { runId: 'r1' });
+  const result = await run.run();
+  assert.equal(result.passed, true, result.verdict);
+  assert.match(result.verdict, /^PASS — 4 segments by 2 users \(alice, bob\)/);
+  assert.equal(result.mode, 'journey');
+  assert.equal(result.browser_runs, 4);
+
+  const runs = client.runs().map((call) => call.body);
+  assert.deepEqual(runs.map((body) => body.session_id), ['vf-r1-alice', 'vf-r1-bob', 'vf-r1-alice', 'vf-r1-bob']);
+  assert.ok(runs.every((body) => body.project_id === 'club'), 'every actor call names the project');
+  assert.deepEqual(runs.map((body) => body.url), ['/signup', '/club', undefined, undefined],
+    'an actor\'s first segment starts at its path; a continued actor is not re-navigated by url');
+  assert.deepEqual(runs[2].actions[0], { goto: '/club' }, 'a continued actor moves with a leading goto');
+  assert.equal(runs[3].actions.length, 1, 'no goto without a path');
+  assert.deepEqual(runs.map((body) => body.viewport), ['desktop', 'desktop', 'mobile', 'desktop']);
+  assert.ok(runs.every((body) => body.capture_after === true && body.inline === false));
+  assert.deepEqual(runs[3].expect_requests, [{ path: '/api/close', status: 403 }]);
+
+  // Cleanup on success: exactly the two opened browsers are closed.
+  assert.deepEqual(client.closes().map((call) => call.body), [{ session_id: 'vf-r1-alice' }, { session_id: 'vf-r1-bob' }]);
+  assert.deepEqual(result.cleanup, [{ actor: 'alice', closed: true }, { actor: 'bob', closed: true }]);
+  assert.equal(result.layout.length, 4, 'the overflow/tap-target line is reported for every segment');
+  assert.match(result.layout[2].viewport, /alice #3 mobile/);
+});
+
+test('identity isolation: seeds reach only their own actor, only on its first call, and never the report', async () => {
+  const client = fakeClient();
+  const run = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r2' });
+  const result = await run.run();
+  const [alice1, bob1, alice2, bob2] = client.runs().map((call) => call.body);
+  assert.deepEqual(alice1.cookies, [{ name: 'pref', value: SECRET_COOKIE }]);
+  assert.equal('auth' in alice1 || 'local_storage' in alice1, false, 'alice never receives bob\'s identity');
+  assert.deepEqual(bob1.auth, { user_id: 'usr_bob' });
+  assert.deepEqual(bob1.local_storage, { theme: SECRET_STORAGE });
+  assert.equal('cookies' in bob1, false, 'bob never receives alice\'s cookie');
+  for (const body of [alice2, bob2]) {
+    for (const field of ['auth', 'local_storage', 'cookies', 'headers']) {
+      assert.equal(field in body, false, `a continued actor is not re-seeded (${field})`);
+    }
+  }
+  assert.notEqual(alice1.session_id, bob1.session_id, 'separate browsers');
+  const printed = JSON.stringify(result) + formatVerifyJourneyReport(result).join('\n');
+  assert.ok(!printed.includes(SECRET_COOKIE) && !printed.includes(SECRET_STORAGE), 'seed values never appear in output');
+
+  // A second run never resumes the first run's browsers.
+  const again = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), fakeClient());
+  assert.notEqual(again.sessions.alice, run.sessions.alice);
+  assert.match(again.sessions.alice, /^vf-[0-9a-f]{8}-alice$/);
+});
+
+test('a failing segment stops the journey truthfully, and every opened browser is still closed', async () => {
+  const client = fakeClient((_body, n) => n === 2
+    ? report({ passed: false, steps: [{ step: 0, action: 'click', ok: false, error: 'selector #vote-1 did not match' }] })
+    : report());
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r3' }).run();
+  assert.equal(result.passed, false);
+  assert.match(result.verdict, /^FAIL — segment 2 — step 1 \(click #vote-1\) failed at bob #2 desktop: selector #vote-1 did not match/);
+  assert.equal(client.runs().length, 2, 'later segments do not run after a failure');
+  assert.deepEqual(result.segments.map((s) => [s.segment, s.ran, s.passed]), [[1, true, true], [2, true, false], [3, false, false], [4, false, false]]);
+  assert.deepEqual(client.closes().map((call) => call.body.session_id), ['vf-r3-alice', 'vf-r3-bob']);
+  assert.match(formatVerifyJourneyReport(result).join('\n'), /segment 3 .*not run/);
+});
+
+test('an intended 403 passes only when it is actually seen', async () => {
+  const seen = fakeClient((body) => report({
+    request_expectations: body.expect_requests.map((item) => ({ ...item, ok: true })),
+  }));
+  assert.equal((await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), seen).run()).passed, true);
+  const missing = fakeClient((body) => report({
+    request_expectations: body.expect_requests.map((item) => ({ ...item, ok: item.status !== 403, ...(item.status === 403 ? { error: 'Expected /api/close to return 403; saw 200.' } : {}) })),
+  }));
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), missing).run();
+  assert.equal(result.passed, false);
+  assert.match(result.verdict, /segment 4 — expected request \/api\/close:403 was not observed at bob #4 desktop/);
+});
+
+test('a continued actor whose browser was replaced fails as a different person; a first call note does not', async () => {
+  const client = fakeClient((_body, n) => report(n === 1 || n === 3 ? { session_note: 'session expired, started fresh' } : {}));
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r4' }).run();
+  assert.equal(result.passed, false);
+  assert.match(result.verdict, /^FAIL — segment 3 \(alice, mobile\): alice's browser ended between segments/);
+  assert.match(result.verdict, /\[VERIFY_ACTOR_SESSION_ENDED\]$/);
+  assert.equal(client.runs().length, 3);
+  assert.equal(client.closes().length, 2);
+});
+
+test('platform refusals stop the run with their code and still clean up', async () => {
+  for (const [code, message] of [
+    ['BROWSER_ORIGIN_NOT_AUTHORIZED', 'Driving this page only works on an address one of your own projects serves.'],
+    ['BROWSER_SESSION_LIMIT', 'You already have 3 live browser sessions (a, b, c). Close one.'],
+    ['CLAIM_ACCOUNT_REQUIRED', 'Persistent browser sessions require a claimed account.'],
+  ]) {
+    const client = fakeClient((_body, n) => { if (n === 2) throw new CliApiError(code, message, 403); return report(); });
+    const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r5' }).run();
+    assert.equal(result.passed, false, code);
+    assert.ok(result.verdict.startsWith(`FAIL — segment 2 (bob, desktop): ${message}`), result.verdict);
+    assert.ok(result.verdict.endsWith(`[${code}]`));
+    assert.equal(result.segments[1].ran, false, 'a refusal is not counted as a browser run');
+    assert.equal(result.browser_runs, 1);
+    assert.deepEqual(client.closes().map((call) => call.body.session_id), ['vf-r5-alice', 'vf-r5-bob']);
+  }
+});
+
+test('a transport failure still closes the browsers; a close failure is reported, not hidden', async () => {
+  const client = fakeClient((_body, n) => { if (n === 2) throw new Error('socket hang up'); return report(); });
+  client.call = ((original) => async (method, path, body, query, opts) => {
+    if (!body.project_id && body.session_id.endsWith('bob')) {
+      client.calls.push({ body: structuredClone(body), opts });
+      throw new CliApiError('AUTHORITY_UNAVAILABLE', 'try again', 503);
+    }
+    return original(method, path, body, query, opts);
+  })(client.call.bind(client));
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r6' }).run();
+  assert.equal(result.passed, false);
+  assert.match(result.verdict, /socket hang up \[VERIFY_SEGMENT_FAILED\]$/);
+  assert.deepEqual(result.cleanup, [{ actor: 'alice', closed: true }, { actor: 'bob', closed: false, error: 'AUTHORITY_UNAVAILABLE' }]);
+  assert.match(formatVerifyJourneyReport(result).join('\n'), /bob not closed \(AUTHORITY_UNAVAILABLE; it expires within 3 minutes\)/);
+});
+
+test('the journey deadline stops before the next segment and cleans up', async () => {
+  let clock = 0;
+  const client = fakeClient((_body, n) => { if (n === 2) clock += VERIFY_JOURNEY_LIMITS.deadline_ms + 1; return report(); });
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r7', now: () => clock }).run();
+  assert.equal(result.passed, false);
+  assert.match(result.verdict, /^FAIL — segment 3 \(alice, mobile\): The journey passed its 10-minute limit/);
+  assert.equal(client.runs().length, 2);
+  assert.equal(client.closes().length, 2);
+});
+
+test('closeAll is idempotent and only closes browsers the run opened', async () => {
+  const client = fakeClient();
+  const run = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r8' });
+  assert.deepEqual(await run.closeAll(), [], 'nothing opened, nothing closed');
+  const client2 = fakeClient((_body, n) => { if (n === 1) throw new CliApiError('BROWSER_SESSION_LIMIT', 'limit', 429); return report(); });
+  const run2 = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client2, { runId: 'r9' });
+  await run2.run();
+  await run2.closeAll();
+  assert.deepEqual(client2.closes().map((call) => call.body.session_id), ['vf-r9-alice'], 'bob never started, so only alice is closed, once');
+});
+
+test('multi-user runs need the project and a deployed app, refused before any browser', async () => {
+  const client = fakeClient();
+  await assert.rejects(createVerifyJourneyRun({ url: 'https://club.somewhere.site/' }, normalizeVerifyJourney(bookclub), client).run(), /needs --project/);
+  await assert.rejects(createVerifyJourneyRun({ project_id: 'club', url: 'http://127.0.0.1:5173/' }, normalizeVerifyJourney(bookclub), client).run(), /deployed app/);
+  assert.equal(client.calls.length, 0);
+});
+
+test('limits and shape are enforced before any browser starts, naming the limit and the fix', () => {
+  const four = { actors: { a: {}, b: {}, c: {}, d: {} }, journey: [{ as: 'a' }, { as: 'b' }, { as: 'c' }, { as: 'd' }] };
+  assert.throws(() => normalizeVerifyJourney(four), /1 to 3 actors/);
+  const many = { actors: { a: {} }, journey: Array.from({ length: 13 }, () => ({ as: 'a' })) };
+  assert.throws(() => normalizeVerifyJourney(many), /13 segments; the limit is 12/);
+  const thirty = Array.from({ length: 30 }, () => ({ click: '#x' }));
+  assert.doesNotThrow(() => normalizeVerifyJourney({ actors: { a: {} }, journey: [{ as: 'a', path: '/', actions: thirty }] }),
+    'an actor\'s first path is the start url, not an extra action');
+  assert.throws(() => normalizeVerifyJourney({ actors: { a: {} }, journey: [{ as: 'a' }, { as: 'a', path: '/x', actions: thirty }] }),
+    /31 actions \(including the goto for its path\); the limit per segment is 30/);
+  const total = { actors: { a: {} }, journey: Array.from({ length: 5 }, () => ({ as: 'a', actions: thirty })) };
+  assert.throws(() => normalizeVerifyJourney(total), /150 actions in total; the limit is 120/);
+  assert.throws(() => normalizeVerifyJourney({ actors: { a: {} }, journey: [{ as: 'b' }] }), /must name one of the actors \(a\)/);
+  assert.throws(() => normalizeVerifyJourney({ actors: { a: {}, b: {} }, journey: [{ as: 'a' }] }), /b is declared but never used/);
+  assert.throws(() => normalizeVerifyJourney({ actors: { Alice: {} }, journey: [{ as: 'Alice' }] }), /actor name "Alice"/);
+  for (const bad of ['//evil.test/x', 'https://evil.test/', 'club', '/a b']) {
+    assert.throws(() => normalizeVerifyJourney({ actors: { a: {} }, journey: [{ as: 'a', path: bad }] }), /path must be a path on this app/);
+  }
+  assert.throws(() => normalizeVerifyJourney({ ...bookclub, viewports: ['mobile'] }), /only "actors" and "journey" \(found viewports\)/);
+  assert.throws(() => normalizeVerifyJourney({ actors: { a: { password: 'x' } }, journey: [{ as: 'a' }] }), /actors\.a has unsupported field: password/);
+  assert.throws(() => normalizeVerifyJourney({ actors: { a: { local_storage: { k: 'x'.repeat(9000) } } }, journey: [{ as: 'a' }] }), /8 KB/);
+  assert.throws(() => normalizeVerifyFlow(bookclub), /multi-user flow \(actors \+ journey\)\. Run it with `somewhere verify/,
+    'deploy --verify and single-user loaders name the right command');
+});
+
+test('goto is one shared, path-only action', () => {
+  assert.deepEqual(normalizeBrowserActions([{ goto: '/club' }]), { ok: true, actions: [{ goto: '/club' }] });
+  for (const bad of ['//evil.test', 'https://evil.test', 'club', '/a\\b', 7]) {
+    const out = normalizeBrowserActions([{ goto: bad }]);
+    assert.equal(out.ok, false);
+    assert.match(out.error, /goto must be a path on this app/);
+  }
+});
+
+function cli(args, env = {}) {
+  const home = mkdtempSync(join(tmpdir(), 'sw-journey-home-'));
+  const result = spawnSync(process.execPath, [join(process.cwd(), 'dist/index.js'), ...args], {
+    encoding: 'utf8',
+    env: { ...process.env, HOME: home, USERPROFILE: home, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1', ...env },
+  });
+  rmSync(home, { recursive: true, force: true });
+  return result;
+}
+
+test('--schema prints the machine-readable flow contract; --help carries a valid multi-user example', () => {
+  const schema = cli(['verify', '--schema']);
+  assert.equal(schema.status, 0, schema.stderr);
+  const parsed = JSON.parse(schema.stdout);
+  assert.deepEqual(parsed, JSON.parse(JSON.stringify(verifyFlowSchema())));
+  assert.equal(parsed.oneOf.length, 2);
+  assert.deepEqual(parsed['x-limits'], { ...VERIFY_JOURNEY_LIMITS });
+  assert.ok(parsed.oneOf[1].properties.journey.items.properties.actions.items.oneOf.some((item) => item.required[0] === 'goto'));
+
+  const help = cli(['verify', '--help']);
+  assert.equal(help.status, 0, help.stderr);
+  const match = help.stdout.match(/Several users in one run[^\n]*\n([\s\S]*?)\nSegments run in order/);
+  assert.ok(match, help.stdout);
+  const example = JSON.parse(match[1].replace(/^  /gm, ''));
+  assert.equal(normalizeVerifyJourney(example).journey.length, 3);
+  assert.match(help.stdout, /3 actors, 12 segments,\s+30 actions per segment, 120 in total, 10 minutes/);
+});
+
+test('Ctrl-C during a journey closes every opened actor browser before exiting', async () => {
+  const seen = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      seen.push(body);
+      res.setHeader('Content-Type', 'application/json');
+      if (!body.project_id) { res.end(JSON.stringify({ ok: true, data: { session_id: body.session_id, closed: true } })); return; }
+      if (seen.filter((b) => b.project_id).length === 1) { res.end(JSON.stringify({ ok: true, data: report() })); return; }
+      // The second actor's segment hangs; the operator presses Ctrl-C.
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const dir = mkdtempSync(join(tmpdir(), 'sw-journey-sigint-'));
+  mkdirSync(join(dir, '.somewhere'), { recursive: true });
+  writeFileSync(join(dir, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_fixture' }));
+  const flowPath = join(dir, 'flow.json');
+  writeFileSync(flowPath, JSON.stringify(bookclub));
+  const child = spawn(process.execPath, [join(process.cwd(), 'dist/index.js'), 'verify', '--project', 'club', '--flow', flowPath, '--json'], {
+    env: { ...process.env, HOME: dir, USERPROFILE: dir, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1', SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1` },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  for (let i = 0; i < 100 && seen.filter((b) => b.project_id).length < 2; i++) await new Promise((r) => setTimeout(r, 50));
+  assert.equal(seen.filter((b) => b.project_id).length, 2, `the second segment started (${stderr})`);
+  child.kill('SIGINT');
+  const code = await new Promise((resolve) => child.on('exit', (c) => resolve(c)));
+  server.closeAllConnections?.();
+  server.close();
+  rmSync(dir, { recursive: true, force: true });
+  assert.equal(code, 130);
+  const closes = seen.filter((b) => !b.project_id).map((b) => b.session_id).sort();
+  assert.equal(closes.length, 2, 'both opened browsers were closed');
+  assert.ok(closes[0].endsWith('-alice') && closes[1].endsWith('-bob'));
+});

@@ -9,7 +9,8 @@ export type BrowserSequenceAction =
   | { wait: string | number | { selector: string } }
   | { expect: { selector: string; text?: string; value?: string; visible?: boolean; count?: number } }
   | { screenshot: string }
-  | { eval: string };
+  | { eval: string }
+  | { goto: string };
 
 export interface ExpectedBrowserRequest {
   path: string;
@@ -21,7 +22,7 @@ export interface BrowserRequestExpectationResult extends ExpectedBrowserRequest 
   error?: string;
 }
 
-const ACTION_KEYS = ['click', 'fill', 'upload', 'select', 'wait', 'expect', 'screenshot', 'eval'] as const;
+const ACTION_KEYS = ['click', 'fill', 'upload', 'select', 'wait', 'expect', 'screenshot', 'eval', 'goto'] as const;
 export const MAX_BROWSER_UPLOAD_BYTES = 10 * 1024 * 1024;
 
 const MIME_TYPES: Record<string, string> = {
@@ -165,6 +166,14 @@ export function normalizeBrowserActions(raw: unknown, baseDir = process.cwd()):
       actions.push({ eval: actionValue });
       continue;
     }
+    if (key === 'goto') {
+      // The same rule the platform applies: a path on the app's own origin.
+      if (typeof actionValue !== 'string' || !actionValue.startsWith('/') || actionValue.startsWith('//') || /[\\\s]/.test(actionValue)) {
+        return { ok: false, error: `${at}: goto must be a path on this app starting with "/" (for example "/club").` };
+      }
+      actions.push({ goto: actionValue });
+      continue;
+    }
     if (key === 'screenshot') {
       if (typeof actionValue !== 'string' || !actionValue.trim()) return { ok: false, error: `${at}: screenshot must be a non-empty label.` };
       actions.push({ screenshot: actionValue.trim() });
@@ -299,6 +308,7 @@ export function actionLabel(action: BrowserSequenceAction): string {
   if ('wait' in action) return 'wait';
   if ('expect' in action) return 'expect';
   if ('screenshot' in action) return 'screenshot';
+  if ('goto' in action) return 'goto';
   return 'eval';
 }
 

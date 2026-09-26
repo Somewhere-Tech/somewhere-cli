@@ -97,6 +97,8 @@ export interface BrowserResult {
   session_expires_at?: string;
   /** Fail-soft note, e.g. "session expired, started fresh". */
   session_note?: string;
+  /** One non-blocking line: contrast, horizontal overflow, tap-target sizing. */
+  accessibility_layout?: string;
 }
 
 export interface BrowserOptions {

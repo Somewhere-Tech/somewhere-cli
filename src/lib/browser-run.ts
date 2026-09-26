@@ -331,6 +331,19 @@ export async function executeLocalAction(
       }
       return step;
     }
+    if ('goto' in action) {
+      step.path = action.goto;
+      const origin = String(await evaluate(session, 'location.origin'));
+      await session.send('Page.navigate', { url: new URL(action.goto, origin).toString() });
+      const until = Math.min(deadline, Date.now() + NAVIGATION_TIMEOUT_MS);
+      await sleep(50);
+      while (await evaluate(session, 'document.readyState') !== 'complete') {
+        if (Date.now() >= until) throw new Error(`goto ${action.goto} did not finish loading in time.`);
+        await sleep(100);
+      }
+      await sleep(SETTLE_MS);
+      return step;
+    }
     if ('screenshot' in action) {
       const safeLabel = action.screenshot.replace(/[^a-z0-9_-]+/gi, '-').replace(/^-+|-+$/g, '') || 'step';
       const path = resolve(`${screenshotPrefix}-${safeLabel}.png`);

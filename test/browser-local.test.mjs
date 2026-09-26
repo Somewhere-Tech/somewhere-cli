@@ -276,3 +276,37 @@ test('a wait that never matches is a failed step, not a silent pass', async (t) 
     await fixture.close();
   }
 });
+
+test('local goto moves to another page of the same app and later steps act there', async (t) => {
+  if (!findBrowser()) {
+    t.skip('no browser installed on this machine');
+    return;
+  }
+  const server = createServer((req, res) => {
+    res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+    res.end(req.url === '/club'
+      ? '<!doctype html><html><body><h1 id="where">Club</h1><button id="join" type="button" onclick="this.textContent=\'Joined\'">Join</button></body></html>'
+      : '<!doctype html><html><body><h1 id="where">Home</h1></body></html>');
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  try {
+    const report = await runLocalBrowser({
+      url: `http://localhost:${port}/`,
+      actions: [
+        { expect: { selector: '#where', text: 'Home' } },
+        { goto: '/club' },
+        { click: '#join' },
+        { expect: { selector: '#join', text: 'Joined' } },
+        { eval: 'location.pathname' },
+      ],
+      viewport: { width: 1280, height: 800 },
+      timeoutMs: 60_000,
+    });
+    assert.equal(report.passed, true, JSON.stringify(report.steps, null, 2));
+    assert.ok(report.steps.every((step) => step.ok));
+    assert.equal(report.steps.at(-1).result, '/club');
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+});
