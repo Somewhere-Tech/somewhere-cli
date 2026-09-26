@@ -470,6 +470,9 @@ test('real isolated install survives post-verification path and writable-fd swap
 
     const poisonDir = join(root, 'poisoned-transitive');
     mkdirSync(poisonDir);
+    // Its own package root: without one, npm climbs to the nearest ancestor
+    // package.json (anywhere above TMPDIR) and installs into that workspace.
+    writeFileSync(join(poisonDir, 'package.json'), '{ "name": "poisoned-transitive", "private": true }\n');
     execFileSync(
       'npm',
       ['install', '--ignore-scripts', '--audit=false', '--fund=false', '--no-save', 'kleur@4.1.5'],
