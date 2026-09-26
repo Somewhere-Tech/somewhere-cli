@@ -19,13 +19,17 @@ if (esbuild.version !== pinned) throw new Error(`Install the platform compiler's
 const result = await esbuild.build({
   absWorkingDir: root,
   stdin: {
-    contents: `import { clientAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
+    contents: `import { clientAuthorityFromSource, schemaAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
 import { generateDataClient } from './worker/containers/compile/typed-data.cjs';
+import { declaredTablesDeclaration } from './worker/containers/compile/runtime-types.cjs';
 export { SCHEMA_DECLARATION } from './worker/containers/compile/schema-types.cjs';
 export { RUNTIME_CONTEXT_DECLARATION } from './worker/containers/compile/runtime-types.cjs';
 export function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? generateDataClient(authority) : undefined;
+}
+export function declaredTablesFromFiles(files) {
+  return declaredTablesDeclaration(schemaAuthorityFromSource(files));
 }`,
     resolveDir: root, sourcefile: 'declared-data-vendor-entry.js', loader: 'js',
   },

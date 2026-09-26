@@ -331,64 +331,6 @@ var require_typed_data = __commonJS({
   }
 });
 
-// worker/containers/compile/schema-types.cjs
-var require_schema_types = __commonJS({
-  "worker/containers/compile/schema-types.cjs"(exports2, module2) {
-    "use strict";
-    var types = `declare namespace SomewhereSchemaDeclaration {
-  interface Column { readonly __somewhereColumn: unique symbol }
-  interface Table { readonly __somewhereTable: unique symbol }
-  interface TableMarker { readonly __somewhereTableMarker: unique symbol }
-  interface ColumnMarker { readonly __somewhereColumnMarker: unique symbol }
-  interface Relation { readonly __somewhereRelation: unique symbol }
-  interface Scope { readonly __somewhereScope: unique symbol }
-  interface OwnerScope extends Scope { readonly __somewhereOwner: unique symbol }
-  interface MemberScope extends Scope { readonly __somewhereMember: unique symbol }
-  interface ColumnOptions<Default> {
-    nullable?: boolean; default?: Default | null; unique?: boolean;
-    references?: string; onDelete?: 'cascade' | 'restrict'; renamedFrom?: string;
-  }
-  interface ClientPermissions<Field extends string> {
-    identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
-    create?: Field[] | false | null; update?: Field[] | false | null; delete?: boolean;
-  }
-  interface TableOptions<Field extends string> {
-    scope?: Scope; client?: ClientPermissions<Field>; indexes?: string[][];
-    unique?: string[][]; relations?: Record<string, Relation>;
-  }
-}
-`;
-    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search: SomewhereSchemaDeclaration.OwnerScope }): unknown;
-function table<Columns extends Record<string, SomewhereSchemaDeclaration.Column | SomewhereSchemaDeclaration.ColumnMarker>>(columns: Columns, options?: SomewhereSchemaDeclaration.TableOptions<Extract<keyof Columns, string>>): SomewhereSchemaDeclaration.Table;
-function id(options?: { uuid?: boolean }): SomewhereSchemaDeclaration.Column;
-function text(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
-function number(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
-function integer(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
-function boolean(options?: SomewhereSchemaDeclaration.ColumnOptions<boolean>): SomewhereSchemaDeclaration.Column;
-function timestamp(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
-function json(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
-function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): SomewhereSchemaDeclaration.Column;
-function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
-function shared(): SomewhereSchemaDeclaration.Scope;
-function serverOnly(): SomewhereSchemaDeclaration.Scope;
-function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete'> }): SomewhereSchemaDeclaration.MemberScope;
-function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
-function belongsTo(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
-function removed(): SomewhereSchemaDeclaration.ColumnMarker;
-function removedTable(): SomewhereSchemaDeclaration.TableMarker;
-function exported(): SomewhereSchemaDeclaration.TableMarker;
-`;
-    var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, member: SomewhereSchemaDeclaration.MemberScope): SomewhereSchemaDeclaration.Scope;
-function anyOf(member: SomewhereSchemaDeclaration.MemberScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
-function parent(options: { via: string }): SomewhereSchemaDeclaration.Scope;
-`;
-    var SCHEMA_DECLARATION2 = types + signatures.replace(/^function /gm, "declare function ") + `declare module 'somewhere/db' {
-${(signatures + policySignatures).replace(/^function /gm, "  export function ")}}
-`;
-    module2.exports = { SCHEMA_DECLARATION: SCHEMA_DECLARATION2 };
-  }
-});
-
 // worker/containers/compile/runtime-types.cjs
 var require_runtime_types = __commonJS({
   "worker/containers/compile/runtime-types.cjs"(exports2, module2) {
@@ -439,11 +381,45 @@ type SomewhereDbWriteIntent =
   | { op: 'insert'; table: string; values: SomewhereDbValues; options?: SomewhereDbInsertOptions | null }
   | ({ op: 'update'; table: string } & SomewhereDbUpdate)
   | { op: 'remove'; table: string; where?: SomewhereDbWhere | null };
-interface SomewhereDbResult {
+// db/schema.ts's tables, one entry each, generated beside this declaration
+// (declaredTablesDeclaration). With no declared tables it stays empty: any
+// table name is accepted and rows are Record<string, unknown>. Once tables are
+// declared, structured calls accept only their names and rows carry the
+// declared types. Raw SQL rows are never typed from it.
+interface SomewhereDeclaredTables {}
+type SomewhereDbTable = [keyof SomewhereDeclaredTables] extends [never] ? string : Extract<keyof SomewhereDeclaredTables, string>;
+type __SomewhereDeclared<T extends string, K extends string, Fallback> = T extends keyof SomewhereDeclaredTables
+  ? K extends keyof SomewhereDeclaredTables[T] ? SomewhereDeclaredTables[T][K] : Fallback
+  : Fallback;
+type SomewhereDbRow<T extends string> = __SomewhereDeclared<T, 'row', Record<string, unknown>>;
+type SomewhereDbColumn<T extends string> = Extract<keyof SomewhereDbRow<T>, string>;
+type SomewhereDbRelations<T extends string> = __SomewhereDeclared<T, 'relations', Record<string, unknown>>;
+type SomewhereDbRelationName<T extends string> = Extract<keyof SomewhereDbRelations<T>, string>;
+// A column list narrows the rows to those columns; each included relation adds
+// its related rows under its name.
+type SomewhereDbReadRow<T extends string, C, I> = T extends keyof SomewhereDeclaredTables
+  ? Pick<SomewhereDbRow<T>, Extract<C extends readonly (infer K)[] ? K : never, keyof SomewhereDbRow<T>>>
+    & Pick<SomewhereDbRelations<T>, Extract<I extends readonly (infer K)[] ? K : never, keyof SomewhereDbRelations<T>>>
+  : Record<string, unknown>;
+type SomewhereDbReadOptionsFor<T extends string, C, I> = Omit<SomewhereDbReadOptions, 'columns' | 'include'> & {
+  columns?: C | null;
+  include?: I | null;
+};
+type SomewhereDbIncrementFor<T extends string> = T extends keyof SomewhereDeclaredTables
+  ? { readonly [K in __SomewhereDeclared<T, 'numeric', never>]?: number }
+  : SomewhereDbIncrement;
+// A caller write never names row identity; server authority may ('serverSet').
+type SomewhereDbUpdateFor<T extends string, Set extends 'set' | 'serverSet'> = {
+  where?: SomewhereDbWhere | null;
+} & (
+  | { set: __SomewhereDeclared<T, Set, SomewhereDbValues>; increment?: SomewhereDbIncrementFor<T> | null }
+  | { set?: never; increment: SomewhereDbIncrementFor<T> }
+);
+interface SomewhereDbResult<Row = Record<string, unknown>> {
   // Composed results return db/schema.ts's declared types, as the browser data
   // client does: boolean columns as true/false, json columns as their value,
   // blob columns as byte arrays. Raw query/batch rows are exactly as stored.
-  data: Record<string, unknown>[];
+  data: Row[];
   error: null;
   count: number;
   changes: number;
@@ -463,20 +439,26 @@ interface SomewhereRawBatchResult {
 interface SomewhereServerDb {
   query(sql: string, params?: readonly unknown[]): Promise<SomewhereDbResult>;
   batch(statements: readonly SomewhereRawDbStatement[]): Promise<SomewhereRawBatchResult[]>;
-  from(table: string, options?: SomewhereDbReadOptions | null): Promise<SomewhereDbResult>;
-  count(table: string, options?: SomewhereDbCountOptions | null): Promise<{ data: number; error: null }>;
-  insert(table: string, values: SomewhereDbValues, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult>;
-  update(table: string, spec: SomewhereDbUpdate): Promise<SomewhereDbResult>;
-  remove(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
+  from<T extends SomewhereDbTable, const C extends readonly SomewhereDbColumn<T>[] = readonly SomewhereDbColumn<T>[], const I extends readonly SomewhereDbRelationName<T>[] = []>(
+    table: T, options?: SomewhereDbReadOptionsFor<T, C, I> | null): Promise<SomewhereDbResult<SomewhereDbReadRow<T, C, I>>>;
+  count(table: SomewhereDbTable, options?: SomewhereDbCountOptions | null): Promise<{ data: number; error: null }>;
+  // Server authority names row identity (owner column or shared authorship) explicitly on insert.
+  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'serverInsert', SomewhereDbValues>, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  update<T extends SomewhereDbTable>(table: T, spec: SomewhereDbUpdateFor<T, 'serverSet'>): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  remove<T extends SomewhereDbTable>(table: T, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   // Closed atomic batch, 1-100 intents checked before execution. No callback,
   // reads, SQL, or caller-supplied authority. A lost acknowledgement can have
   // an unknown outcome; a rejection never promises rollback or safe replay.
   tx(intents: readonly SomewhereDbWriteIntent[]): Promise<SomewhereDbResult[]>;
 }
-interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count'> {
-  from(table: string, options?: (SomewhereDbReadOptions & { asServer?: true }) | null): Promise<SomewhereDbResult>;
-  count(table: string, options?: (SomewhereDbCountOptions & { asServer?: true }) | null): Promise<{ data: number; error: null }>;
-  delete(table: string, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult>;
+interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count' | 'insert' | 'update'> {
+  // The platform composes row identity from the verified user.
+  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'insert', SomewhereDbValues>, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  update<T extends SomewhereDbTable>(table: T, spec: SomewhereDbUpdateFor<T, 'set'>): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  from<T extends SomewhereDbTable, const C extends readonly SomewhereDbColumn<T>[] = readonly SomewhereDbColumn<T>[], const I extends readonly SomewhereDbRelationName<T>[] = []>(
+    table: T, options?: (SomewhereDbReadOptionsFor<T, C, I> & { asServer?: true }) | null): Promise<SomewhereDbResult<SomewhereDbReadRow<T, C, I>>>;
+  count(table: SomewhereDbTable, options?: (SomewhereDbCountOptions & { asServer?: true }) | null): Promise<{ data: number; error: null }>;
+  delete<T extends SomewhereDbTable>(table: T, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   readonly server: SomewhereServerDb;
 }
 interface SomewhereAuthUser {
@@ -546,9 +528,22 @@ type SomewhereDbAggregateOptions = SomewhereDbAggregateMeasures & {
   order?: SomewhereDbOrder | null;
   limit?: number | null;
 };
-interface SomewhereDbAggregateResult {
+// A declared table names only its own columns: sum/avg its numeric ones,
+// min/max/groupBy any but json/blob, and its rows hold scalars, as the browser
+// data client's aggregate does.
+type SomewhereDbAggregateOptionsFor<T extends string> = SomewhereDbAggregateOptions & {
+  sum?: __SomewhereDeclared<T, 'numeric', string> | null;
+  avg?: __SomewhereDeclared<T, 'numeric', string> | null;
+  min?: __SomewhereDeclared<T, 'scalar', string> | null;
+  max?: __SomewhereDeclared<T, 'scalar', string> | null;
+  groupBy?: readonly __SomewhereDeclared<T, 'scalar', string>[] | null;
+};
+type SomewhereDbAggregateRow<T extends string> = T extends keyof SomewhereDeclaredTables
+  ? Record<string, number | string | boolean | null>
+  : Record<string, unknown>;
+interface SomewhereDbAggregateResult<Row = Record<string, unknown>> {
   // Always an array of group rows (exactly one when ungrouped): grouped columns plus composed result keys.
-  data: Record<string, unknown>[];
+  data: Row[];
   error: null;
   // Number of rows (groups) returned; the COUNT(*) value lives in each row under "count".
   count: number;
@@ -558,7 +553,7 @@ interface SomewhereDbRawCallerOptions { unscoped?: true | null; asServer?: true 
 type SomewhereDbLiveState =
   | { name: string; state: 'ready'; release_id?: string; fingerprint: string; subscribe_url: string; expires_at: number }
   | { name: string; state: 'resync_required'; reason: string };
-type SomewhereDbLiveResult = SomewhereDbResult & { live: SomewhereDbLiveState };
+type SomewhereDbLiveResult<Row = Record<string, unknown>> = SomewhereDbResult<Row> & { live: SomewhereDbLiveState };
 type SomewhereDbScopeDeclaration =
   | { intent?: 'scoped' | null; owner_column: string; sensitive_columns?: readonly string[] | null }
   | { intent: 'shared' | 'server_only'; owner_column?: string | null; sensitive_columns?: readonly string[] | null };
@@ -594,14 +589,14 @@ interface SomewhereDbScopeApi {
   list(): Promise<SomewhereDbScopeEntry[]>;
 }
 interface SomewhereServerDb {
-  aggregate(table: string, options: SomewhereDbAggregateOptions): Promise<SomewhereDbAggregateResult>;
+  aggregate<T extends SomewhereDbTable>(table: T, options: SomewhereDbAggregateOptionsFor<T>): Promise<SomewhereDbAggregateResult<SomewhereDbAggregateRow<T>>>;
 }
 interface SomewhereCallerDb {
   query(sql: string, params?: readonly unknown[] | null, options?: SomewhereDbRawCallerOptions | null): Promise<SomewhereDbResult>;
   batch(statements: readonly SomewhereRawDbStatement[], options?: SomewhereDbRawCallerOptions | null): Promise<SomewhereRawBatchResult[]>;
-  aggregate(table: string, options: SomewhereDbAggregateOptions & { asServer?: true }): Promise<SomewhereDbAggregateResult>;
+  aggregate<T extends SomewhereDbTable>(table: T, options: SomewhereDbAggregateOptionsFor<T> & { asServer?: true }): Promise<SomewhereDbAggregateResult<SomewhereDbAggregateRow<T>>>;
   // read must be the exact sw.db.from(...) result (or its promise) this release declares under name.
-  live(name: string, read: SomewhereDbResult | PromiseLike<SomewhereDbResult>): Promise<SomewhereDbLiveResult>;
+  live<Row>(name: string, read: SomewhereDbResult<Row> | PromiseLike<SomewhereDbResult<Row>>): Promise<SomewhereDbLiveResult<Row>>;
   tables(): Promise<string[]>;
   readonly scope: SomewhereDbScopeApi;
 }
@@ -2751,15 +2746,106 @@ type ServerFunction<Contract extends { input: unknown; output: unknown }> =
   (req: __SomewhereTypedRequest<Contract["input"]>, sw: SomewhereRuntimeContext) =>
     Contract["output"] | Promise<Contract["output"]>;
 `;
-    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2 };
+    var DECLARED_COLUMN_TYPES = { integer: "number | string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "__SomewhereJson", blob: "number[]" };
+    function declaredOwnerColumn2(name, table, scopes) {
+      if (Object.prototype.hasOwnProperty.call(scopes, name)) return scopes[name];
+      const find = (policy) => !policy ? null : policy.k === "o" ? policy.c : policy.k === "a" ? find(policy.p[0]) || find(policy.p[1]) : null;
+      return find(table.policy);
+    }
+    function declaredTablesDeclaration2(authority) {
+      const schema = authority && authority.schema || {};
+      const scopes = authority && authority.scopes || {};
+      const names = Object.keys(schema).sort();
+      if (!names.length) return "";
+      const key = JSON.stringify;
+      const shape = (fields) => fields.length ? "{ " + fields.join("; ") + " }" : "Record<string, never>";
+      const union = (columns) => columns.length ? columns.map((column) => key(column.n)).join(" | ") : "never";
+      const field = (column, optional) => key(column.n) + (optional ? "?" : "") + ": " + column.type;
+      const entries = names.map((name) => {
+        const table = schema[name];
+        const columns = table.columns.map((column) => ({
+          n: column.n,
+          t: column.t,
+          optional: column.d === 1 || column.nul === 1,
+          identity: column.n === table.author,
+          type: DECLARED_COLUMN_TYPES[column.t] + (column.nul === 1 ? " | null" : "")
+        }));
+        const owner = declaredOwnerColumn2(name, table, scopes);
+        if (owner && !columns.some((column) => column.n === owner)) columns.push({ n: owner, t: "text", optional: false, identity: true, type: "string" });
+        const declared = columns.filter((column) => !column.identity);
+        const relations = (table.relations || []).filter((relation) => Object.prototype.hasOwnProperty.call(schema, relation.table)).map((relation) => key(relation.name) + ": SomewhereDeclaredTables[" + key(relation.table) + "]['row']" + (relation.kind === "belongsTo" ? " | null" : "[]"));
+        return "  " + key(name) + ": {\n    row: " + shape(columns.map((column) => field(column, false))) + ";\n    insert: " + shape(declared.map((column) => field(column, column.optional))) + ";\n    serverInsert: " + shape(columns.map((column) => field(column, column.optional && !column.identity))) + ";\n    set: " + shape(declared.map((column) => field(column, true))) + ";\n    serverSet: " + shape(columns.map((column) => field(column, true))) + ";\n    numeric: " + union(declared.filter((column) => column.t === "integer" || column.t === "number")) + ";\n    scalar: " + union(declared.filter((column) => column.t !== "json" && column.t !== "blob")) + ";\n    relations: " + (relations.length ? shape(relations) : "{}") + ";\n  };\n";
+      });
+      return "interface SomewhereDeclaredTables {\n" + entries.join("") + "}\n";
+    }
+    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2, declaredTablesDeclaration: declaredTablesDeclaration2 };
+  }
+});
+
+// worker/containers/compile/schema-types.cjs
+var require_schema_types = __commonJS({
+  "worker/containers/compile/schema-types.cjs"(exports2, module2) {
+    "use strict";
+    var types = `declare namespace SomewhereSchemaDeclaration {
+  interface Column { readonly __somewhereColumn: unique symbol }
+  interface Table { readonly __somewhereTable: unique symbol }
+  interface TableMarker { readonly __somewhereTableMarker: unique symbol }
+  interface ColumnMarker { readonly __somewhereColumnMarker: unique symbol }
+  interface Relation { readonly __somewhereRelation: unique symbol }
+  interface Scope { readonly __somewhereScope: unique symbol }
+  interface OwnerScope extends Scope { readonly __somewhereOwner: unique symbol }
+  interface MemberScope extends Scope { readonly __somewhereMember: unique symbol }
+  interface ColumnOptions<Default> {
+    nullable?: boolean; default?: Default | null; unique?: boolean;
+    references?: string; onDelete?: 'cascade' | 'restrict'; renamedFrom?: string;
+  }
+  interface ClientPermissions<Field extends string> {
+    identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
+    create?: Field[] | false | null; update?: Field[] | false | null; delete?: boolean;
+  }
+  interface TableOptions<Field extends string> {
+    scope?: Scope; client?: ClientPermissions<Field>; indexes?: string[][];
+    unique?: string[][]; relations?: Record<string, Relation>;
+  }
+}
+`;
+    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search: SomewhereSchemaDeclaration.OwnerScope }): unknown;
+function table<Columns extends Record<string, SomewhereSchemaDeclaration.Column | SomewhereSchemaDeclaration.ColumnMarker>>(columns: Columns, options?: SomewhereSchemaDeclaration.TableOptions<Extract<keyof Columns, string>>): SomewhereSchemaDeclaration.Table;
+function id(options?: { uuid?: boolean }): SomewhereSchemaDeclaration.Column;
+function text(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
+function number(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
+function integer(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
+function boolean(options?: SomewhereSchemaDeclaration.ColumnOptions<boolean>): SomewhereSchemaDeclaration.Column;
+function timestamp(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
+function json(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
+function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): SomewhereSchemaDeclaration.Column;
+function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
+function shared(): SomewhereSchemaDeclaration.Scope;
+function serverOnly(): SomewhereSchemaDeclaration.Scope;
+function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete'> }): SomewhereSchemaDeclaration.MemberScope;
+function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
+function belongsTo(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
+function removed(): SomewhereSchemaDeclaration.ColumnMarker;
+function removedTable(): SomewhereSchemaDeclaration.TableMarker;
+function exported(): SomewhereSchemaDeclaration.TableMarker;
+`;
+    var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, member: SomewhereSchemaDeclaration.MemberScope): SomewhereSchemaDeclaration.Scope;
+function anyOf(member: SomewhereSchemaDeclaration.MemberScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
+function parent(options: { via: string }): SomewhereSchemaDeclaration.Scope;
+`;
+    var SCHEMA_DECLARATION2 = types + signatures.replace(/^function /gm, "declare function ") + `declare module 'somewhere/db' {
+${(signatures + policySignatures).replace(/^function /gm, "  export function ")}}
+`;
+    module2.exports = { SCHEMA_DECLARATION: SCHEMA_DECLARATION2 };
   }
 });
 
 // declared-data-vendor-entry.js
 var declared_data_vendor_entry_exports = {};
 __export(declared_data_vendor_entry_exports, {
-  RUNTIME_CONTEXT_DECLARATION: () => import_runtime_types.RUNTIME_CONTEXT_DECLARATION,
+  RUNTIME_CONTEXT_DECLARATION: () => import_runtime_types2.RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION: () => import_schema_types.SCHEMA_DECLARATION,
+  declaredTablesFromFiles: () => declaredTablesFromFiles,
   generateFromFiles: () => generateFromFiles
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
@@ -3109,6 +3195,273 @@ function validateDeclaredRelations(tables, tableByName, knownColumns, markedGone
   }
 }
 
+// worker/src/utils/db-schema-deploy/extract-schema-files.ts
+var FILE_OPERATIONS = ["read", "upload", "replace", "delete"];
+var MAX_FILE_COLLECTIONS = 20;
+var COLLECTION_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var COLUMN_NAME = /^[a-zA-Z_][a-zA-Z0-9_]{0,63}$/;
+var MIME_PATTERN = /^[a-z0-9][a-z0-9!#$&^_.+-]{0,126}\/(\*|[a-z0-9][a-z0-9!#$&^_.+-]{0,126})$/i;
+var FILES_OPTIONS = ["path", "scope", "public", "client", "limits"];
+var LIMIT_KEYS = ["maxSize", "types"];
+var RESERVED_ROOT = /^\/(__sw|\.)/;
+var SIZE_UNITS = { b: 1, kb: 1024, mb: 1024 ** 2, gb: 1024 ** 3 };
+function fileCollectionRootError(name, path) {
+  const bad = (why) => `File collection "${name}" has an invalid path: ${why}`;
+  if (typeof path !== "string") return bad("path must be a quoted absolute folder such as '/uploads'.");
+  if (!path.startsWith("/")) return bad(`"${path}" must start with "/".`);
+  if (path === "/") return bad('a collection cannot cover the whole project ("/").');
+  if (path.endsWith("/")) return bad(`"${path}" must not end with "/".`);
+  if (/[*{}]/.test(path)) return bad(`"${path}" is a literal folder; wildcards and {placeholders} are not allowed.`);
+  const segments = path.slice(1).split("/");
+  if (segments.some((s) => s === "" || s === "." || s === "..")) return bad(`"${path}" must not contain empty, "." or ".." segments.`);
+  if (segments.some((s) => s.length > 255 || /[\x00-\x1f\\]/.test(s))) return bad(`"${path}" contains an invalid folder name.`);
+  if (RESERVED_ROOT.test(path)) return bad(`"${path}" is under a folder the platform reserves (names starting with "__sw" or ".").`);
+  return null;
+}
+function parseFileSize(value) {
+  if (typeof value === "number") return Number.isSafeInteger(value) && value > 0 ? value : null;
+  if (typeof value !== "string") return null;
+  const m = /^\s*(\d+(?:\.\d+)?)\s*(b|kb|mb|gb)\s*$/i.exec(value);
+  if (!m) return null;
+  const bytes = Math.floor(Number(m[1]) * SIZE_UNITS[m[2].toLowerCase()]);
+  return Number.isSafeInteger(bytes) && bytes > 0 ? bytes : null;
+}
+function readStringList(r, fail, ctx) {
+  r.expectPunct("[", ctx);
+  const out = [];
+  while (!r.tryPunct("]")) {
+    const t = r.next();
+    if (t.kind !== "string") fail(t.line, `${ctx} must be a list of quoted strings.`);
+    out.push(t.value);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("]", `closing ${ctx}`);
+      break;
+    }
+  }
+  return out;
+}
+function readFileMember(r, fail, name, line) {
+  r.expectPunct("(", 'after "member"');
+  r.expectPunct("{", `in member() for file collection "${name}" \u2014 member() needs { group, membership, member_user, member_group }`);
+  const seen = /* @__PURE__ */ new Map();
+  let operations;
+  while (!r.tryPunct("}")) {
+    const key = r.readKey(`for a member() option of file collection "${name}"`);
+    r.expectPunct(":", `after "${key.name}" in member() for file collection "${name}"`);
+    if (key.name === "operations") {
+      const verbs = readStringList(r, fail, `member({ operations }) on file collection "${name}"`);
+      const bad = verbs.filter((v) => !FILE_OPERATIONS.includes(v));
+      if (bad.length > 0) {
+        fail(key.line, `member({ operations }) on file collection "${name}" names "${bad[0]}". File collections use the file verbs 'read', 'upload', 'replace' and 'delete'.`);
+      }
+      const set = new Set(verbs);
+      if (!set.has("read") && (set.has("replace") || set.has("delete"))) {
+        fail(key.line, `member({ operations }) on file collection "${name}" must include 'read' when it includes 'replace' or 'delete'.`);
+      }
+      operations = FILE_OPERATIONS.filter((op) => set.has(op));
+    } else if (["group", "membership", "member_user", "member_group"].includes(key.name)) {
+      const t = r.next();
+      if (t.kind !== "string") {
+        fail(t.line, `member({ ${key.name} }) on file collection "${name}" must be one quoted name. A file collection's group is a single key.`);
+      }
+      if (!COLUMN_NAME.test(t.value)) fail(t.line, `member({ ${key.name} }) on file collection "${name}" names an invalid column "${t.value}".`);
+      if (seen.has(key.name)) fail(key.line, `member() on file collection "${name}" declares ${key.name} twice.`);
+      seen.set(key.name, t.value.toLowerCase());
+    } else {
+      fail(key.line, `member() on file collection "${name}" has an unknown option "${key.name}". Allowed: group, membership, member_user, member_group, operations.`);
+    }
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", `closing member() for file collection "${name}"`);
+      break;
+    }
+  }
+  r.tryPunct(",");
+  r.expectPunct(")", "closing member()");
+  const missing = ["group", "membership", "member_user", "member_group"].filter((k) => !seen.has(k));
+  if (missing.length > 0) {
+    fail(line, `member() on file collection "${name}" is missing ${missing.join(", ")}. It needs member({ group, membership, member_user, member_group }).`);
+  }
+  return {
+    group: seen.get("group"),
+    membership: seen.get("membership"),
+    memberUser: seen.get("member_user"),
+    memberGroup: seen.get("member_group"),
+    ...operations && operations.length < FILE_OPERATIONS.length ? { operations } : {}
+  };
+}
+function readFileOwner(r, fail, name) {
+  r.expectPunct("(", 'after "owner"');
+  if (r.tryPunct(")")) return;
+  r.expectPunct("{", `in owner() for file collection "${name}"`);
+  const key = r.readKey(`in owner() for file collection "${name}"`);
+  if (key.name === "visitors") {
+    fail(key.line, `owner({ visitors: true }) is not available for file collections yet: an upload needs a signed-in account. Use owner().`);
+  }
+  fail(key.line, `owner() on file collection "${name}" takes no options \u2014 the owner is always the signed-in uploader.`);
+}
+function readFileScope(r, fail, name) {
+  const tok = r.expectIdent(`for the scope of file collection "${name}"`);
+  if (tok.value === "parent") {
+    fail(tok.line, `parent() is not available for file collections yet. Use owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
+  }
+  if (tok.value === "owner") {
+    readFileOwner(r, fail, name);
+    return { kind: "owner" };
+  }
+  if (tok.value === "member") return { kind: "member", member: readFileMember(r, fail, name, tok.line) };
+  if (tok.value === "shared" || tok.value === "serverOnly") {
+    r.expectPunct("(", `after "${tok.value}"`);
+    if (!r.tryPunct(")")) fail(tok.line, `${tok.value}() on file collection "${name}" takes no options.`);
+    return tok.value === "shared" ? { kind: "shared" } : { kind: "server_only" };
+  }
+  if (tok.value === "anyOf") {
+    r.expectPunct("(", 'after "anyOf"');
+    let member = null;
+    let owners = 0;
+    for (let i = 0; i < 2; i++) {
+      const inner = r.expectIdent(`inside anyOf() for file collection "${name}"`);
+      if (inner.value === "owner") {
+        readFileOwner(r, fail, name);
+        owners++;
+      } else if (inner.value === "member" && !member) member = readFileMember(r, fail, name, inner.line);
+      else fail(inner.line, `anyOf() on file collection "${name}" requires exactly one owner() and one member().`);
+      if (i === 0) r.expectPunct(",", `between the two policies in anyOf() on file collection "${name}"`);
+    }
+    r.tryPunct(",");
+    r.expectPunct(")", "closing anyOf()");
+    if (owners !== 1 || !member) fail(tok.line, `anyOf() on file collection "${name}" requires exactly one owner() and one member().`);
+    return { kind: "owner_or_member", member };
+  }
+  return fail(tok.line, `unknown scope "${tok.value}" on file collection "${name}". Use owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
+}
+function readCollection(r, fail, name, errors) {
+  const callee = r.expectIdent(`for file collection "${name}"`);
+  if (callee.value !== "files") fail(callee.line, `file collection "${name}" must be declared with files({ \u2026 }).`);
+  r.expectPunct("(", 'after "files"');
+  r.expectPunct("{", `opening files() options for "${name}"`);
+  const seen = /* @__PURE__ */ new Set();
+  let path;
+  let scope = null;
+  let isPublic = false;
+  const client = { read: false, upload: false, replace: false, delete: false };
+  const limits = { maxSize: null, types: [] };
+  while (!r.tryPunct("}")) {
+    const key = r.readKey(`for a files() option of "${name}"`);
+    if (!FILES_OPTIONS.includes(key.name)) {
+      fail(key.line, `files() for "${name}" has an unknown option "${key.name}". Allowed: ${FILES_OPTIONS.join(", ")}.`);
+    }
+    if (seen.has(key.name)) fail(key.line, `files() for "${name}" declares ${key.name} twice.`);
+    seen.add(key.name);
+    r.expectPunct(":", `after "${key.name}" in files() for "${name}"`);
+    if (key.name === "path") path = r.readLiteral(`for files({ path }) of "${name}"`);
+    else if (key.name === "scope") scope = readFileScope(r, fail, name);
+    else if (key.name === "public") {
+      const value = r.readLiteral(`for files({ public }) of "${name}"`);
+      if (typeof value !== "boolean") fail(key.line, `files({ public }) for "${name}" must be true or false.`);
+      isPublic = value;
+    } else if (key.name === "client") {
+      r.expectPunct("{", `opening client for file collection "${name}"`);
+      while (!r.tryPunct("}")) {
+        const op = r.readKey(`for a client operation of file collection "${name}"`);
+        if (!FILE_OPERATIONS.includes(op.name)) {
+          fail(op.line, `client for file collection "${name}" has an unknown operation "${op.name}". Allowed: ${FILE_OPERATIONS.join(", ")}.`);
+        }
+        r.expectPunct(":", `after client.${op.name}`);
+        const value = r.readLiteral(`for client.${op.name} of "${name}"`);
+        if (typeof value !== "boolean") fail(op.line, `client.${op.name} for file collection "${name}" must be true or false.`);
+        client[op.name] = value;
+        if (!r.tryPunct(",")) {
+          r.expectPunct("}", `closing client for "${name}"`);
+          break;
+        }
+      }
+    } else {
+      r.expectPunct("{", `opening limits for file collection "${name}"`);
+      while (!r.tryPunct("}")) {
+        const limit = r.readKey(`for a limit of file collection "${name}"`);
+        if (!LIMIT_KEYS.includes(limit.name)) {
+          fail(limit.line, `limits for file collection "${name}" has an unknown key "${limit.name}". Allowed: ${LIMIT_KEYS.join(", ")}.`);
+        }
+        r.expectPunct(":", `after limits.${limit.name}`);
+        if (limit.name === "maxSize") {
+          const raw = r.readLiteral(`for limits.maxSize of "${name}"`);
+          limits.maxSize = parseFileSize(raw);
+          if (limits.maxSize === null) errors.push(`File collection "${name}" has an invalid limits.maxSize: use a whole number of bytes or a size such as '25MB'.`);
+        } else {
+          limits.types = readStringList(r, fail, `limits.types of file collection "${name}"`).map((t) => t.toLowerCase());
+          for (const type of limits.types) {
+            if (!MIME_PATTERN.test(type)) errors.push(`File collection "${name}" has an invalid limits.types entry "${type}": use a content type such as 'image/png' or 'image/*'.`);
+          }
+        }
+        if (!r.tryPunct(",")) {
+          r.expectPunct("}", `closing limits for "${name}"`);
+          break;
+        }
+      }
+    }
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", `closing files() for "${name}"`);
+      break;
+    }
+  }
+  r.tryPunct(",");
+  r.expectPunct(")", "closing files()");
+  if (!scope) return fail(callee.line, `files() for "${name}" needs a scope: owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
+  const rootError = fileCollectionRootError(name, path);
+  if (rootError) errors.push(rootError);
+  const declaresClient = FILE_OPERATIONS.some((op) => client[op]);
+  if (scope.kind === "server_only" && declaresClient) {
+    errors.push(`File collection "${name}" is serverOnly() and cannot declare client operations. Remove client, or choose a scope the browser may use.`);
+  }
+  if (isPublic && client.read) {
+    errors.push(`File collection "${name}" is public: true and also declares client.read. Public already lets anyone read; remove client.read.`);
+  }
+  if (isPublic && (scope.kind === "member" || scope.kind === "owner_or_member")) {
+    errors.push(`File collection "${name}" is public: true on a member() scope, which would let anyone read team files. Remove public, or use owner() or serverOnly().`);
+  }
+  return { name, path: typeof path === "string" ? path : "", scope, public: isPublic, client, limits };
+}
+function readFileCollections(r, fail, errors) {
+  r.expectPunct("{", "opening schema option files");
+  const out = [];
+  while (!r.tryPunct("}")) {
+    const key = r.readKey("for a file collection name");
+    if (!COLLECTION_NAME.test(key.name)) {
+      errors.push(`File collection name "${key.name}" is invalid. Use lowercase letters, digits and underscores, starting with a letter.`);
+    }
+    if (out.some((c) => c.name === key.name)) fail(key.line, `file collection "${key.name}" is declared twice.`);
+    r.expectPunct(":", `after file collection "${key.name}"`);
+    out.push(readCollection(r, fail, key.name, errors));
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", "closing schema option files");
+      break;
+    }
+  }
+  if (out.length > MAX_FILE_COLLECTIONS) errors.push(`db/schema.ts declares ${out.length} file collections (max ${MAX_FILE_COLLECTIONS}).`);
+  return out.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+function validateFileCollections(collections, table, errors) {
+  for (const a of collections) {
+    for (const b of collections) {
+      if (a === b || !a.path || !b.path) continue;
+      if (a.path === b.path && a.name < b.name) errors.push(`File collections "${a.name}" and "${b.name}" both use the path "${a.path}". Each collection needs its own folder.`);
+      else if (b.path.startsWith(a.path + "/")) errors.push(`File collection "${b.name}" (${b.path}) is nested inside "${a.name}" (${a.path}). Collection folders cannot overlap.`);
+    }
+    if (a.scope.kind !== "member" && a.scope.kind !== "owner_or_member") continue;
+    const m = a.scope.member;
+    const membership = table(m.membership);
+    if (!membership) {
+      errors.push(`File collection "${a.name}" is member-scoped through the membership table "${m.membership}", which is not declared in db/schema.ts. The membership table must be a managed table in the same schema.`);
+      continue;
+    }
+    if (membership.clientWrites) {
+      errors.push(`Table "${m.membership}" grants membership access to file collection "${a.name}" and cannot allow client writes. Change membership through a server function.`);
+    }
+    if (!membership.columns.has(m.memberUser)) errors.push(`The membership table "${m.membership}" (for file collection "${a.name}") has no "${m.memberUser}" column named in member({ member_user }).`);
+    if (!membership.columns.has(m.memberGroup)) errors.push(`The membership table "${m.membership}" (for file collection "${a.name}") has no "${m.memberGroup}" column named in member({ member_group }).`);
+  }
+}
+
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
 function policyOwner(policy) {
   if (policy.kind === "owner") return policy;
@@ -3394,7 +3747,7 @@ function readColumn(r, tableName, rawName, line) {
   }
   if (TABLE_MARKER_HELPERS.has(helper)) {
     throw new SchemaTsError(
-      `line ${helperTok.line}: "${tableName}"."${rawName}" uses ${helper}(), which marks a whole table. To remove this column, mark it ${rawName}: removed().`
+      `line ${helperTok.line}: "${tableName}"."${rawName}" uses ${helper}(), which marks a whole table, not a column. Removing columns from the live database is not supported yet, so keep "${rawName}" declared with its column type.`
     );
   }
   if (!COLUMN_HELPERS.has(helper)) {
@@ -4039,22 +4392,34 @@ function extractSchemaTs(source) {
       }
     }
     let managedSearch;
+    let fileCollections;
+    const fileErrors = [];
     if (reader.tryPunct(",") && !(reader.peek().kind === "punct" && reader.peek().value === ")")) {
       reader.expectPunct("{", "opening schema options");
-      const option = reader.readKey("for a schema option");
-      if (option.name !== "search") {
-        throw new SchemaTsError(`line ${option.line}: unknown schema option "${option.name}". The only schema-level option is search: owner().`);
+      while (!reader.tryPunct("}")) {
+        const option = reader.readKey("for a schema option");
+        if (option.name === "files" && !fileCollections) {
+          reader.expectPunct(":", 'after schema option "files"');
+          fileCollections = readFileCollections(reader, (line, message) => {
+            throw new SchemaTsError(`line ${line}: ${message}`);
+          }, fileErrors);
+        } else if (option.name === "search" && !managedSearch) {
+          reader.expectPunct(":", 'after schema option "search"');
+          const helper = reader.expectIdent('for schema option "search"');
+          if (helper.value !== "owner") {
+            throw new SchemaTsError(`line ${helper.line}: search ownership must be declared with owner().`);
+          }
+          reader.expectPunct("(", "after search: owner");
+          reader.expectPunct(")", "closing search: owner()");
+          managedSearch = { kind: "owner" };
+        } else {
+          throw new SchemaTsError(`line ${option.line}: unknown schema option "${option.name}". The schema-level options are search: owner() and files: { \u2026 }, each at most once.`);
+        }
+        if (!reader.tryPunct(",")) {
+          reader.expectPunct("}", "closing schema options");
+          break;
+        }
       }
-      reader.expectPunct(":", 'after schema option "search"');
-      const helper = reader.expectIdent('for schema option "search"');
-      if (helper.value !== "owner") {
-        throw new SchemaTsError(`line ${helper.line}: search ownership must be declared with owner().`);
-      }
-      reader.expectPunct("(", "after search: owner");
-      reader.expectPunct(")", "closing search: owner()");
-      managedSearch = { kind: "owner" };
-      reader.tryPunct(",");
-      reader.expectPunct("}", "closing schema options");
       reader.tryPunct(",");
     }
     reader.expectPunct(")", "closing schema(\u2026)");
@@ -4064,7 +4429,7 @@ function extractSchemaTs(source) {
         `db/schema.ts must end after "export default schema({ \u2026 })" \u2014 found ${describeToken(reader.peek())}. The file holds only the schema declaration.`
       );
     }
-    if (tables.length === 0 && removedTables.length === 0 && exportedTables.length === 0 && !managedSearch) {
+    if (tables.length === 0 && removedTables.length === 0 && exportedTables.length === 0 && !managedSearch && !fileCollections?.length) {
       return { ok: false, errors: ["db/schema.ts declares no tables. Declare at least one table, or remove the file to leave the database unmanaged."] };
     }
     if (tables.length > MAX_TABLES) {
@@ -4166,6 +4531,13 @@ function extractSchemaTs(source) {
       }
     }
     validateDeclaredRelations(tables, tableByName, knownColumns, (table) => removedTables.includes(table) ? "removedTable()" : exportedTables.includes(table) ? "exported()" : null, errors);
+    if (fileCollections) {
+      errors.push(...fileErrors);
+      validateFileCollections(fileCollections, (name) => {
+        const t = tableByName.get(name);
+        return t ? { columns: knownColumns(t), clientWrites: Boolean(t.client && (t.client.create !== null || t.client.update !== null || t.client.delete)) } : null;
+      }, errors);
+    }
     if (errors.length > 0) return { ok: false, errors };
     return {
       ok: true,
@@ -4173,7 +4545,8 @@ function extractSchemaTs(source) {
         tables,
         removedTables: removedTables.sort(),
         exportedTables: exportedTables.sort(),
-        ...managedSearch ? { search: managedSearch } : {}
+        ...managedSearch ? { search: managedSearch } : {},
+        ...fileCollections ? { files: fileCollections } : {}
       }
     };
   } catch (err) {
@@ -4251,15 +4624,20 @@ function schemaAuthorityFromSource(files) {
 
 // declared-data-vendor-entry.js
 var import_typed_data = __toESM(require_typed_data());
-var import_schema_types = __toESM(require_schema_types());
 var import_runtime_types = __toESM(require_runtime_types());
+var import_schema_types = __toESM(require_schema_types());
+var import_runtime_types2 = __toESM(require_runtime_types());
 function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? (0, import_typed_data.generateDataClient)(authority) : void 0;
+}
+function declaredTablesFromFiles(files) {
+  return (0, import_runtime_types.declaredTablesDeclaration)(schemaAuthorityFromSource(files));
 }
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
   RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION,
+  declaredTablesFromFiles,
   generateFromFiles
 });
