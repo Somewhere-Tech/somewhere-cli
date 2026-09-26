@@ -1,6 +1,6 @@
 import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { extname, join, relative } from 'node:path';
-import { DATA_DECLARATION_FILE, GENERATED_DATA_HEADER } from './declared-data.js';
+import { DATA_DECLARATION_FILE, FILES_DECLARATION_FILE, GENERATED_DATA_HEADER } from './declared-data.js';
 import {
   excludedRootFileReason,
   isAppSurfaceRootFile,
@@ -150,7 +150,8 @@ function walk(
     if (!entry.isFile()) continue;
     // Editor declarations are regenerated from source by the deploy compiler.
     // Uploading a local copy would introduce duplicate or stale client types.
-    if (entry.name === DATA_DECLARATION_FILE && readFileSync(fullPath, 'utf8').startsWith(GENERATED_DATA_HEADER)) continue;
+    if ((entry.name === DATA_DECLARATION_FILE || entry.name === FILES_DECLARATION_FILE)
+      && readFileSync(fullPath, 'utf8').startsWith(GENERATED_DATA_HEADER)) continue;
     const size = statSync(fullPath).size;
     if (size > MAX_FILE_SIZE) {
       out.skipped.push({

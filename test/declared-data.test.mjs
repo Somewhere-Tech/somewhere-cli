@@ -81,7 +81,7 @@ test('vendored parser/generator artifact is pinned and its bytes match provenanc
   const manifest = JSON.parse(readFileSync(new URL('../runtime/DECLARED-DATA-VENDOR.json', import.meta.url), 'utf8'));
   const artifact = readFileSync(new URL('../runtime/declared-data.cjs', import.meta.url));
   assert.equal(manifest.sha256, createHash('sha256').update(artifact).digest('hex'));
-  for (const part of ['client-contract-source.ts', 'extract-schema-ts.ts', 'typed-data.cjs', 'schema-types.cjs', 'runtime-types.cjs']) {
+  for (const part of ['client-contract-source.ts', 'extract-schema-ts.ts', 'extract-schema-files.ts', 'typed-data.cjs', 'typed-files.cjs', 'schema-types.cjs', 'runtime-types.cjs']) {
     assert.ok(Object.keys(manifest.source_files).some(file => file.endsWith('/' + part)));
   }
   assert.equal(manifest.esbuild, '0.24.0');

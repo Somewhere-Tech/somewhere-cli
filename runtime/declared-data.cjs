@@ -309,7 +309,7 @@ var require_typed_data = __commonJS({
     var crypto2 = require("node:crypto");
     var { canonicalize: canonicalize2, describeDataClient: describeDataClient2 } = require_declared_data_contract();
     var MODULE_NAME = "somewhere:data";
-    var CLIENT_FILE = "__somewhere_data.d.ts";
+    var CLIENT_FILE2 = "__somewhere_data.d.ts";
     var MANIFEST_PATH = "_internal/declared-data.json";
     function generateDataClient2(authority) {
       const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes) : canonicalize2({}, {}, {});
@@ -327,7 +327,7 @@ var require_typed_data = __commonJS({
         }
       };
     }
-    module2.exports = { MODULE_NAME, CLIENT_FILE, MANIFEST_PATH, generateDataClient: generateDataClient2, virtualDataPlugin };
+    module2.exports = { MODULE_NAME, CLIENT_FILE: CLIENT_FILE2, MANIFEST_PATH, generateDataClient: generateDataClient2, virtualDataPlugin };
   }
 });
 
@@ -1447,8 +1447,9 @@ interface SomewhereFsView {
   signedUrl(path: string, options?: SomewhereFsSignedUrlOptions | null): Promise<SomewhereFsSignedUrlResult>;
   public_url(path: string, options?: SomewhereFsPublicUrlOptions | null): Promise<SomewhereFsPublicUrlResult>;
   publicUrl(path: string, options?: SomewhereFsPublicUrlOptions | null): Promise<SomewhereFsPublicUrlResult>;
-  // null resets ownership to the project.
-  setOwner(path: string, user: string | { readonly id: string } | null): Promise<SomewhereFsSetOwnerResult>;
+  // null resets ownership to the project. On sw.fs.server, { collection, group? }
+  // adopts an existing file under that collection's folder into the collection.
+  setOwner(path: string, user: string | { readonly id: string } | null, options?: { collection: string; group?: string | number } | null): Promise<SomewhereFsSetOwnerResult>;
   uploadFromRequest(req: Request, options: SomewhereFsUploadFromRequestOptions): Promise<SomewhereFsUploadFromRequestResult>;
 }
 interface SomewhereRuntimeFs extends SomewhereFsView { readonly server: SomewhereFsView }
@@ -2746,6 +2747,47 @@ type ServerFunction<Contract extends { input: unknown; output: unknown }> =
   (req: __SomewhereTypedRequest<Contract["input"]>, sw: SomewhereRuntimeContext) =>
     Contract["output"] | Promise<Contract["output"]>;
 `;
+    var ENDPOINT_DECLARATION2 = `
+interface SomewhereEndpointUser {
+  id: string;
+  email?: string | null;
+  display_name?: string | null;
+  role?: string;
+  [key: string]: unknown;
+}
+type __SomewhereEndpointLeaf = 'string' | 'email' | 'number' | 'boolean' | 'array' | 'object';
+interface SomewhereEndpointBodySchema {
+  readonly [field: string]: __SomewhereEndpointLeaf | \`\${__SomewhereEndpointLeaf}?\` | SomewhereEndpointBodySchema;
+}
+type __SomewhereEndpointValue<T> =
+  T extends 'string' | 'email' ? string : T extends 'number' ? number : T extends 'boolean' ? boolean
+    : T extends 'array' ? unknown[] : T extends 'object' ? Record<string, unknown> : never;
+type __SomewhereEndpointBody<S> = {
+  -readonly [K in keyof S as S[K] extends \`\${string}?\` ? never : K]:
+    S[K] extends string ? __SomewhereEndpointValue<S[K]> : __SomewhereEndpointBody<S[K]>;
+} & {
+  -readonly [K in keyof S as S[K] extends \`\${string}?\` ? K : never]?:
+    S[K] extends \`\${infer T}?\` ? __SomewhereEndpointValue<T> | null : never;
+};
+type SomewhereEndpointAuth = 'none' | 'optional' | 'required';
+interface SomewhereEndpointInput<Auth extends SomewhereEndpointAuth, Body> {
+  body: Body;
+  user: Auth extends 'required' ? SomewhereEndpointUser : SomewhereEndpointUser | null;
+  headers: Headers;
+  params: Record<string, string>;
+  request: Request;
+}
+interface SomewhereEndpointConfig<Auth extends SomewhereEndpointAuth, Schema extends SomewhereEndpointBodySchema | undefined> {
+  auth?: Auth;
+  body?: Schema;
+  rateLimit?: \`\${number}/\${'second' | 'minute' | 'hour' | 'day'}\${'' | 's'}\`;
+  cors?: 'same-origin' | '*' | readonly string[];
+  handler(
+    input: SomewhereEndpointInput<Auth, Schema extends SomewhereEndpointBodySchema ? __SomewhereEndpointBody<Schema> : null>,
+    sw: SomewhereRuntimeContext,
+  ): unknown;
+}
+`;
     var DECLARED_COLUMN_TYPES = { integer: "number | string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "__SomewhereJson", blob: "number[]" };
     function declaredOwnerColumn2(name, table, scopes) {
       if (Object.prototype.hasOwnProperty.call(scopes, name)) return scopes[name];
@@ -2778,7 +2820,163 @@ type ServerFunction<Contract extends { input: unknown; output: unknown }> =
       });
       return "interface SomewhereDeclaredTables {\n" + entries.join("") + "}\n";
     }
-    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2, declaredTablesDeclaration: declaredTablesDeclaration2 };
+    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2, ENDPOINT_DECLARATION: ENDPOINT_DECLARATION2, declaredTablesDeclaration: declaredTablesDeclaration2 };
+  }
+});
+
+// worker/containers/compile/typed-files.cjs
+var require_typed_files = __commonJS({
+  "worker/containers/compile/typed-files.cjs"(exports2, module2) {
+    "use strict";
+    var crypto2 = require("node:crypto");
+    var MODULE_NAME = "somewhere:files";
+    var CLIENT_FILE2 = "__somewhere_files.d.ts";
+    var SINGLE_REQUEST_MAX_BYTES = 90 * 1024 * 1024;
+    function parseDeclaration(canonical) {
+      const parsed = JSON.parse(canonical);
+      if (!parsed || parsed.v !== 1 || !Array.isArray(parsed.collections)) throw new Error("declared_files is not a file collection declaration");
+      return parsed.collections;
+    }
+    function memberOf(collection) {
+      const scope = collection.scope || {};
+      return scope.kind === "member" || scope.kind === "owner_or_member" ? scope.member : null;
+    }
+    function describeCollection(collection) {
+      const member = memberOf(collection);
+      const groupKey = member ? JSON.stringify(member.group) : null;
+      const meta = member ? `FileMeta & { ${groupKey}: string }` : "FileMeta";
+      const groupOption = member ? `${groupKey}: string | number; ` : "";
+      const ops = [];
+      if (collection.client.read) {
+        ops.push(`list(options?: { ${groupOption.replace(": string | number; ", "?: string | number; ")}limit?: number; cursor?: string | null }): Promise<FileResult<{ items: ${meta}[]; next: string | null; has_more: boolean }>>`);
+        ops.push(`get(id: string): Promise<FileResult<${meta}>>`);
+        ops.push("url(id: string): string");
+        ops.push("shareLink(id: string, options?: { expiresIn?: number }): Promise<FileResult<{ url: string; expires_at: string; expires_in: number }>>");
+      }
+      if (collection.client.upload) ops.push(`upload(file: Blob, options${member ? "" : "?"}: { ${groupOption}name?: string; contentType?: string; onProgress?: (progress: { loaded: number; total: number }) => void }): Promise<FileResult<UploadedFile>>`);
+      if (collection.client.replace) ops.push("replace(id: string, file: Blob, options?: { contentType?: string; onProgress?: (progress: { loaded: number; total: number }) => void }): Promise<FileResult<UploadedFile>>");
+      if (collection.client.delete) ops.push("delete(id: string): Promise<FileResult<{ id: string; deleted: true }>>");
+      if (collection.public) {
+        ops.push(collection.scope.kind === "server_only" ? "publicUrl(path: string): string" : "publicUrl(id: string, name: string): string");
+      }
+      return `${JSON.stringify(collection.name)}: { ${ops.join("; ")} }`;
+    }
+    function describeFilesClient2(canonical, singleRequestMaxBytes = SINGLE_REQUEST_MAX_BYTES) {
+      const collections = parseDeclaration(canonical);
+      const contract = crypto2.createHash("sha256").update(canonical).digest("hex");
+      const declaration = `declare module ${JSON.stringify(MODULE_NAME)} {
+  /** Why an operation did not happen. Expected refusals resolve here; nothing throws for them. */
+  export interface FileError { code: string; message: string; status: number }
+  export type FileResult<T> = { data: T; error: null } | { data: null; error: FileError };
+  export interface FileMeta { id: string; name: string; size: number; content_type: string | null; version: number; created_at: string; updated_at: string; mine: boolean }
+  export interface UploadedFile { id: string; name: string; size: number; content_type: string; version: number; url: string }
+  export const files: { ${collections.map(describeCollection).join(";\n    ")} };
+}
+`;
+      const shapes = collections.map((c) => {
+        const member = memberOf(c);
+        return {
+          name: c.name,
+          root: c.path,
+          ops: Object.keys(c.client).filter((op) => c.client[op]),
+          public: c.public ? c.scope.kind === "server_only" ? "path" : "id" : null,
+          group: member ? member.group : null,
+          maxSize: c.limits.maxSize,
+          types: c.limits.types
+        };
+      });
+      const runtime = `const contract=${JSON.stringify(contract)};
+const SINGLE=${singleRequestMaxBytes};
+const shapes=${JSON.stringify(shapes)};
+const fail=(status,code,message)=>({data:null,error:{code,message,status}});
+const encodePath=p=>String(p).split("/").map(encodeURIComponent).join("/");
+async function readJson(response){try{return await response.json()}catch(_){return null}}
+async function call(collection,operation,input){
+  let response;
+  try{response=await fetch("/__sw/files",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify(Object.assign({},input,{contract,collection,operation}))})}
+  catch(e){return fail(0,"NETWORK_ERROR","The file request did not reach the app. Check the connection and try again.")}
+  const payload=await readJson(response);
+  if(!response.ok||!payload||payload.ok===false)return fail(response.status,payload&&payload.error||"FILES_ERROR",payload&&payload.message||"The file operation failed.");
+  return{data:payload.data,error:null};
+}
+function send(method,url,body,type,onProgress){
+  if(onProgress&&typeof XMLHttpRequest!=="undefined")return new Promise(resolve=>{
+    const xhr=new XMLHttpRequest();xhr.open(method,url);if(type)xhr.setRequestHeader("Content-Type",type);
+    xhr.upload.onprogress=e=>{if(e.lengthComputable)onProgress({loaded:e.loaded,total:e.total})};
+    xhr.onload=()=>{let p=null;try{p=JSON.parse(xhr.responseText)}catch(_){}resolve({status:xhr.status,ok:xhr.status>=200&&xhr.status<300,payload:p})};
+    xhr.onerror=()=>resolve({status:0,ok:false,payload:null});xhr.send(body);
+  });
+  return fetch(url,{method,headers:type?{"Content-Type":type}:{},body}).then(async r=>({status:r.status,ok:r.ok,payload:await readJson(r)}),()=>({status:0,ok:false,payload:null}));
+}
+const refused=r=>fail(r.status,r.payload&&r.payload.error||(r.status?"UPLOAD_FAILED":"NETWORK_ERROR"),r.payload&&r.payload.message||"The upload did not finish.");
+async function transfer(link,file,type,onProgress){
+  const size=file.size;
+  if(size<=SINGLE){const r=await send("PUT",link.url,file,type,onProgress);return r.ok?{data:r.payload.data,error:null}:refused(r)}
+  const start=await send("POST",link.multipart_url,JSON.stringify({size_bytes:size,content_type:type}),"application/json");
+  if(!start.ok)return refused(start);
+  const s=start.payload.data;
+  for(let n=1;n<=s.part_count;n++){
+    const from=(n-1)*s.part_size,part=file.slice(from,Math.min(size,from+s.part_size));
+    const r=await send("PUT",s.parts_url+"/"+n,part,null,onProgress?p=>onProgress({loaded:from+p.loaded,total:size}):null);
+    if(!r.ok){await send("DELETE",s.abort_url,null,null);return refused(r)}
+  }
+  const done=await send("POST",s.complete_url,null,null);
+  return done.ok?{data:done.payload.data,error:null}:refused(done);
+}
+function typeAllowed(types,type){if(!types.length)return true;const t=type.split(";")[0].trim().toLowerCase();return types.some(p=>p===t||(p.endsWith("/*")&&t.startsWith(p.slice(0,-1))))}
+function makeCollection(shape){
+  const c={};const has=op=>shape.ops.indexOf(op)!==-1;
+  const doorUrl=id=>"/__sw/files/"+encodeURIComponent(shape.name)+"/"+encodeURIComponent(id);
+  const publicUrl=(id,name)=>shape.public==="path"?"/storage"+shape.root+"/"+encodePath(id):"/storage"+shape.root+"/"+encodeURIComponent(id)+"/"+encodeURIComponent(name);
+  async function put(operation,id,file,options){
+    options=options||{};
+    if(!file||typeof file.size!=="number")return fail(400,"FILES_INPUT_INVALID","Pass a File or Blob.");
+    const type=String(options.contentType||file.type||"application/octet-stream").split(";")[0].trim().toLowerCase();
+    if(shape.maxSize!==null&&file.size>shape.maxSize)return fail(413,"PAYLOAD_TOO_LARGE","This file is larger than this collection accepts.");
+    if(!typeAllowed(shape.types,type))return fail(415,"FILE_TYPE_NOT_ALLOWED","This collection accepts "+shape.types.join(", ")+".");
+    const input={size:file.size,content_type:type};
+    if(operation==="upload"){input.name=options.name||file.name||"file";if(shape.group)input[shape.group]=options[shape.group]}
+    else input.id=id;
+    const minted=await call(shape.name,operation,input);
+    if(minted.error)return minted;
+    const sent=await transfer(minted.data,file,type,options.onProgress);
+    if(sent.error)return sent;
+    const name=minted.data.name||input.name||"file";
+    return{data:{id:minted.data.id,name,size:sent.data.size_bytes,content_type:sent.data.content_type,version:sent.data.version,url:shape.public==="id"?publicUrl(minted.data.id,name):doorUrl(minted.data.id)},error:null};
+  }
+  if(has("read")){
+    c.list=(options={})=>{const input={};if(options.limit!==undefined)input.limit=options.limit;if(options.cursor!==undefined&&options.cursor!==null)input.cursor=options.cursor;if(shape.group&&options[shape.group]!==undefined)input[shape.group]=options[shape.group];return call(shape.name,"list",input)};
+    c.get=id=>call(shape.name,"get",{id});
+    c.url=doorUrl;
+    c.shareLink=(id,options={})=>call(shape.name,"link",options.expiresIn===undefined?{id}:{id,expires_in:options.expiresIn});
+  }
+  if(has("upload"))c.upload=(file,options)=>put("upload",null,file,options);
+  if(has("replace"))c.replace=(id,file,options)=>put("replace",id,file,options);
+  if(has("delete"))c.delete=id=>call(shape.name,"delete",{id});
+  if(shape.public)c.publicUrl=publicUrl;
+  return Object.freeze(c);
+}
+const files=Object.freeze(Object.fromEntries(shapes.map(shape=>[shape.name,makeCollection(shape)])));
+export{files};
+`;
+      return { contract_digest: contract, declaration, runtime };
+    }
+    function generateFilesClient(declaredFiles) {
+      return typeof declaredFiles === "string" ? describeFilesClient2(declaredFiles) : null;
+    }
+    function virtualFilesPlugin(analysis) {
+      return {
+        name: "somewhere-declared-files",
+        setup(build) {
+          build.onResolve({ filter: /^somewhere:files$/ }, () => ({ path: MODULE_NAME, namespace: "somewhere-declared-files" }));
+          build.onLoad({ filter: /.*/, namespace: "somewhere-declared-files" }, () => {
+            if (!analysis) return { errors: [{ text: "somewhere:files requires db/schema.ts with a files: { \u2026 } declaration." }] };
+            return { contents: analysis.runtime, loader: "js" };
+          });
+        }
+      };
+    }
+    module2.exports = { MODULE_NAME, CLIENT_FILE: CLIENT_FILE2, SINGLE_REQUEST_MAX_BYTES, describeFilesClient: describeFilesClient2, generateFilesClient, virtualFilesPlugin };
   }
 });
 
@@ -2803,13 +3001,20 @@ var require_schema_types = __commonJS({
     identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
     create?: Field[] | false | null; update?: Field[] | false | null; delete?: boolean;
   }
+  interface FileCollection { readonly __somewhereFileCollection: unique symbol }
+  type FileOperation = 'read' | 'upload' | 'replace' | 'delete';
+  interface FileCollectionOptions {
+    path: string; scope: Scope; public?: boolean;
+    client?: Partial<Record<FileOperation, boolean>>;
+    limits?: { maxSize?: string | number; types?: string[] };
+  }
   interface TableOptions<Field extends string> {
     scope?: Scope; client?: ClientPermissions<Field>; indexes?: string[][];
     unique?: string[][]; relations?: Record<string, Relation>;
   }
 }
 `;
-    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search: SomewhereSchemaDeclaration.OwnerScope }): unknown;
+    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search?: SomewhereSchemaDeclaration.OwnerScope; files?: Record<string, SomewhereSchemaDeclaration.FileCollection> }): unknown;
 function table<Columns extends Record<string, SomewhereSchemaDeclaration.Column | SomewhereSchemaDeclaration.ColumnMarker>>(columns: Columns, options?: SomewhereSchemaDeclaration.TableOptions<Extract<keyof Columns, string>>): SomewhereSchemaDeclaration.Table;
 function id(options?: { uuid?: boolean }): SomewhereSchemaDeclaration.Column;
 function text(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
@@ -2822,7 +3027,8 @@ function blob(options?: SomewhereSchemaDeclaration.ColumnOptions<never>): Somewh
 function owner(options?: { column?: string; visitors?: boolean }): SomewhereSchemaDeclaration.OwnerScope;
 function shared(): SomewhereSchemaDeclaration.Scope;
 function serverOnly(): SomewhereSchemaDeclaration.Scope;
-function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete'> }): SomewhereSchemaDeclaration.MemberScope;
+function member(options: { group: string | string[]; membership: string; member_user: string; member_group: string | string[]; operations?: Array<'read' | 'create' | 'update' | 'delete' | 'upload' | 'replace'> }): SomewhereSchemaDeclaration.MemberScope;
+function files(options: SomewhereSchemaDeclaration.FileCollectionOptions): SomewhereSchemaDeclaration.FileCollection;
 function hasMany(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
 function belongsTo(table: string, foreignKey: string): SomewhereSchemaDeclaration.Relation;
 function removed(): SomewhereSchemaDeclaration.ColumnMarker;
@@ -2843,9 +3049,12 @@ ${(signatures + policySignatures).replace(/^function /gm, "  export function ")}
 // declared-data-vendor-entry.js
 var declared_data_vendor_entry_exports = {};
 __export(declared_data_vendor_entry_exports, {
+  ENDPOINT_DECLARATION: () => import_runtime_types2.ENDPOINT_DECLARATION,
+  FILES_DECLARATION_FILE: () => import_typed_files2.CLIENT_FILE,
   RUNTIME_CONTEXT_DECLARATION: () => import_runtime_types2.RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION: () => import_schema_types.SCHEMA_DECLARATION,
   declaredTablesFromFiles: () => declaredTablesFromFiles,
+  filesDeclarationFromFiles: () => filesDeclarationFromFiles,
   generateFromFiles: () => generateFromFiles
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
@@ -3460,6 +3669,28 @@ function validateFileCollections(collections, table, errors) {
     if (!membership.columns.has(m.memberUser)) errors.push(`The membership table "${m.membership}" (for file collection "${a.name}") has no "${m.memberUser}" column named in member({ member_user }).`);
     if (!membership.columns.has(m.memberGroup)) errors.push(`The membership table "${m.membership}" (for file collection "${a.name}") has no "${m.memberGroup}" column named in member({ member_group }).`);
   }
+}
+function canonicalFileCollectionsJson(collections) {
+  return JSON.stringify({
+    v: 1,
+    collections: [...collections].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).map((c) => ({
+      name: c.name,
+      path: c.path,
+      scope: c.scope.kind === "member" || c.scope.kind === "owner_or_member" ? {
+        kind: c.scope.kind,
+        member: {
+          group: c.scope.member.group,
+          membership: c.scope.member.membership,
+          memberUser: c.scope.member.memberUser,
+          memberGroup: c.scope.member.memberGroup,
+          ...c.scope.member.operations ? { operations: c.scope.member.operations } : {}
+        }
+      } : { kind: c.scope.kind },
+      public: c.public,
+      client: { read: c.client.read, upload: c.client.upload, replace: c.client.replace, delete: c.client.delete },
+      limits: { maxSize: c.limits.maxSize, types: [...c.limits.types] }
+    }))
+  });
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
@@ -4621,12 +4852,20 @@ function schemaAuthorityFromSource(files) {
   }
   return { schema, intents, scopes };
 }
+function declaredFilesFromSource(files) {
+  const source = files["db/schema.ts"];
+  if (source === void 0) return void 0;
+  const parsed = extractSchemaTs(source);
+  return parsed.ok && parsed.declaration.files?.length ? canonicalFileCollectionsJson(parsed.declaration.files) : void 0;
+}
 
 // declared-data-vendor-entry.js
 var import_typed_data = __toESM(require_typed_data());
 var import_runtime_types = __toESM(require_runtime_types());
+var import_typed_files = __toESM(require_typed_files());
 var import_schema_types = __toESM(require_schema_types());
 var import_runtime_types2 = __toESM(require_runtime_types());
+var import_typed_files2 = __toESM(require_typed_files());
 function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? (0, import_typed_data.generateDataClient)(authority) : void 0;
@@ -4634,10 +4873,17 @@ function generateFromFiles(files) {
 function declaredTablesFromFiles(files) {
   return (0, import_runtime_types.declaredTablesDeclaration)(schemaAuthorityFromSource(files));
 }
+function filesDeclarationFromFiles(files) {
+  const canonical = declaredFilesFromSource(files);
+  return canonical ? (0, import_typed_files.describeFilesClient)(canonical).declaration : void 0;
+}
 // Annotate the CommonJS export names for ESM import in node:
 0 && (module.exports = {
+  ENDPOINT_DECLARATION,
+  FILES_DECLARATION_FILE,
   RUNTIME_CONTEXT_DECLARATION,
   SCHEMA_DECLARATION,
   declaredTablesFromFiles,
+  filesDeclarationFromFiles,
   generateFromFiles
 });

@@ -265,7 +265,12 @@ export function runTypecheck(
       overlay = join(projectDir, `.__somewhere_typecheck_${randomUUID()}.json`);
       writeFileSync(overlay, JSON.stringify({
         extends: './' + SCAFFOLD_TSCONFIG_FILENAME,
-        files: [...new Set([...parsed.files, relative(projectDir, declaredData.declarationPath), relative(projectDir, declaredData.schemaPath)])],
+        files: [...new Set([
+          ...parsed.files,
+          relative(projectDir, declaredData.declarationPath),
+          ...(declaredData.filesDeclarationPath ? [relative(projectDir, declaredData.filesDeclarationPath)] : []),
+          relative(projectDir, declaredData.schemaPath),
+        ])],
         include: [], exclude: [],
       }));
       fullArgs[args.length + 1] = relative(projectDir, overlay);
@@ -317,7 +322,7 @@ export function runTypecheck(
       // deploy via esm.sh) so they don't bury the real bugs. Undefined symbols
       // (TS2304) survive the filter.
       const errors = allErrors.filter((e) => !UNRESOLVED_DEP_CODES.has(e.code)
-        || /['"]somewhere(?::data|\/db)['"]/.test(e.message));
+        || /['"]somewhere(?::data|:files|\/db)['"]/.test(e.message));
 
       // tsc exits non-zero whenever it emits diagnostics. If it failed but we
       // parsed NONE (a config/crash failure, not type errors), don't claim
