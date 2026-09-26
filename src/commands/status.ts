@@ -81,15 +81,6 @@ export function planEntitlementFromError(err: unknown): PlanEntitlementNote | nu
   return { code: match[1], message: match[2].trim() || text.trim() };
 }
 
-/** One line that states the entitlement as information. The platform's own
- *  wording is kept — it is the thing that knows which plans include it. */
-export function planEntitlementLine(note: PlanEntitlementNote): string {
-  const subject = note.code === 'CLOUD_DEV_NOT_ENABLED'
-    ? 'Preview'
-    : 'Deploy status';
-  return `${subject}: not included on this plan — ${note.message}`;
-}
-
 interface ProductionDeployRecord {
   version?: unknown;
   release_id?: unknown;
@@ -269,7 +260,8 @@ export function registerStatus(program: Command) {
         // A plan entitlement is an answer, not a failure. A healthy project on
         // a plan without cloud dev must still exit 0 (tsk_f250e561); only a
         // real problem — deploy failed, project unreachable, auth broken —
-        // exits non-zero.
+        // exits non-zero. The human output shows production only: preview was
+        // not asked for, so the plan fact stays in `--json`.
         deploymentEntitlement = planEntitlementFromError(err);
         if (deploymentEntitlement) {
           try {
@@ -283,10 +275,6 @@ export function registerStatus(program: Command) {
             deploymentError = historyErr instanceof Error ? historyErr.message : String(historyErr);
             if (!opts.json) error(`Production status: ${deploymentError}`);
             process.exitCode = 1;
-          }
-          if (!opts.json) {
-            info(planEntitlementLine(deploymentEntitlement));
-            info(dim('— your deployed app and `somewhere deploy` are unaffected'));
           }
         } else {
           deploymentError = err instanceof Error ? err.message : String(err);

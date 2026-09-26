@@ -19,7 +19,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { planEntitlementFromError, planEntitlementLine } from '../dist/commands/status.js';
+import { planEntitlementFromError } from '../dist/commands/status.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
@@ -62,7 +62,7 @@ function credentialHome(prefix) {
 
 /** A healthy, deployed project whose account's deploy_status read is refused
  *  with the given tool error. */
-function fixtureServer(projectId, toolError) {
+function fixtureServer(projectId, toolError, { historyFails = false } = {}) {
   return createServer((req, res) => {
     let body = '';
     req.on('data', (chunk) => (body += chunk));
@@ -88,6 +88,10 @@ function fixtureServer(projectId, toolError) {
         return;
       }
       if (req.method === 'GET' && url.pathname === `/v1/projects/${projectId}/deploys`) {
+        if (historyFails) {
+          sendJson(res, { ok: false, error: 'INTERNAL_ERROR', message: 'deploy history unavailable' }, 500);
+          return;
+        }
         sendJson(res, { ok: true, data: {
           active_release_id: 'rel_free_live',
           deploys: [{ version: 4, release_id: 'rel_free_live', status: 'success' }],
@@ -133,8 +137,8 @@ function fixtureServer(projectId, toolError) {
   });
 }
 
-async function withFixture(projectId, toolError, fn) {
-  const server = fixtureServer(projectId, toolError);
+async function withFixture(projectId, toolError, fn, options) {
+  const server = fixtureServer(projectId, toolError, options);
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const { port } = server.address();
   try {
@@ -144,7 +148,7 @@ async function withFixture(projectId, toolError, fn) {
   }
 }
 
-test('a healthy Free project exits 0 and states the plan entitlement as information', async () => {
+test('a healthy Free project exits 0 and shows production without preview plan noise', async () => {
   const home = credentialHome('sw-status-free-home-');
   await withFixture('proj-free', {
     error: 'CLOUD_DEV_NOT_ENABLED',
@@ -164,8 +168,8 @@ test('a healthy Free project exits 0 and states the plan entitlement as informat
       `healthy project must exit 0\nstdout:\n${human.stdout}\nstderr:\n${human.stderr}`,
     );
     assert.match(human.stdout, /Healthy Free App/);
-    assert.match(human.stdout, /not included on this plan/);
-    assert.match(human.stdout, /Pro and Scale plans/);
+    // Preview was not requested: no plan upsell or reassurance in human output.
+    assert.doesNotMatch(human.stdout + human.stderr, /not included on this plan|Pro and Scale plans|unaffected/);
     assert.match(human.stdout, /Production version: 4/);
     assert.match(human.stdout, /Active release: rel_free_live/);
     assert.doesNotMatch(human.stderr, /Deploy status:/);
@@ -207,6 +211,32 @@ test('a genuinely broken deploy still exits 1', async () => {
   });
 });
 
+test('a failed production fallback after a plan entitlement still exits 1', async () => {
+  const home = credentialHome('sw-status-fallback-home-');
+  await withFixture('proj-fallback', {
+    error: 'CLOUD_DEV_NOT_ENABLED',
+    message: 'Cloud dev is included on the Pro and Scale plans.',
+  }, async (base) => {
+    const env = {
+      HOME: home,
+      USERPROFILE: home,
+      SOMEWHERE_API_URL: `${base}/v1`,
+      SOMEWHERE_MCP_URL: `${base}/mcp`,
+    };
+
+    const human = await run(['status', 'proj-fallback'], env);
+    assert.equal(human.status, 1, 'an unreadable production status is a failure');
+    assert.match(human.stderr, /Production status: .*deploy history unavailable/);
+    assert.doesNotMatch(human.stdout, /Production version:/);
+
+    const json = await run(['status', 'proj-fallback', '--json'], env);
+    assert.equal(json.status, 1);
+    const parsed = JSON.parse(json.stdout);
+    assert.match(parsed.deployment_error, /deploy history unavailable/);
+    assert.equal(parsed.deployment_entitlement.code, 'CLOUD_DEV_NOT_ENABLED');
+  }, { historyFails: true });
+});
+
 test('an unreachable project still exits 1', async () => {
   const home = credentialHome('sw-status-missing-home-');
   await withFixture('proj-present', {
@@ -233,7 +263,6 @@ test('only plan-entitlement codes are read as information', () => {
     code: 'CLOUD_DEV_NOT_ENABLED',
     message: 'Cloud dev is included on the Pro and Scale plans.',
   });
-  assert.match(planEntitlementLine(note), /^Preview: not included on this plan — /);
 
   assert.equal(planEntitlementFromError(new Error('DEPLOY_FAILED: compile error')), null);
   assert.equal(planEntitlementFromError(new Error('UNAUTHORIZED: token expired')), null);
