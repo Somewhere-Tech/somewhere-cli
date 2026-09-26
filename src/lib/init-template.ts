@@ -104,9 +104,9 @@ interface GreetingRow {
   message: string;
 }
 
-// Source of truth: worker/src/runtime/auth.ts:728 (fromRequest) and
-// worker/src/runtime/db.ts:1653 (query). Browser code never receives SQL or a
-// database connection; it calls this same-origin function.
+// Contracts: \`somewhere docs sw.auth\` (fromRequest) and \`somewhere docs sw.db\`
+// (query). Browser code never receives SQL or a database connection; it calls
+// this same-origin function.
 export default async function data(req: Request, sw: Runtime): Promise<Response> {
   const user = await sw.auth.fromRequest(req);
   if (!user) return Response.json({ error: 'UNAUTHORIZED' }, { status: 401 });
@@ -121,9 +121,9 @@ export default async function data(req: Request, sw: Runtime): Promise<Response>
 
 const UPLOAD_FUNCTION = `import type { Runtime } from './_lib/runtime';
 
-// Source of truth: worker/src/runtime/auth.ts:728 (fromRequest) and
-// worker/src/runtime/fs.ts:207 (uploadFromRequest). Files are private by
-// default; the returned URL is short-lived, and ownership is assigned here.
+// Contracts: \`somewhere docs sw.auth\` (fromRequest) and \`somewhere docs sw.fs\`
+// (uploadFromRequest). Files are private by default; the returned URL is
+// short-lived, and ownership is assigned here.
 export default async function upload(req: Request, sw: Runtime): Promise<Response> {
   const user = await sw.auth.fromRequest(req);
   if (!user) return Response.json({ error: 'UNAUTHORIZED' }, { status: 401 });
