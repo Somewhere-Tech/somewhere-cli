@@ -57,7 +57,7 @@ export default schema({
 `;
 
 const API = `export default sw.endpoint({
-  auth: 'none',
+  auth: 'none', // deliberate: public and read-only; anyone can fetch the greeting
   handler: async (_input, sw) => {
     const result = await sw.db.from('greetings', { limit: 1 });
     const message = result.data[0]?.message;
