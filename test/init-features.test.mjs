@@ -306,6 +306,7 @@ declare module '@somewhere-tech/sdk/react' {
     status: 'checking' | 'authenticated' | 'signed-out' | 'indeterminate';
     user: User | null;
     signOutUnconfirmed: boolean;
+    signingOut: boolean;
     recheck(): Promise<User | null>;
   };
   export function useAuth(): SomewhereAuth;

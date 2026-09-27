@@ -78,12 +78,14 @@ export type { User };
 
 /**
  * loading: no answer yet (first visit, or another tab changed the account).
+ * signing-out: private data is cleared; the server has not answered /logout yet.
  * unavailable: the server could not confirm a session, and none was confirmed
  * on this page. suspended: a re-check failed for the account confirmed on this
  * page; its pages stay mounted but hidden until the session is confirmed.
  */
 export type AuthState =
   | { status: 'loading' }
+  | { status: 'signing-out' }
   | { status: 'signed-out' }
   | { status: 'signed-in'; user: User }
   | { status: 'unavailable'; retrying: boolean; retry(): void }
@@ -155,7 +157,9 @@ export function useAuthState(): AuthState {
     case 'authenticated':
       return session.user ? { status: 'signed-in', user: session.user } : { status: 'signed-out' };
     case 'signed-out':
-      return { status: 'signed-out' };
+      // Private data is already gone; the sign-in page waits for the server
+      // to answer /logout, because until then it may still accept the session.
+      return session.signingOut ? { status: 'signing-out' } : { status: 'signed-out' };
     case 'checking':
       return { status: 'loading' };
     case 'indeterminate': {
@@ -310,6 +314,7 @@ export function App() {
   const session = useAuthState();
 
   if (session.status === 'loading') return <LoadingScreen label="Checking your session…" />;
+  if (session.status === 'signing-out') return <LoadingScreen label="Signing out…" />;
   if (session.status === 'signed-out') return <SignInPage />;
   if (session.status === 'unavailable') {
     return <SessionUnavailable keepsWork={false} retrying={session.retrying} onRetry={session.retry} />;
@@ -1396,7 +1401,9 @@ function readme(selection: InitSelection): string {
     'app code does not store or send a token. `src/App.tsx` shows private pages only',
     'for an account the server confirmed: a loading screen until the first check',
     'answers, and a "try again" screen when the server cannot be reached (pages',
-    'already open stay mounted but hidden, so unsaved input survives). The gate is',
+    'already open stay mounted but hidden, so unsaved input survives). Signing out',
+    'clears private pages at once and shows "Signing out…" until the server answers;',
+    'if it cannot confirm, the sign-in page says so and offers "Sign out again". The gate is',
     'only UX: functions and `db/schema.ts` decide what a request may read or write.',
     'Password reset, OAuth and MFA are not generated.',
   );
