@@ -76,11 +76,18 @@ const AUTH_TYPES = `import type { User } from '@somewhere-tech/sdk/auth';
 
 export type { User };
 
-/** loading: the first /api/auth/me check has not answered yet. */
+/**
+ * loading: no answer yet (first visit, or another tab changed the account).
+ * unavailable: the server could not confirm a session, and none was confirmed
+ * on this page. suspended: a re-check failed for the account confirmed on this
+ * page; its pages stay mounted but hidden until the session is confirmed.
+ */
 export type AuthState =
   | { status: 'loading' }
   | { status: 'signed-out' }
-  | { status: 'signed-in'; user: User };
+  | { status: 'signed-in'; user: User }
+  | { status: 'unavailable'; retrying: boolean; retry(): void }
+  | { status: 'suspended'; user: User; retrying: boolean; retry(): void };
 
 export type CredentialsMode = 'sign-in' | 'sign-up';
 
@@ -121,19 +128,41 @@ export function authErrorMessage(reason: unknown): string {
 }
 `;
 
-const AUTH_HOOKS = `import { useState } from 'react';
-import { useAuth, useAuthLoading, useUser } from '@somewhere-tech/sdk/react';
-import type { AuthState, CredentialsForm, CredentialsMode, SignOutAction } from '../../types/auth';
+const AUTH_HOOKS = `import { useRef, useState } from 'react';
+import { useAuth, useAuthState as useSdkAuthState } from '@somewhere-tech/sdk/react';
+import type { AuthState, CredentialsForm, CredentialsMode, SignOutAction, User } from '../../types/auth';
 import { authErrorMessage, PASSWORD_MIN_LENGTH } from '../services/auth';
 
-// State and actions over the SDK provider; no session store of its own.
-// A user cached from an earlier visit is not treated as signed in until the
-// first session check answers.
+// State and actions over the SDK's session status; no session store here.
+// Only an account the server confirmed is signed in: a cached user waits for
+// the first check, and a failed check is 'unavailable', never signed in.
 export function useAuthState(): AuthState {
-  const user = useUser();
-  const loading = useAuthLoading();
-  if (loading) return { status: 'loading' };
-  return user ? { status: 'signed-in', user } : { status: 'signed-out' };
+  const session = useSdkAuthState();
+  const [retrying, setRetrying] = useState(false);
+  // The account the server confirmed on this page. Only it may keep its
+  // (hidden) pages through a failed re-check.
+  const confirmed = useRef<User | null>(null);
+  if (session.status === 'authenticated') confirmed.current = session.user;
+  if (session.status === 'signed-out' || session.status === 'checking') confirmed.current = null;
+
+  switch (session.status) {
+    case 'authenticated':
+      return session.user ? { status: 'signed-in', user: session.user } : { status: 'signed-out' };
+    case 'signed-out':
+      return { status: 'signed-out' };
+    case 'checking':
+      return { status: 'loading' };
+    case 'indeterminate': {
+      const retry = () => {
+        setRetrying(true);
+        void session.recheck().finally(() => setRetrying(false));
+      };
+      const kept = confirmed.current;
+      return kept && session.user?.id === kept.id
+        ? { status: 'suspended', user: kept, retrying, retry }
+        : { status: 'unavailable', retrying, retry };
+    }
+  }
 }
 
 export function useCredentialsForm(initialMode: CredentialsMode = 'sign-in'): CredentialsForm {
@@ -251,7 +280,7 @@ import { HomePage } from './pages/HomePage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { SignInPage } from './pages/SignInPage';
 import { ROUTES, usePathname } from './routes';
-import { LoadingScreen } from './ui/feedback';
+import { LoadingScreen, SessionUnavailable } from './ui/feedback';
 
 // Routing and the sign-in boundary. This gate is UX: the server and
 // db/schema.ts decide what each request may read or write.
@@ -260,9 +289,21 @@ export function App() {
 
   if (session.status === 'loading') return <LoadingScreen label="Checking your session…" />;
   if (session.status === 'signed-out') return <SignInPage />;
-  // Keyed by user id: signing out or switching accounts unmounts every
-  // private page, so no state from the previous account renders again.
-  return <PrivateRoutes key={session.user.id} user={session.user} />;
+  if (session.status === 'unavailable') {
+    return <SessionUnavailable keepsWork={false} retrying={session.retrying} onRetry={session.retry} />;
+  }
+  const suspended = session.status === 'suspended';
+  return (
+    <>
+      {suspended ? <SessionUnavailable keepsWork retrying={session.retrying} onRetry={session.retry} /> : null}
+      {/* Keyed by user id: signing out or switching accounts unmounts every
+          private page. A failed re-check only hides and disables them, so
+          unsaved input survives until the session is confirmed again. */}
+      <div hidden={suspended} inert={suspended}>
+        <PrivateRoutes key={session.user.id} user={session.user} />
+      </div>
+    </>
+  );
 }
 
 function PrivateRoutes({ user }: { user: User }) {
@@ -738,6 +779,29 @@ export function EmptyState({ title, children }: { title: string; children?: Reac
     </div>
   );
 }
+
+interface SessionUnavailableProps {
+  keepsWork: boolean;
+  retrying: boolean;
+  onRetry(): void;
+}
+
+export function SessionUnavailable({ keepsWork, retrying, onRetry }: SessionUnavailableProps) {
+  return (
+    <main className="loading">
+      <div className="panel unavailable" role="alert">
+        <p className="panel__title">We can't confirm your sign-in</p>
+        <p className="muted">
+          The server didn't answer. Check your connection and try again.
+          {keepsWork ? ' Your unsaved changes are kept.' : ''}
+        </p>
+        <button type="button" className="button" onClick={onRetry} disabled={retrying} aria-busy={retrying}>
+          {retrying ? 'Trying…' : 'Try again'}
+        </button>
+      </div>
+    </main>
+  );
+}
 `;
 
 const STYLED_AUTH_CARD = `import type { FormEvent } from 'react';
@@ -921,6 +985,21 @@ export function Alert({ children, action }: { children: ReactNode; action?: Reac
 
 export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
   return <div><p><strong>{title}</strong></p>{children ? <p>{children}</p> : null}</div>;
+}
+
+interface SessionUnavailableProps {
+  keepsWork: boolean;
+  retrying: boolean;
+  onRetry(): void;
+}
+
+export function SessionUnavailable({ keepsWork, retrying, onRetry }: SessionUnavailableProps) {
+  return (
+    <main role="alert">
+      <p>We can't confirm your sign-in. Check your connection and try again.{keepsWork ? ' Your unsaved changes are kept.' : ''}</p>
+      <button type="button" onClick={onRetry} disabled={retrying}>{retrying ? 'Trying…' : 'Try again'}</button>
+    </main>
+  );
 }
 `;
 
@@ -1179,6 +1258,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .auth__switch { margin: 0; text-align: center; color: var(--color-muted); font-size: var(--text-sm); }
 
 .loading { display: grid; place-content: center; justify-items: center; gap: var(--space-3); min-height: 100vh; color: var(--color-muted); }
+.unavailable { max-width: 380px; margin: 0 var(--space-4); color: var(--color-text); }
+.unavailable p { margin: 0; }
 .spinner { width: 24px; height: 24px; border: 3px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
@@ -1261,10 +1342,12 @@ function readme(selection: InitSelection): string {
     '## Auth',
     '',
     'Auth is handled by `@somewhere-tech/sdk`. The session is an httpOnly cookie;',
-    'app code does not store or send a token. `src/App.tsx` shows a loading screen',
-    'until the first session check answers. The sign-in gate is only UX: functions',
-    'and `db/schema.ts` decide what a request may read or write. Password reset,',
-    'OAuth and MFA are not generated.',
+    'app code does not store or send a token. `src/App.tsx` shows private pages only',
+    'for an account the server confirmed: a loading screen until the first check',
+    'answers, and a "try again" screen when the server cannot be reached (pages',
+    'already open stay mounted but hidden, so unsaved input survives). The gate is',
+    'only UX: functions and `db/schema.ts` decide what a request may read or write.',
+    'Password reset, OAuth and MFA are not generated.',
   );
   if (privateData) {
     lines.push(

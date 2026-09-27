@@ -683,7 +683,7 @@ test('init creates the green starter, --bare keeps only the workflow guide, and 
     });
     assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
     assert.deepEqual(JSON.parse(created.stdout), project);
-    assert.match(readFileSync(join(empty, 'src/auth/hooks.ts'), 'utf8'), /useAuthLoading/);
+    assert.match(readFileSync(join(empty, 'src/auth/hooks.ts'), 'utf8'), /useAuthState as useSdkAuthState/);
     assert.match(readFileSync(join(empty, 'src/config.ts'), 'utf8'), /APP_NAME = "Scaffold App"/);
     assert.throws(() => readFileSync(join(empty, 'db/schema.ts')), /ENOENT/, 'private data is opt-in');
     assert.match(readFileSync(join(empty, 'AGENTS.md'), 'utf8'), /somewhere verify --flow flow\.json/);

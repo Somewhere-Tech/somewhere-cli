@@ -302,6 +302,11 @@ declare module '@somewhere-tech/sdk/react' {
   export function SomewhereAuthProvider(props: { client?: SomewhereAuth; children: unknown }): JSX.Element;
   export function useUser(): User | null;
   export function useAuthLoading(): boolean;
+  export function useAuthState(): {
+    status: 'checking' | 'authenticated' | 'signed-out' | 'indeterminate';
+    user: User | null;
+    recheck(): Promise<User | null>;
+  };
   export function useAuth(): SomewhereAuth;
 }
 declare module '@somewhere-tech/sdk/server' {
@@ -309,9 +314,20 @@ declare module '@somewhere-tech/sdk/server' {
 }
 `;
 
-test('every combination typechecks against the SDK contract and the generated somewhere:data declaration', async () => {
+// runTypecheck installs the declared @types packages with npm, which installs
+// the starter's pinned dependencies too, so this checks against the real SDK.
+// The starter uses SDK session status that is not in a published release yet:
+// point SOMEWHERE_TEST_SDK_TARBALL at a local `npm pack` of that SDK.
+const sdkTarball = process.env.SOMEWHERE_TEST_SDK_TARBALL;
+test('every combination typechecks against the SDK and the generated somewhere:data declaration', {
+  skip: sdkTarball ? false : 'needs SOMEWHERE_TEST_SDK_TARBALL (the starter requires an unreleased SDK)',
+}, async () => {
   for (const [features, ui] of COMBINATIONS) {
     const { dir } = generate(features, ui);
+    const pkgPath = join(dir, 'package.json');
+    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+    pkg.dependencies['@somewhere-tech/sdk'] = `file:${sdkTarball}`;
+    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
     const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
     mkdirSync(typesDir, { recursive: true });
     writeFileSync(join(typesDir, 'index.d.ts'), CONTRACT_TYPES);
