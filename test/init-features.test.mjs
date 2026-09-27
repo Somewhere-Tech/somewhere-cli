@@ -134,7 +134,7 @@ test('every combination separates types, services, hooks, pages and presentation
     assert.doesNotMatch(all, /fonts\.googleapis|@import url|https?:\/\/[^\s'"`]*\.(woff2?|ttf)/, `${label}: no remote fonts`);
     const pkg = JSON.parse(read('package.json'));
     assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@somewhere-tech/sdk', 'react', 'react-dom']);
-    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.0');
+    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.1');
     assert.equal(pkg.scripts.build, undefined);
   }
 });
@@ -317,19 +317,19 @@ declare module '@somewhere-tech/sdk/server' {
 `;
 
 // runTypecheck installs the declared @types packages with npm, which installs
-// the starter's pinned dependencies too, so this checks against the real SDK.
-// The starter uses SDK session status that is not in a published release yet:
-// point SOMEWHERE_TEST_SDK_TARBALL at a local `npm pack` of that SDK.
+// the starter's pinned dependencies too, so this checks against the real,
+// published SDK the starter pins. SOMEWHERE_TEST_SDK_TARBALL points it at a
+// local `npm pack` instead (an SDK change that is not published yet).
 const sdkTarball = process.env.SOMEWHERE_TEST_SDK_TARBALL;
-test('every combination typechecks against the SDK and the generated somewhere:data declaration', {
-  skip: sdkTarball ? false : 'needs SOMEWHERE_TEST_SDK_TARBALL (the starter requires an unreleased SDK)',
-}, async () => {
+test('every combination typechecks against the SDK and the generated somewhere:data declaration', async () => {
   for (const [features, ui] of COMBINATIONS) {
     const { dir } = generate(features, ui);
-    const pkgPath = join(dir, 'package.json');
-    const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-    pkg.dependencies['@somewhere-tech/sdk'] = `file:${sdkTarball}`;
-    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+    if (sdkTarball) {
+      const pkgPath = join(dir, 'package.json');
+      const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
+      pkg.dependencies['@somewhere-tech/sdk'] = `file:${sdkTarball}`;
+      writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
+    }
     const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
     mkdirSync(typesDir, { recursive: true });
     writeFileSync(join(typesDir, 'index.d.ts'), CONTRACT_TYPES);

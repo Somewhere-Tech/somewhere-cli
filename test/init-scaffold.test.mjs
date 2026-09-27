@@ -226,7 +226,7 @@ test('default starter is the auth module: SDK client, packaged handler, hooks, r
   assert.doesNotMatch(app, /fetch\(/, 'components never fetch; services do');
   assert.match(app, /Checking your session/, 'a visible loading state, never a blank gate');
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.0');
+  assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.1');
   for (const version of [...Object.values(pkg.dependencies), ...Object.values(pkg.devDependencies)]) {
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
@@ -383,7 +383,7 @@ test('one generated template consumes the SDK auth adapter and server data/files
   assert.match('JWT rotation remains SDK-owned.', authMechanicsTerms);
 
   const packageJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.11.0');
+  assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.11.1');
   assert.equal(packageJson.scripts.build, undefined);
 
   const approvedAuthGuidance =
