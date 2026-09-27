@@ -134,7 +134,7 @@ test('every combination separates types, services, hooks, pages and presentation
     assert.doesNotMatch(all, /fonts\.googleapis|@import url|https?:\/\/[^\s'"`]*\.(woff2?|ttf)/, `${label}: no remote fonts`);
     const pkg = JSON.parse(read('package.json'));
     assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@somewhere-tech/sdk', 'react', 'react-dom']);
-    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.10.0');
+    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.0');
     assert.equal(pkg.scripts.build, undefined);
   }
 });

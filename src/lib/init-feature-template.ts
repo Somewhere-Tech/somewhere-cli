@@ -21,7 +21,7 @@ const PACKAGE_JSON = `{
     "typecheck": "somewhere typecheck"
   },
   "dependencies": {
-    "@somewhere-tech/sdk": "0.10.0",
+    "@somewhere-tech/sdk": "0.11.0",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
