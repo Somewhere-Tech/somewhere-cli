@@ -83,9 +83,10 @@ export interface VerifyReport {
    *  and the exact expect_requests entry that would declare it. Never applied
    *  automatically: an undeclared status fails the run. */
   undeclared_statuses: VerifyUndeclaredStatus[];
-  /** Start navigations the platform retried once because the document never
-   *  answered and no action had run. Reported, never hidden. */
-  infrastructure_retries: Array<VerifySignal<{ phase: string; error: string; elapsed_ms?: number }>>;
+  /** Initial navigations the platform repeated once (a timeout with no document
+   *  response observed while the page was still blank, before any action).
+   *  Reported, never hidden; says nothing about the cause. */
+  navigation_retries: Array<VerifySignal<{ phase: string; error: string; elapsed_ms?: number }>>;
 }
 
 export interface VerifyUndeclaredStatus {
@@ -98,12 +99,27 @@ export interface VerifyUndeclaredStatus {
   declare: { path: string; status: number };
 }
 
+/** Say that the initial navigation was repeated, and only what was observed. */
+function navigationRetryNote(retries: VerifyReport['navigation_retries']): string {
+  if (!retries.length) return '';
+  return ` The start page was opened a second time at ${retries.map((r) => r.viewport).join(', ')}: the first navigation timed out with no document response observed while the page was still blank (no action had run).`;
+}
+
+/** A request path for a summary: no query or fragment, and a path segment
+ *  shaped like a credential (a JWT, a platform or provider key) is redacted. */
+function summaryPath(url: string): string {
+  let path = url.split(/[?#]/)[0];
+  try { path = new URL(url).pathname; } catch { /* keep the stripped value */ }
+  return path.split('/').map((segment) => (
+    /^eyJ[\w-]+\.[\w-]+\.[\w-]*$/.test(segment) || /^smt_[\w-]+$/.test(segment) || /^sk-[\w-]{20,}$/.test(segment) ? '<redacted>' : segment
+  )).join('/');
+}
+
 const GENERIC_RESOURCE_FAILURE = /^Failed to load resource: the server responded with a status of (\d{3})\b/;
 
 function undeclaredStatusOf(viewport: string, detail: unknown): VerifyUndeclaredStatus | null {
   if (!isRecord(detail) || typeof detail.url !== 'string' || typeof detail.status !== 'number' || detail.status < 400) return null;
-  let path = detail.url;
-  try { path = new URL(detail.url).pathname; } catch { /* keep the raw value */ }
+  const path = summaryPath(detail.url);
   const initiator = detail.initiator === 'eval' || detail.initiator === 'page' ? detail.initiator : 'unknown';
   return {
     viewport,
@@ -350,15 +366,15 @@ function shapeVerificationReport(
   const expectations: Array<VerifySignal<BrowserRequestExpectationResult>> = [];
   const screenshots: VerifyScreenshotReport[] = [];
   const layout: Array<VerifySignal<string>> = [];
-  const infrastructureRetries: VerifyReport['infrastructure_retries'] = [];
+  const navigationRetries: VerifyReport['navigation_retries'] = [];
 
   for (const { viewport, report, actions: runActions } of runs) {
     const actions = runActions ?? flow.actions;
     if (typeof report.accessibility_layout === 'string' && report.accessibility_layout) {
       layout.push({ viewport: viewport.label, detail: report.accessibility_layout });
     }
-    for (const retry of report.infrastructure_retries ?? []) {
-      infrastructureRetries.push({ viewport: viewport.label, detail: { phase: retry.phase, error: retry.error, ...(typeof retry.elapsed_ms === 'number' ? { elapsed_ms: retry.elapsed_ms } : {}) } });
+    for (const retry of report.navigation_retries ?? []) {
+      navigationRetries.push({ viewport: viewport.label, detail: { phase: retry.phase, error: retry.error, ...(typeof retry.elapsed_ms === 'number' ? { elapsed_ms: retry.elapsed_ms } : {}) } });
     }
     for (const [index, step] of (report.steps ?? []).entries()) {
       // The platform's own navigation before the first action is step 0 of its
@@ -414,9 +430,7 @@ function shapeVerificationReport(
     const match = GENERIC_RESOURCE_FAILURE.exec(String(item.detail));
     return !match || !undeclared.some((u) => u.viewport === item.viewport && String(u.status) === match[1]);
   });
-  const retryNote = infrastructureRetries.length
-    ? ` The start page needed ${infrastructureRetries.length} infrastructure retr${infrastructureRetries.length === 1 ? 'y' : 'ies'} (${infrastructureRetries.map((r) => r.viewport).join(', ')}): its document never answered the first time.`
-    : '';
+  const retryNote = navigationRetryNote(navigationRetries);
   const failedScreenshot = runs.find(({ report }) => !report.screenshots?.some((shot) => {
     if (typeof shot === 'string') return shot.length > 0;
     return !shot.error && !!(shot.path ?? shot.url ?? shot.fs_path ?? shot.scratch_url);
@@ -442,7 +456,7 @@ function shapeVerificationReport(
       ? `PASS — ${flow.actions.length} step${flow.actions.length === 1 ? '' : 's'} passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`
       : `PASS — default page check passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`;
   }
-  if (infrastructureRetries.length) verdict += retryNote;
+  verdict += retryNote;
 
   return {
     passed,
@@ -468,7 +482,7 @@ function shapeVerificationReport(
     screenshots,
     layout,
     undeclared_statuses: undeclared,
-    infrastructure_retries: infrastructureRetries,
+    navigation_retries: navigationRetries,
   };
 }
 
@@ -927,7 +941,7 @@ export function createVerifyJourneyRun(
       verdict = shaped.verdict.replace(/^FAIL — /, `FAIL — segment ${stopped?.segment ?? '?'} — `);
     } else {
       verdict = `PASS — ${journey.journey.length} segment${journey.journey.length === 1 ? '' : 's'} by ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')}) passed; page, console, and network healthy.`
-        + (shaped.infrastructure_retries.length ? ` The start page needed ${shaped.infrastructure_retries.length} infrastructure retr${shaped.infrastructure_retries.length === 1 ? 'y' : 'ies'} (${shaped.infrastructure_retries.map((r) => r.viewport).join(', ')}): its document never answered the first time.` : '');
+        + navigationRetryNote(shaped.navigation_retries);
     }
     const { cleanup, cleanup_ms } = await closeAll();
     return {
@@ -1034,8 +1048,8 @@ export function formatVerifyReport(report: VerifyReport): string[] {
   for (const item of report.undeclared_statuses ?? []) {
     lines.push(`undeclared: [${item.viewport}] ${item.method} ${item.path} → ${item.status} (${item.initiator === 'eval' ? 'from your eval step' : item.initiator === 'page' ? 'from the app' : 'origin unknown'}); declare with ${JSON.stringify(item.declare)} if intended`);
   }
-  for (const item of report.infrastructure_retries ?? []) {
-    lines.push(`infrastructure retry: [${item.viewport}] start page retried once after: ${item.detail.error}`);
+  for (const item of report.navigation_retries ?? []) {
+    lines.push(`navigation repeated: [${item.viewport}] the start page was opened a second time after: ${item.detail.error}`);
   }
   return lines;
 }

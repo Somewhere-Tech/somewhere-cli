@@ -103,8 +103,9 @@ export interface BrowserResult {
   accessibility_layout?: string;
   /** The page when the start navigation gave up (document status, ready state, what was loading). */
   navigation_snapshot?: Record<string, unknown>;
-  /** A start navigation retried once because its document provably never answered. */
-  infrastructure_retries?: Array<{ phase: string; error: string; elapsed_ms?: number; snapshot?: Record<string, unknown> }>;
+  /** The initial navigation, repeated once after it timed out with no document
+   *  response observed while the page was still blank. No action was replayed. */
+  navigation_retries?: Array<{ phase: string; error: string; elapsed_ms?: number; snapshot?: Record<string, unknown> }>;
 }
 
 export interface BrowserOptions {

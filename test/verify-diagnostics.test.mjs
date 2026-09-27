@@ -118,9 +118,9 @@ const startTimeout = (extra = {}) => platformReport({
   screenshots: [],
   steps: [{
     step: 0, action: 'goto', phase: 'start_navigation', ok: false, duration_ms: 0,
-    error: 'navigation failed: Navigation timeout of 15000 ms exceeded. The page\'s document never answered, so no page code ran.',
+    error: 'navigation failed: Navigation timeout of 15000 ms exceeded. No response for the page\'s document was observed; the page was still on its initial blank page.',
   }],
-  navigation_snapshot: { document_status: null, ready_state: null, url: `${ORIGIN}/`, text_chars: 0, pending: [] },
+  navigation_snapshot: { document_status: null, ready_state: 'complete', url: 'about:blank', text_chars: 0, pending: [] },
   ...extra,
 });
 
@@ -129,7 +129,7 @@ test('failure 2: a start-page timeout is reported as the platform opening the pa
   assert.equal(report.passed, false);
   assert.equal(report.steps[0].step, 0);
   assert.equal(report.steps[0].name, 'open the start page (before any action)');
-  assert.match(report.verdict, /^FAIL — step 0 \(open the start page \(before any action\)\) failed at mobile: navigation failed: Navigation timeout of 15000 ms exceeded\. The page's document never answered, so no page code ran\./);
+  assert.match(report.verdict, /^FAIL — step 0 \(open the start page \(before any action\)\) failed at mobile: navigation failed: Navigation timeout of 15000 ms exceeded\. No response for the page's document was observed; the page was still on its initial blank page\./);
   assert.doesNotMatch(report.verdict, /wait #auth-email/);
 });
 
@@ -140,13 +140,24 @@ test('a flow whose own first action is a goto keeps that action\'s name', async 
   assert.equal(report.steps[0].step, 1);
 });
 
-test('a start page that needed one infrastructure retry still passes, and says so', async () => {
+test('a start page opened a second time still passes, and says so without claiming a cause', async () => {
   const report = await runVerification({ project_id: 'club' }, normalizeVerifyFlow({ actions: [{ wait: '#auth-email' }], viewports: ['mobile'] }), client([platformReport({
     steps: [{ step: 0, action: 'wait', ok: true }],
-    infrastructure_retries: [{ phase: 'start_navigation', error: 'Navigation timeout of 15000 ms exceeded', elapsed_ms: 15004, snapshot: { document_status: null } }],
+    navigation_retries: [{ phase: 'start_navigation', error: 'Navigation timeout of 15000 ms exceeded', elapsed_ms: 15004, snapshot: { document_status: null } }],
   })]));
   assert.equal(report.passed, true);
-  assert.match(report.verdict, /^PASS — .* The start page needed 1 infrastructure retry \(mobile\): its document never answered the first time\.$/);
-  assert.deepEqual(report.infrastructure_retries, [{ viewport: 'mobile', detail: { phase: 'start_navigation', error: 'Navigation timeout of 15000 ms exceeded', elapsed_ms: 15004 } }]);
-  assert.match(formatVerifyReport(report).join('\n'), /infrastructure retry: \[mobile\] start page retried once after: Navigation timeout of 15000 ms exceeded/);
+  assert.match(report.verdict, /^PASS — .* The start page was opened a second time at mobile: the first navigation timed out with no document response observed while the page was still blank \(no action had run\)\.$/);
+  assert.doesNotMatch(report.verdict, /infrastructur|never answered|proven/i);
+  assert.deepEqual(report.navigation_retries, [{ viewport: 'mobile', detail: { phase: 'start_navigation', error: 'Navigation timeout of 15000 ms exceeded', elapsed_ms: 15004 } }]);
+  assert.match(formatVerifyReport(report).join('\n'), /navigation repeated: \[mobile\] the start page was opened a second time after: Navigation timeout of 15000 ms exceeded/);
+});
+
+test('undeclared-status summaries carry no query, fragment, or credential-shaped path segment', async () => {
+  const report = await runVerification({ project_id: 'club' }, normalizeVerifyFlow({ actions: [], viewports: ['desktop'] }), client([platformReport({
+    passed: false,
+    failed_requests: [{ url: `${ORIGIN}/api/share/eyJhbGciOi.eyJzdWIi.c2ln/view?token=secret#frag`, status: 403, method: 'GET', initiator: 'page' }],
+  })]));
+  assert.equal(report.undeclared_statuses[0].path, '/api/share/<redacted>/view');
+  assert.deepEqual(report.undeclared_statuses[0].declare, { path: '/api/share/<redacted>/view', status: 403 });
+  assert.doesNotMatch(report.verdict, /secret|frag|eyJ/);
 });
