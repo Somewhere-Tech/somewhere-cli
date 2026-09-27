@@ -110,6 +110,12 @@ export interface SignOutAction {
   error: string | null;
   signOut(): Promise<void>;
 }
+
+/** A sign-out the server has not confirmed; retry() calls it again. */
+export interface UnconfirmedSignOut {
+  pending: boolean;
+  retry(): void;
+}
 `;
 
 const AUTH_SERVICE = `import { AuthError, createSomewhereAuth } from '@somewhere-tech/sdk/auth';
@@ -130,7 +136,7 @@ export function authErrorMessage(reason: unknown): string {
 
 const AUTH_HOOKS = `import { useRef, useState } from 'react';
 import { useAuth, useAuthState as useSdkAuthState } from '@somewhere-tech/sdk/react';
-import type { AuthState, CredentialsForm, CredentialsMode, SignOutAction, User } from '../../types/auth';
+import type { AuthState, CredentialsForm, CredentialsMode, SignOutAction, UnconfirmedSignOut, User } from '../../types/auth';
 import { authErrorMessage, PASSWORD_MIN_LENGTH } from '../services/auth';
 
 // State and actions over the SDK's session status; no session store here.
@@ -225,6 +231,22 @@ export function useSignOut(): SignOutAction {
   }
 
   return { pending, error, signOut };
+}
+
+/** Non-null while the server has not confirmed the last sign-out: this
+ *  browser was signed out locally, but the server session may still exist. */
+export function useUnconfirmedSignOut(): UnconfirmedSignOut | null {
+  const auth = useAuth();
+  const session = useSdkAuthState();
+  const [pending, setPending] = useState(false);
+  if (!session.signOutUnconfirmed) return null;
+  return {
+    pending,
+    retry() {
+      setPending(true);
+      void auth.signOut().finally(() => setPending(false));
+    },
+  };
 }
 `;
 
@@ -659,13 +681,20 @@ export function useNotes(): NotesController {
 // ---------------------------------------------------------------------- pages
 // One set of pages for both UI modes: hooks in, typed values and callbacks out.
 
-const SIGN_IN_PAGE = `import { useCredentialsForm } from '../auth/hooks';
+const SIGN_IN_PAGE = `import { useCredentialsForm, useUnconfirmedSignOut } from '../auth/hooks';
 import { APP_NAME } from '../config';
 import { AuthCard } from '../ui/AuthCard';
+import { SignOutUnconfirmed } from '../ui/feedback';
 
 export function SignInPage() {
   const form = useCredentialsForm();
-  return <AuthCard appName={APP_NAME} form={form} />;
+  const unconfirmed = useUnconfirmedSignOut();
+  return (
+    <>
+      {unconfirmed ? <SignOutUnconfirmed pending={unconfirmed.pending} onRetry={unconfirmed.retry} /> : null}
+      <AuthCard appName={APP_NAME} form={form} />
+    </>
+  );
 }
 `;
 
@@ -784,6 +813,17 @@ interface SessionUnavailableProps {
   keepsWork: boolean;
   retrying: boolean;
   onRetry(): void;
+}
+
+export function SignOutUnconfirmed({ pending, onRetry }: { pending: boolean; onRetry(): void }) {
+  return (
+    <div className="banner" role="alert">
+      <p>We couldn't confirm sign-out with the server, so your session there may still be active.</p>
+      <button type="button" className="button button--quiet" onClick={onRetry} disabled={pending} aria-busy={pending}>
+        {pending ? 'Signing out…' : 'Sign out again'}
+      </button>
+    </div>
+  );
 }
 
 export function SessionUnavailable({ keepsWork, retrying, onRetry }: SessionUnavailableProps) {
@@ -991,6 +1031,15 @@ interface SessionUnavailableProps {
   keepsWork: boolean;
   retrying: boolean;
   onRetry(): void;
+}
+
+export function SignOutUnconfirmed({ pending, onRetry }: { pending: boolean; onRetry(): void }) {
+  return (
+    <div role="alert">
+      <p>We couldn't confirm sign-out with the server, so your session there may still be active.</p>
+      <button type="button" onClick={onRetry} disabled={pending}>{pending ? 'Signing out…' : 'Sign out again'}</button>
+    </div>
+  );
 }
 
 export function SessionUnavailable({ keepsWork, retrying, onRetry }: SessionUnavailableProps) {
@@ -1260,6 +1309,8 @@ button, input, textarea { font: inherit; color: inherit; }
 .loading { display: grid; place-content: center; justify-items: center; gap: var(--space-3); min-height: 100vh; color: var(--color-muted); }
 .unavailable { max-width: 380px; margin: 0 var(--space-4); color: var(--color-text); }
 .unavailable p { margin: 0; }
+.banner { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: center; padding: var(--space-3) var(--space-4); border-bottom: 1px solid var(--color-danger); background: var(--color-surface); color: var(--color-danger); }
+.banner p { margin: 0; }
 .spinner { width: 24px; height: 24px; border: 3px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
 @keyframes spin { to { transform: rotate(360deg); } }
 
