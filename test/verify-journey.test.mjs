@@ -91,7 +91,10 @@ test('a legitimate two-user journey runs in order, each actor in its own continu
 
   // Cleanup on success: exactly the two opened browsers are closed.
   assert.deepEqual(client.closes().map((call) => call.body), [{ session_id: 'vf-r1-alice' }, { session_id: 'vf-r1-bob' }]);
-  assert.deepEqual(result.cleanup, [{ actor: 'alice', closed: true }, { actor: 'bob', closed: true }]);
+  assert.deepEqual(result.cleanup, [{ actor: 'alice', status: 'closed' }, { actor: 'bob', status: 'closed' }]);
+  assert.equal(result.cleanup_confirmed, true);
+  assert.equal(result.limits.cleanup_budget_ms, 20_000, 'the cleanup budget is reported separately from the journey budget');
+  assert.ok(result.cleanup_ms >= 0);
   assert.equal(result.layout.length, 4, 'the overflow/tap-target line is reported for every segment');
   assert.match(result.layout[2].viewport, /alice #3 mobile/);
 });
@@ -186,8 +189,11 @@ test('a transport failure still closes the browsers; a close failure is reported
   const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r6' }).run();
   assert.equal(result.passed, false);
   assert.match(result.verdict, /socket hang up \[VERIFY_SEGMENT_FAILED\]$/);
-  assert.deepEqual(result.cleanup, [{ actor: 'alice', closed: true }, { actor: 'bob', closed: false, error: 'AUTHORITY_UNAVAILABLE' }]);
-  assert.match(formatVerifyJourneyReport(result).join('\n'), /bob not closed \(AUTHORITY_UNAVAILABLE; it expires within 3 minutes\)/);
+  assert.deepEqual(result.cleanup[0], { actor: 'alice', status: 'closed' });
+  assert.equal(result.cleanup[1].status, 'unconfirmed');
+  assert.match(result.cleanup[1].reason, /close failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 3 minutes/);
+  assert.equal(result.cleanup_confirmed, false, 'an unconfirmed close is never reported as clean');
+  assert.match(formatVerifyJourneyReport(result).join('\n'), /bob unconfirmed[\s\S]*bob: close failed \(AUTHORITY_UNAVAILABLE\)/);
 });
 
 test('the journey deadline stops before the next segment and cleans up', async () => {
@@ -195,7 +201,7 @@ test('the journey deadline stops before the next segment and cleans up', async (
   const client = fakeClient((_body, n) => { if (n === 2) clock += VERIFY_JOURNEY_LIMITS.deadline_ms + 1; return report(); });
   const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r7', now: () => clock }).run();
   assert.equal(result.passed, false);
-  assert.match(result.verdict, /^FAIL — segment 3 \(alice, mobile\): The journey passed its 10-minute limit/);
+  assert.match(result.verdict, /^FAIL — segment 3 \(alice, mobile\): The journey reached its 10-minute limit\. \[VERIFY_JOURNEY_DEADLINE\]$/);
   assert.equal(client.runs().length, 2);
   assert.equal(client.closes().length, 2);
 });
@@ -203,7 +209,10 @@ test('the journey deadline stops before the next segment and cleans up', async (
 test('closeAll is idempotent and only closes browsers the run opened', async () => {
   const client = fakeClient();
   const run = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r8' });
-  assert.deepEqual(await run.closeAll(), [], 'nothing opened, nothing closed');
+  assert.deepEqual((await run.closeAll()).cleanup, [], 'nothing opened, nothing closed');
+  assert.equal(client.calls.length, 0);
+  await assert.doesNotReject(run.run(), 'a closed run still returns a report');
+  assert.equal(client.runs().length, 0, 'once cleanup has started, no segment starts');
   const client2 = fakeClient((_body, n) => { if (n === 1) throw new CliApiError('BROWSER_SESSION_LIMIT', 'limit', 429); return report(); });
   const run2 = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client2, { runId: 'r9' });
   await run2.run();
@@ -282,6 +291,7 @@ test('--schema prints the machine-readable flow contract; --help carries a valid
 
 test('Ctrl-C during a journey closes every opened actor browser before exiting', async () => {
   const seen = [];
+  let heldBob = null;
   const server = createServer((req, res) => {
     let raw = '';
     req.on('data', (chunk) => { raw += chunk; });
@@ -289,9 +299,15 @@ test('Ctrl-C during a journey closes every opened actor browser before exiting',
       const body = JSON.parse(raw || '{}');
       seen.push(body);
       res.setHeader('Content-Type', 'application/json');
-      if (!body.project_id) { res.end(JSON.stringify({ ok: true, data: { session_id: body.session_id, closed: true } })); return; }
+      if (!body.project_id) {
+        res.end(JSON.stringify({ ok: true, data: { session_id: body.session_id, closed: true } }));
+        // Closing bob's browser ends his run, as on the platform: his call answers.
+        if (body.session_id.endsWith('-bob') && heldBob) { const answer = heldBob; heldBob = null; setTimeout(answer, 20); }
+        return;
+      }
       if (seen.filter((b) => b.project_id).length === 1) { res.end(JSON.stringify({ ok: true, data: report() })); return; }
-      // The second actor's segment hangs; the operator presses Ctrl-C.
+      // The second actor's segment is running when the operator presses Ctrl-C.
+      heldBob = () => { res.statusCode = 500; res.end(JSON.stringify({ ok: false, error: 'BROWSER_TEST_FAILED', message: 'the browser was closed' })); };
     });
   });
   await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
@@ -316,6 +332,225 @@ test('Ctrl-C during a journey closes every opened actor browser before exiting',
   rmSync(dir, { recursive: true, force: true });
   assert.equal(code, 130);
   const closes = seen.filter((b) => !b.project_id).map((b) => b.session_id).sort();
-  assert.equal(closes.length, 2, 'both opened browsers were closed');
-  assert.ok(closes[0].endsWith('-alice') && closes[1].endsWith('-bob'));
+  assert.equal(closes.length, 3, 'both opened browsers were closed, bob again after his call ended');
+  assert.ok(closes[0].endsWith('-alice') && closes[1].endsWith('-bob') && closes[2].endsWith('-bob'));
+  assert.equal(seen.filter((b) => b.project_id).length, 2, 'no segment started after Ctrl-C');
+  assert.match(stderr, /alice closed, bob (?:already )?closed/);
+});
+
+// ── Lifecycle: stop state, in-flight work, bounded concurrent cleanup ─────────
+
+/** A fake platform whose segment answers and close delays the test controls. */
+function controllableClient({ closeDelayMs = 0, closeFails = () => false, segment = () => report() } = {}) {
+  const events = [];
+  const held = [];
+  const client = {
+    events,
+    held,
+    runs: () => events.filter((e) => e.type === 'segment'),
+    closes: (actor) => events.filter((e) => e.type === 'close-start' && (!actor || e.session.endsWith(`-${actor}`))),
+    async call(_method, _path, body, _query, opts) {
+      if (!body.project_id) {
+        events.push({ type: 'close-start', session: body.session_id, at: Date.now() });
+        await new Promise((r) => setTimeout(r, closeDelayMs));
+        events.push({ type: 'close-end', session: body.session_id, at: Date.now() });
+        if (closeFails(body.session_id)) throw new CliApiError('AUTHORITY_UNAVAILABLE', 'try again', 503);
+        return { session_id: body.session_id, closed: true };
+      }
+      const n = client.runs().length + 1;
+      events.push({ type: 'segment', session: body.session_id, n, timeoutMs: opts?.timeoutMs, at: Date.now() });
+      return segment(body, n, opts, held);
+    },
+  };
+  return client;
+}
+
+function deferred() {
+  let resolve, reject;
+  const promise = new Promise((res, rej) => { resolve = res; reject = rej; });
+  return { promise, resolve, reject };
+}
+
+async function until(predicate, ms = 2000) {
+  const end = Date.now() + ms;
+  while (!predicate()) {
+    if (Date.now() > end) throw new Error('condition not reached');
+    await new Promise((r) => setTimeout(r, 5));
+  }
+}
+
+test('stop is synchronous: a segment that settles during cleanup starts nothing else, and its actor is closed again after it settles', async () => {
+  const bobCall = deferred();
+  const client = controllableClient({
+    closeDelayMs: 20,
+    segment: (_body, n) => (n === 2 ? bobCall.promise : report()),
+  });
+  const journeyRun = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l1' });
+  const running = journeyRun.run();
+  await until(() => client.runs().length === 2);
+  journeyRun.stop('VERIFY_INTERRUPTED', 'Stopped by SIGTERM.');
+  const cleaning = journeyRun.closeAll();
+  await until(() => client.closes().length === 2);
+  bobCall.resolve(report());
+  const bobSettledAt = Date.now();
+  const { cleanup } = await cleaning;
+  const result = await running;
+  assert.equal(client.runs().length, 2, 'the segment that settled during cleanup did not start segment 3');
+  assert.deepEqual(client.closes('alice').length, 1);
+  const bobCloses = client.closes('bob');
+  assert.equal(bobCloses.length, 2, 'bob is closed once at stop and once after his call settled');
+  assert.ok(bobCloses[1].at >= bobSettledAt, 'the second close follows the settlement');
+  assert.deepEqual(cleanup, [{ actor: 'alice', status: 'closed' }, { actor: 'bob', status: 'closed' }]);
+  assert.equal(result.passed, false);
+  assert.equal(result.segments[1].ran, true, 'the in-flight segment is reported as run');
+  assert.deepEqual(result.segments[2].error, { code: 'VERIFY_INTERRUPTED', message: 'Stopped by SIGTERM.' });
+  assert.match(result.verdict, /^FAIL — segment 3 \(alice, mobile\): Stopped by SIGTERM\. \[VERIFY_INTERRUPTED\]$/);
+});
+
+test('cleanup closes every opened browser concurrently under one budget', async () => {
+  const client = controllableClient({ closeDelayMs: 150 });
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l2' }).run();
+  const starts = client.events.filter((e) => e.type === 'close-start');
+  const firstEnd = client.events.find((e) => e.type === 'close-end');
+  assert.equal(starts.length, 2);
+  assert.ok(starts.every((e) => e.at <= firstEnd.at), 'both closes were in flight together, not one after another');
+  assert.ok(result.cleanup_ms < 280, `two 150 ms closes took ${result.cleanup_ms} ms`);
+});
+
+test('a call still running when the cleanup budget runs out is reported unconfirmed, and cleanup stays inside its budget', async () => {
+  const client = controllableClient({ segment: (_body, n) => (n === 2 ? new Promise(() => {}) : report()) });
+  const journeyRun = createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l3', cleanupBudgetMs: 300 });
+  void journeyRun.run();
+  await until(() => client.runs().length === 2);
+  journeyRun.stop('VERIFY_INTERRUPTED', 'Stopped by SIGTERM.');
+  const startedAt = Date.now();
+  const { cleanup, cleanup_ms } = await journeyRun.closeAll();
+  assert.ok(Date.now() - startedAt < 600, 'cleanup returned within its budget');
+  assert.ok(cleanup_ms <= 400);
+  assert.deepEqual(cleanup[0], { actor: 'alice', status: 'closed' });
+  assert.equal(cleanup[1].status, 'unconfirmed');
+  assert.match(cleanup[1].reason, /still running when cleanup ran out of time; the platform closes an idle browser within 3 minutes/);
+  assert.equal(client.runs().length, 2);
+});
+
+test('each segment waits at most the remaining journey budget; a budget-cut wait stops as the deadline and stays unconfirmed', async () => {
+  let clock = 0;
+  const client = controllableClient({
+    segment: (_body, n, opts) => {
+      if (n === 1) { clock = VERIFY_JOURNEY_LIMITS.deadline_ms - 5_000; return report(); }
+      assert.equal(opts.timeoutMs, 5_000, 'the second segment may wait only what is left of the journey');
+      throw new CliApiError('TIMEOUT', 'No response from POST /browser/test after 5s.', 0);
+    },
+  });
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, {
+    runId: 'l4', now: () => clock, recloseAfterAbandonedMs: 10,
+  }).run();
+  assert.equal(client.runs()[0].timeoutMs, VERIFY_JOURNEY_LIMITS.segment_timeout_ms);
+  assert.match(result.verdict, /^FAIL — segment 2 \(bob, desktop\): The journey reached its 10-minute limit\. Segment 2 was still running\. \[VERIFY_JOURNEY_DEADLINE\]$/);
+  assert.equal(client.runs().length, 2);
+  assert.equal(client.closes('bob').length, 2, 'the abandoned actor is closed again later, inside the cleanup budget');
+  assert.equal(result.cleanup[1].status, 'unconfirmed');
+  assert.match(result.cleanup[1].reason, /got no answer, so the platform may still start it/);
+  assert.equal(result.cleanup_confirmed, false);
+});
+
+test('a client timeout inside the journey budget keeps its code, and that actor is never reported closed', async () => {
+  const client = controllableClient({
+    segment: (_body, n) => { if (n === 2) throw new CliApiError('TIMEOUT', 'No response from POST /browser/test after 90s.', 0); return report(); },
+  });
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l5', recloseAfterAbandonedMs: 10 }).run();
+  assert.match(result.verdict, /after 90s\. \[TIMEOUT\]$/);
+  assert.deepEqual(result.cleanup.map((item) => item.status), ['closed', 'unconfirmed']);
+});
+
+/** Run the real CLI against a local fake platform; the handler decides answers. */
+async function cliAgainst(handler) {
+  const events = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', (chunk) => { raw += chunk; });
+    req.on('end', () => {
+      const body = JSON.parse(raw || '{}');
+      const reply = (status, payload) => {
+        events.push({ type: body.project_id ? 'segment-end' : 'close-end', session: body.session_id, at: Date.now() });
+        res.statusCode = status;
+        res.setHeader('Content-Type', 'application/json');
+        res.end(JSON.stringify(payload));
+      };
+      events.push({ type: body.project_id ? 'segment' : 'close', session: body.session_id, at: Date.now() });
+      handler(body, reply, events);
+    });
+  });
+  await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const { port } = server.address();
+  const dir = mkdtempSync(join(tmpdir(), 'sw-journey-term-'));
+  mkdirSync(join(dir, '.somewhere'), { recursive: true });
+  writeFileSync(join(dir, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_fixture' }));
+  const flowPath = join(dir, 'flow.json');
+  writeFileSync(flowPath, JSON.stringify(bookclub));
+  const child = spawn(process.execPath, [join(process.cwd(), 'dist/index.js'), 'verify', '--project', 'club', '--flow', flowPath, '--json'], {
+    env: { ...process.env, HOME: dir, USERPROFILE: dir, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1', SOMEWHERE_API_URL: `http://127.0.0.1:${port}/v1` },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  let stderr = '';
+  child.stderr.on('data', (chunk) => { stderr += chunk; });
+  const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+  const done = async () => {
+    const code = await exited;
+    server.closeAllConnections?.();
+    server.close();
+    rmSync(dir, { recursive: true, force: true });
+    return { code, stderr };
+  };
+  return { child, events, done };
+}
+
+test('SIGTERM mid-journey: no new segment starts, the in-flight actor is closed again after its call settles, exit 143', async () => {
+  const run = await cliAgainst((body, reply, events) => {
+    if (!body.project_id) {
+      reply(200, { ok: true, data: { session_id: body.session_id, closed: true } });
+      // Bob's held call settles only after cleanup has started.
+      if (body.session_id.endsWith('-bob') && events.release) { const release = events.release; events.release = null; setTimeout(release, 150); }
+      return;
+    }
+    const n = events.filter((e) => e.type === 'segment').length;
+    if (n === 1) { reply(200, { ok: true, data: report() }); return; }
+    events.release = () => reply(200, { ok: true, data: report() });
+  });
+  await until(() => run.events.filter((e) => e.type === 'segment').length === 2, 5000);
+  run.child.kill('SIGTERM');
+  const { code, stderr } = await run.done();
+  assert.equal(code, 143, stderr);
+  const segments = run.events.filter((e) => e.type === 'segment');
+  assert.equal(segments.length, 2, 'the segment that settled during cleanup did not start another');
+  const bobSettled = run.events.find((e) => e.type === 'segment-end' && e.session.endsWith('-bob'));
+  const bobCloses = run.events.filter((e) => e.type === 'close' && e.session.endsWith('-bob'));
+  assert.ok(bobSettled, 'bob\'s call settled during cleanup');
+  assert.equal(bobCloses.length, 2);
+  assert.ok(bobCloses[1].at >= bobSettled.at, 'bob was closed again after his call settled');
+  assert.equal(run.events.filter((e) => e.type === 'close' && e.session.endsWith('-alice')).length, 1);
+  assert.match(stderr, /browsers \(cleanup [\d.]+s of 20s budget\): alice closed, bob closed/);
+});
+
+test('SIGTERM with a failed close reports that browser as unconfirmed and still exits 143', async () => {
+  const run = await cliAgainst((body, reply, events) => {
+    if (!body.project_id) {
+      if (body.session_id.endsWith('-bob')) {
+        reply(503, { ok: false, error: 'AUTHORITY_UNAVAILABLE', message: 'try again' });
+        if (events.release) { const release = events.release; events.release = null; setTimeout(release, 50); }
+      } else {
+        reply(200, { ok: true, data: { session_id: body.session_id, closed: true } });
+      }
+      return;
+    }
+    const n = events.filter((e) => e.type === 'segment').length;
+    if (n === 1) { reply(200, { ok: true, data: report() }); return; }
+    events.release = () => reply(200, { ok: true, data: report() });
+  });
+  await until(() => run.events.filter((e) => e.type === 'segment').length === 2, 5000);
+  run.child.kill('SIGTERM');
+  const { code, stderr } = await run.done();
+  assert.equal(code, 143, stderr);
+  assert.match(stderr, /alice closed, bob unconfirmed/);
+  assert.match(stderr, /bob: close after its call finished failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 3 minutes/);
 });

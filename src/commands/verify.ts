@@ -461,6 +461,9 @@ export const VERIFY_JOURNEY_LIMITS = {
   total_actions: 120,
   deadline_ms: 10 * 60 * 1000,
   segment_timeout_ms: VERIFY_TIMEOUT_MS,
+  /** Separate from the journey budget: how long closing the actors' browsers
+   *  may take once the run stops, including waiting for a call in flight. */
+  cleanup_budget_ms: 20_000,
 } as const;
 
 export interface VerifyActor {
@@ -495,13 +498,30 @@ export interface VerifyJourneySegmentReport {
   error?: { code: string; message: string };
 }
 
+/**
+ * What closing one actor's browser achieved:
+ *  - closed: the platform closed it, after every call for that actor settled.
+ *  - already_closed: the platform had nothing open for it (a failed call closes
+ *    its own browser).
+ *  - unconfirmed: a close failed, or a call for that actor may still be running
+ *    on the platform, so a browser can exist that this run could not close. The
+ *    platform closes an idle browser within 3 minutes.
+ */
+export interface VerifyJourneyCleanup {
+  actor: string;
+  status: 'closed' | 'already_closed' | 'unconfirmed';
+  reason?: string;
+}
+
 export interface VerifyJourneyReport extends VerifyReport {
   mode: 'journey';
   actors: string[];
   segments: VerifyJourneySegmentReport[];
   browser_runs: number;
   limits: typeof VERIFY_JOURNEY_LIMITS;
-  cleanup: Array<{ actor: string; closed: boolean; error?: string }>;
+  cleanup: VerifyJourneyCleanup[];
+  cleanup_ms: number;
+  cleanup_confirmed: boolean;
 }
 
 const ACTOR_NAME = /^[a-z][a-z0-9_-]{0,15}$/;
@@ -610,41 +630,108 @@ export interface VerifyJourneyRun {
   /** The session id each actor uses in this run. */
   readonly sessions: Readonly<Record<string, string>>;
   run(): Promise<VerifyJourneyReport>;
-  /** Close every session this run opened. Idempotent; never throws. */
-  closeAll(): Promise<VerifyJourneyReport['cleanup']>;
+  /** Stop starting segments, now. Synchronous; the first reason wins. */
+  stop(code: string, message: string): void;
+  /** Stop, then close every browser this run opened, within the cleanup
+   *  budget. Idempotent; never throws; reports what it could not confirm. */
+  closeAll(): Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }>;
+}
+
+const UNCONFIRMED_BACKSTOP = 'the platform closes an idle browser within 3 minutes';
+/** A call the client stopped waiting for may still be admitted on the
+ *  platform; wait this long (inside the cleanup budget) before closing again. */
+const RECLOSE_AFTER_ABANDONED_MS = 5_000;
+
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<boolean> {
+  if (ms <= 0) return Promise.resolve(false);
+  return new Promise((resolveSettled) => {
+    const timer = setTimeout(() => resolveSettled(false), ms);
+    promise.then(() => { clearTimeout(timer); resolveSettled(true); }, () => { clearTimeout(timer); resolveSettled(true); });
+  });
 }
 
 export function createVerifyJourneyRun(
   target: VerificationTarget,
   journey: VerifyJourney,
   client: Pick<ApiClient, 'call'>,
-  opts: { runId?: string; now?: () => number } = {},
+  opts: { runId?: string; now?: () => number; cleanupBudgetMs?: number; recloseAfterAbandonedMs?: number } = {},
 ): VerifyJourneyRun {
   const now = opts.now ?? Date.now;
+  const cleanupBudgetMs = opts.cleanupBudgetMs ?? VERIFY_JOURNEY_LIMITS.cleanup_budget_ms;
+  const recloseAfterAbandonedMs = opts.recloseAfterAbandonedMs ?? RECLOSE_AFTER_ABANDONED_MS;
   const runId = opts.runId ?? randomBytes(4).toString('hex');
   const sessions: Record<string, string> = Object.fromEntries(
     Object.keys(journey.actors).map((name) => [name, `vf-${runId}-${name}`]),
   );
+  // Actors a call has been sent for (their browser may exist).
   const opened = new Set<string>();
-  let closing: Promise<VerifyJourneyReport['cleanup']> | null = null;
+  // Actors whose last call ended without a platform answer (client timeout or
+  // lost connection): the platform may still be running it.
+  const abandoned = new Set<string>();
+  // The one segment call in flight, if any.
+  let inFlight: { actor: string; settled: Promise<unknown> } | null = null;
+  let stopReason: { code: string; message: string } | null = null;
+  let closing: Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }> | null = null;
 
-  const closeAll = (): Promise<VerifyJourneyReport['cleanup']> => {
+  const stop = (code: string, message: string): void => {
+    stopReason ??= { code, message };
+  };
+
+  const closeOne = async (actor: string, budgetEnd: number): Promise<{ closed: boolean } | { error: string }> => {
+    const remaining = budgetEnd - now();
+    if (remaining <= 0) return { error: 'cleanup budget spent' };
+    try {
+      const result = await client.call<{ closed?: boolean }>('POST', '/browser/test', { session_id: sessions[actor] }, undefined, { timeoutMs: remaining });
+      return { closed: result?.closed === true };
+    } catch (cause) {
+      return { error: cause instanceof CliApiError ? cause.code : cause instanceof Error ? cause.message : String(cause) };
+    }
+  };
+
+  const closeAll = (): Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }> => {
+    // Set before anything is awaited, so a segment that settles while the
+    // browsers are closing cannot start another one.
+    stop('VERIFY_STOPPED', 'The run stopped to close its browsers.');
     closing ??= (async () => {
-      const results: VerifyJourneyReport['cleanup'] = [];
-      for (const actor of Object.keys(sessions).filter((name) => opened.has(name))) {
-        try {
-          const closed = await client.call<{ closed?: boolean }>('POST', '/browser/test', { session_id: sessions[actor] }, undefined, { timeoutMs: 15_000 });
-          // false = the platform had already closed it (a failed call closes its own browser).
-          results.push({ actor, closed: closed?.closed === true });
-        } catch (cause) {
-          results.push({
-            actor,
-            closed: false,
-            error: cause instanceof CliApiError ? cause.code : cause instanceof Error ? cause.message : String(cause),
-          });
+      const startedAt = now();
+      const budgetEnd = startedAt + cleanupBudgetMs;
+      const pending = inFlight;
+      const actors = [...opened];
+      // One concurrent pass: every opened browser at once, one shared budget.
+      const first = await Promise.all(actors.map(async (actor) => [actor, await closeOne(actor, budgetEnd)] as const));
+      const outcome = new Map<string, VerifyJourneyCleanup>();
+      for (const [actor, result] of first) {
+        outcome.set(actor, 'error' in result
+          ? { actor, status: 'unconfirmed', reason: `close failed (${result.error}); ${UNCONFIRMED_BACKSTOP}` }
+          : { actor, status: result.closed ? 'closed' : 'already_closed' });
+      }
+      // A call still in flight may create or reuse its browser after the close
+      // above. Wait for it inside the budget, then close that actor again.
+      if (pending) {
+        const settled = await settleWithin(pending.settled, budgetEnd - now());
+        if (!settled) {
+          outcome.set(pending.actor, { actor: pending.actor, status: 'unconfirmed', reason: `its call was still running when cleanup ran out of time; ${UNCONFIRMED_BACKSTOP}` });
+        } else if (!abandoned.has(pending.actor)) {
+          const again = await closeOne(pending.actor, budgetEnd);
+          const earlier = outcome.get(pending.actor);
+          outcome.set(pending.actor, 'error' in again
+            ? { actor: pending.actor, status: 'unconfirmed', reason: `close after its call finished failed (${again.error}); ${UNCONFIRMED_BACKSTOP}` }
+            : { actor: pending.actor, status: again.closed || earlier?.status === 'closed' ? 'closed' : 'already_closed' });
         }
       }
-      return results;
+      // A call the client gave up on has no answer to wait for. Close once more
+      // a little later (inside the budget) and say plainly it is unconfirmed.
+      for (const actor of actors.filter((name) => abandoned.has(name))) {
+        const waitMs = Math.min(recloseAfterAbandonedMs, budgetEnd - now());
+        if (waitMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, waitMs));
+        const again = await closeOne(actor, budgetEnd);
+        outcome.set(actor, {
+          actor,
+          status: 'unconfirmed',
+          reason: `its call got no answer, so the platform may still start it${'error' in again ? ` (the second close failed: ${again.error})` : ''}; ${UNCONFIRMED_BACKSTOP}`,
+        });
+      }
+      return { cleanup: actors.map((actor) => outcome.get(actor)!), cleanup_ms: now() - startedAt };
     })();
     return closing;
   };
@@ -657,12 +744,14 @@ export function createVerifyJourneyRun(
       throw new Error('Multi-user journeys run on the deployed app. Deploy first, then run somewhere verify --project <project> --flow <file>.');
     }
     const startedAt = now();
+    const deadlineAt = startedAt + VERIFY_JOURNEY_LIMITS.deadline_ms;
     const segments: VerifyJourneySegmentReport[] = [];
     const runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions: BrowserSequenceAction[] }> = [];
     const started = new Set<string>();
     // 'report': the segment ran and its own report failed (the step verdict
     // says why). 'error': the segment could not run or could not continue.
     let stopped: { kind: 'report' | 'error'; segment: number; as: string; viewport: string; code: string; message: string } | null = null;
+    const deadlineMessage = `The journey reached its ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000}-minute limit.`;
     try {
       for (const [index, segment] of journey.journey.entries()) {
         const viewport = resolveViewport(segment.viewport);
@@ -675,11 +764,11 @@ export function createVerifyJourneyRun(
           ran: false,
           passed: false,
         };
+        if (!stopped && !stopReason && now() >= deadlineAt) stop('VERIFY_JOURNEY_DEADLINE', deadlineMessage);
         if (stopped) { segments.push(base); continue; }
-        if (now() - startedAt > VERIFY_JOURNEY_LIMITS.deadline_ms) {
-          const message = `The journey passed its ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000}-minute limit before this segment started.`;
-          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_JOURNEY_DEADLINE', message };
-          segments.push({ ...base, error: { code: stopped.code, message } });
+        if (stopReason) {
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, ...stopReason };
+          segments.push({ ...base, error: { ...stopReason } });
           continue;
         }
         const actor = journey.actors[segment.as];
@@ -702,18 +791,30 @@ export function createVerifyJourneyRun(
           ...(first && actor.cookies ? { cookies: actor.cookies } : {}),
           ...(first && actor.headers ? { headers: actor.headers } : {}),
         };
+        // Each wait is capped by what is left of the journey budget.
+        const remaining = deadlineAt - now();
+        const waitMs = Math.min(VERIFY_JOURNEY_LIMITS.segment_timeout_ms, remaining);
         opened.add(segment.as);
         started.add(segment.as);
+        abandoned.delete(segment.as);
+        const call = client.call<BrowserResult>('POST', '/browser/test', body, undefined, { timeoutMs: waitMs });
+        inFlight = { actor: segment.as, settled: call };
         let report: BrowserResult;
         try {
-          report = await client.call<BrowserResult>('POST', '/browser/test', body, undefined, { timeoutMs: VERIFY_JOURNEY_LIMITS.segment_timeout_ms });
+          report = await call;
         } catch (cause) {
           const code = cause instanceof CliApiError ? cause.code : 'VERIFY_SEGMENT_FAILED';
           const message = cause instanceof Error ? cause.message : String(cause);
-          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code, message };
+          if (code === 'TIMEOUT' || code === 'NETWORK_ERROR') abandoned.add(segment.as);
+          const budgetCut = code === 'TIMEOUT' && waitMs < VERIFY_JOURNEY_LIMITS.segment_timeout_ms;
+          const reported = budgetCut ? { code: 'VERIFY_JOURNEY_DEADLINE', message: `${deadlineMessage} Segment ${index + 1} was still running.` } : { code, message };
+          if (budgetCut) stop(reported.code, reported.message);
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, ...reported };
           // A refusal (limit, authority, validation) happens before a browser runs.
-          segments.push({ ...base, error: { code, message } });
+          segments.push({ ...base, error: reported });
           continue;
+        } finally {
+          inFlight = null;
         }
         runs.push({ viewport: { ...viewport, label }, report, actions });
         // A continued actor whose browser was reaped would carry on signed out
@@ -742,7 +843,7 @@ export function createVerifyJourneyRun(
     } else {
       verdict = `PASS — ${journey.journey.length} segment${journey.journey.length === 1 ? '' : 's'} by ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')}) passed; page, console, and network healthy.`;
     }
-    const cleanup = await closeAll();
+    const { cleanup, cleanup_ms } = await closeAll();
     return {
       ...shaped,
       passed,
@@ -753,10 +854,12 @@ export function createVerifyJourneyRun(
       browser_runs: segments.filter((segment) => segment.ran).length,
       limits: VERIFY_JOURNEY_LIMITS,
       cleanup,
+      cleanup_ms,
+      cleanup_confirmed: cleanup.every((item) => item.status !== 'unconfirmed'),
     };
   };
 
-  return { sessions, run, closeAll };
+  return { sessions, run, stop, closeAll };
 }
 
 /** The flow file contract, for agents: `somewhere verify --schema`. */
@@ -851,10 +954,14 @@ export function formatVerifyJourneyReport(report: VerifyJourneyReport): string[]
     const mark = !segment.ran && !segment.error ? dim('not run') : segment.passed ? green('✓') : red('✗');
     return `segment ${segment.segment} ${mark} ${segment.as} [${segment.viewport}]${segment.path ? ` ${segment.path}` : ''}${segment.error ? ` ${dim(`— ${segment.error.code}`)}` : ''}`;
   });
-  const cleanup = report.cleanup.length
-    ? `browsers closed: ${report.cleanup.map((item) => `${item.actor} ${item.closed ? 'closed' : item.error ? `not closed (${item.error}; it expires within 3 minutes)` : 'already closed'}`).join(', ')}`
-    : 'browsers closed: none were opened';
-  return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}`, cleanup];
+  return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}`, ...formatJourneyCleanup(report.cleanup, report.cleanup_ms)];
+}
+
+export function formatJourneyCleanup(cleanup: VerifyJourneyCleanup[], cleanupMs: number): string[] {
+  if (!cleanup.length) return ['browsers: none were opened'];
+  const lines = [`browsers (cleanup ${Math.round(cleanupMs / 100) / 10}s of ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000}s budget): ${cleanup.map((item) => `${item.actor} ${item.status.replace('_', ' ')}`).join(', ')}`];
+  for (const item of cleanup) if (item.status === 'unconfirmed' && item.reason) lines.push(`  ${item.actor}: ${item.reason}`);
+  return lines;
 }
 
 export function registerVerify(program: Command): void {
@@ -903,8 +1010,12 @@ Several users in one run (--project required; each actor is its own browser):
 Segments run in order; a later segment for the same actor continues in that
 actor's browser (path becomes a goto). Limits: ${VERIFY_JOURNEY_LIMITS.actors} actors, ${VERIFY_JOURNEY_LIMITS.segments} segments,
 ${VERIFY_JOURNEY_LIMITS.actions_per_segment} actions per segment, ${VERIFY_JOURNEY_LIMITS.total_actions} in total, ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000} minutes. Each segment is one browser
-run against your plan's browser limits. Actor browsers are closed when the run
-ends. Print the full flow schema with: somewhere verify --schema
+run against your plan's browser limits. When the run ends or is interrupted,
+every actor browser is closed within ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000} seconds; any close that cannot be
+confirmed is reported, and the platform closes idle browsers within 3 minutes.
+Several users need a claimed account and a CLI login approved for all your
+projects: a login approved for "Only these projects" cannot open named browsers
+(SESSION_SCOPE_FORBIDDEN). Print the full flow schema with: somewhere verify --schema
 `)
     .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean; schema?: boolean }) => {
       if (opts.schema) {
@@ -945,9 +1056,16 @@ ends. Print the full flow schema with: somewhere verify --schema
           }
           if (!client) client = new ApiClient(getToken());
           const journeyRun = createVerifyJourneyRun({ ...(project ? { project_id: project } : {}), ...(url ? { url } : {}) }, input.journey, client);
-          // Ctrl-C or a terminating signal still closes every actor's browser.
+          // Ctrl-C or a terminating signal: stop starting segments at once, then
+          // close every opened browser within the cleanup budget and say what
+          // could not be confirmed.
           const onSignal = (signal: NodeJS.Signals) => {
-            void journeyRun.closeAll().finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+            journeyRun.stop('VERIFY_INTERRUPTED', `Stopped by ${signal}.`);
+            void journeyRun.closeAll()
+              .then(({ cleanup, cleanup_ms }) => {
+                for (const line of formatJourneyCleanup(cleanup, cleanup_ms)) process.stderr.write(`${line}\n`);
+              })
+              .finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
           };
           process.once('SIGINT', onSignal);
           process.once('SIGTERM', onSignal);
