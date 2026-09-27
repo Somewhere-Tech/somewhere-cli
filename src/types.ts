@@ -76,3 +76,27 @@ export interface ApiSuccess<T = unknown> {
 }
 
 export type ApiResponse<T = unknown> = ApiSuccess<T> | ApiError;
+
+export type EnvScope = 'all' | 'dev' | 'prod';
+export type EnvVisibility = 'server' | 'public';
+
+export interface EnvKey {
+  key: string;
+  scope: EnvScope;
+  visibility: EnvVisibility;
+  provider: string | null;
+  purpose: string | null;
+  server_reference: string;
+  browser_reference: string | null;
+  browser_guidance: string | null;
+  exposure_eligible: boolean;
+  browser_exposed: boolean;
+  created_at: string;
+}
+
+export interface EnvSetResult extends Omit<EnvKey, 'created_at'> {
+  project_id: string;
+  set: true;
+  requires_deploy: boolean;
+  warnings?: string[];
+}

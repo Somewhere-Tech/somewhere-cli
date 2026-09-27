@@ -6,6 +6,7 @@ import { ApiClient } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { buildEnvTemplate } from '../lib/envfile-write.js';
 import { dim, error, info, printJson, success, teal, warn } from '../lib/output.js';
+import type { EnvKey, EnvScope, EnvSetResult } from '../types.js';
 
 function resolveProjectId(explicit?: string): string {
   if (explicit) return explicit;
@@ -32,10 +33,7 @@ export function registerEnv(program: Command) {
       const client = new ApiClient(getToken());
       const pid = resolveProjectId(opts.project);
       try {
-        const result = await client.call<{
-          keys?: Array<{ key: string; created_at?: string }>;
-          vars?: Array<{ key: string; created_at?: string }>;
-        }>('GET', '/env', undefined, { project_id: pid });
+        const result = await client.call<{ keys?: EnvKey[]; vars?: EnvKey[] }>('GET', '/env', undefined, { project_id: pid });
 
         if (opts.json) {
           printJson(result);
@@ -48,7 +46,11 @@ export function registerEnv(program: Command) {
           return;
         }
         for (const v of vars) {
-          console.log(`  ${teal(v.key)}`);
+          console.log(`  ${teal(v.key)}  ${dim(`${v.scope ?? 'all'} · ${v.visibility === 'public' ? 'public' : 'server-only'}`)}`);
+          if (v.provider || v.purpose) info(dim([v.provider, v.purpose].filter(Boolean).join(' · ')));
+          if (v.server_reference) info(`Server: ${v.server_reference}`);
+          if (v.browser_reference) info(`Browser: ${v.browser_reference}`);
+          if (v.browser_guidance) info(dim(v.browser_guidance));
         }
       } catch (err) {
         error(err instanceof Error ? err.message : String(err), err);
@@ -128,18 +130,61 @@ export function registerEnv(program: Command) {
     });
 
   env
-    .command('set <key> <value>')
-    .description('Set an environment variable')
+    .command('set <key> [value]')
+    .description('Set an environment value; use --stdin to keep it out of shell history')
     .option('--project <id>', 'Project ID')
+    .option('--stdin', 'Read the value from stdin (removes one final line ending)')
+    .option('--public', 'Explicitly allow browser exposure for a VITE_/REACT_APP_ name')
+    .option('--private', 'Keep this value server-only')
+    .option('--scope <scope>', 'Environment: all, dev, or prod (default: all)')
+    .option('--provider <name>', 'Optional provider label (max 64 characters)')
+    .option('--purpose <text>', 'Optional purpose description (max 240 characters)')
     .option('--json', 'Print the raw env response as JSON')
-    .action(async (key: string, value: string, opts) => {
+    .action(async (key: string, positionalValue: string | undefined, opts: {
+      project?: string; stdin?: boolean; public?: boolean; private?: boolean;
+      scope?: string; provider?: string; purpose?: string; json?: boolean;
+    }) => {
+      if (opts.public && opts.private) {
+        error('--public and --private cannot be used together.');
+        process.exit(1);
+      }
+      if (opts.stdin && positionalValue !== undefined) {
+        error('Pass either a positional value or --stdin, not both.');
+        process.exit(1);
+      }
+      if (!opts.stdin && positionalValue === undefined) {
+        error('Pass a value or use --stdin.');
+        process.exit(1);
+      }
+      if (opts.stdin && process.stdin.isTTY) {
+        error('Pipe a value into --stdin.');
+        process.exit(1);
+      }
+      if (opts.scope && !['all', 'dev', 'prod'].includes(opts.scope)) {
+        error('--scope must be all, dev, or prod.');
+        process.exit(1);
+      }
+      if (opts.provider && opts.provider.length > 64) {
+        error('--provider must be at most 64 characters.');
+        process.exit(1);
+      }
+      if (opts.purpose && opts.purpose.length > 240) {
+        error('--purpose must be at most 240 characters.');
+        process.exit(1);
+      }
+      const value = opts.stdin ? readFileSync(0, 'utf8').replace(/\r?\n$/, '') : positionalValue!;
       const client = new ApiClient(getToken());
       const pid = resolveProjectId(opts.project);
       try {
-        const result = await client.call<{ warnings?: unknown }>('POST', '/env', {
+        const result = await client.call<EnvSetResult>('POST', '/env', {
           project_id: pid,
           key,
           value,
+          ...(opts.scope ? { scope: opts.scope as EnvScope } : {}),
+          ...(opts.public ? { public: true } : {}),
+          ...(opts.private ? { public: false } : {}),
+          ...(opts.provider !== undefined ? { provider: opts.provider } : {}),
+          ...(opts.purpose !== undefined ? { purpose: opts.purpose } : {}),
         });
         if (opts.json) {
           printJson(result);
@@ -147,9 +192,11 @@ export function registerEnv(program: Command) {
         }
         // The platform does not say whether the key already existed, so "set"
         // is the word that is true either way.
-        success(`${key} set`);
-        // The platform's own warnings — a VITE_ value becoming public browser
-        // code — used to reach --json only.
+        success(`${key} set${result.visibility ? ` (${result.visibility === 'public' ? 'public' : 'server-only'}, ${result.scope})` : ''}`);
+        if (result.server_reference) info(`Server: ${result.server_reference}`);
+        if (result.browser_reference) info(`Browser: ${result.browser_reference}`);
+        if (result.browser_guidance) info(dim(result.browser_guidance));
+        if (result.requires_deploy) info(dim('Deploy again for this change to reach your app.'));
         const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
         for (const w of warnings) if (typeof w === 'string') warn(w);
       } catch (err) {

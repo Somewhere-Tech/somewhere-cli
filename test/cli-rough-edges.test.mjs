@@ -15,7 +15,7 @@ import { relayIpv6Loopback } from '../dist/lib/frontend-dev.js';
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
 
-function run(args, { cwd, env }) {
+function run(args, { cwd, env, stdin }) {
   return new Promise((resolvePromise) => {
     const child = spawn(process.execPath, [distIndex, ...args], {
       cwd,
@@ -25,6 +25,7 @@ function run(args, { cwd, env }) {
     let stderr = '';
     child.stdout.on('data', (c) => (stdout += c));
     child.stderr.on('data', (c) => (stderr += c));
+    if (stdin !== undefined) child.stdin.end(stdin);
     child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
   });
 }
@@ -88,10 +89,20 @@ async function withPlatform(fn) {
         return;
       }
       if (req.method === 'POST' && url.pathname === '/v1/env') {
-        const warnings = parsed.key.startsWith('VITE_')
-          ? [`${parsed.key} starts with VITE_/REACT_APP_, so it is compiled into your public browser code where any visitor can read it.`]
-          : undefined;
-        sendJson(res, 201, { ok: true, data: { key: parsed.key, set: true, ...(warnings ? { warnings } : {}) } });
+        const isPublic = parsed.public === true;
+        const browserReference = isPublic && parsed.key.startsWith('VITE_') ? `import.meta.env.${parsed.key}` : null;
+        sendJson(res, 201, { ok: true, data: {
+          key: parsed.key, set: true, scope: parsed.scope ?? 'all', visibility: isPublic ? 'public' : 'server',
+          server_reference: `sw.env.${parsed.key}`, browser_reference: browserReference, requires_deploy: true,
+        } });
+        return;
+      }
+      if (req.method === 'GET' && url.pathname === '/v1/env') {
+        sendJson(res, 200, { ok: true, data: { project_id: 'proj_linked', keys: [{
+          key: 'VITE_PUBLIC_URL', scope: 'prod', visibility: 'public', provider: 'Example', purpose: 'Browser endpoint',
+          server_reference: 'sw.env.VITE_PUBLIC_URL', browser_reference: 'import.meta.env.VITE_PUBLIC_URL',
+          browser_guidance: null, exposure_eligible: true, browser_exposed: true, created_at: '2026-09-27T00:00:00Z',
+        }] } });
         return;
       }
       if (req.method === 'POST' && url.pathname === '/run') {
@@ -156,19 +167,59 @@ test('usage with no argument reports the linked project; outside one, the accoun
   });
 });
 
-test('env set says "set" and prints the platform warning without --json', async () => {
-  await withPlatform(async ({ env }) => {
+test('env set defaults to server-only and prints effective visibility and references', async () => {
+  await withPlatform(async ({ calls, env }) => {
     const cwd = linkedDir();
-    const publicKey = await run(['env', 'set', 'VITE_API_BASE', 'https://example.com'], { cwd, env });
+    const privateKey = await run(['env', 'set', 'VITE_API_BASE', 'https://example.com'], { cwd, env });
+    assert.equal(privateKey.status, 0, privateKey.stderr);
+    assert.match(privateKey.stdout, /VITE_API_BASE set \(server-only, all\)/);
+    assert.doesNotMatch(privateKey.stdout, /Browser:/);
+    assert.equal(calls.at(-1).body.public, undefined);
+
+    const publicKey = await run(['env', 'set', 'VITE_API_BASE', 'https://example.com', '--public', '--scope', 'prod'], { cwd, env });
     assert.equal(publicKey.status, 0, publicKey.stderr);
-    assert.match(publicKey.stdout, /VITE_API_BASE set/);
-    assert.doesNotMatch(publicKey.stdout, /updated/);
-    assert.match(publicKey.stdout, /compiled into your public browser code/);
+    assert.match(publicKey.stdout, /VITE_API_BASE set \(public, prod\)/);
+    assert.match(publicKey.stdout, /Browser: import\.meta\.env\.VITE_API_BASE/);
+    assert.match(publicKey.stdout, /Deploy again/);
+    assert.deepEqual({ public: calls.at(-1).body.public, scope: calls.at(-1).body.scope }, { public: true, scope: 'prod' });
 
     const serverKey = await run(['env', 'set', 'STRIPE_KEY', 'sk_test_x'], { cwd, env });
     assert.equal(serverKey.status, 0, serverKey.stderr);
     assert.match(serverKey.stdout, /STRIPE_KEY set/);
-    assert.doesNotMatch(serverKey.stdout, /public browser code/);
+    assert.match(serverKey.stdout, /server-only/);
+  });
+});
+
+test('env set reads stdin without echoing it and rejects conflicting input or visibility flags', async () => {
+  await withPlatform(async ({ calls, env }) => {
+    const cwd = linkedDir();
+    const value = 'a-secret-value-for-test';
+    const piped = await run(['env', 'set', 'SERVICE_KEY', '--stdin', '--private', '--provider', 'Example', '--purpose', 'Server requests', '--json'], { cwd, env, stdin: `${value}\n` });
+    assert.equal(piped.status, 0, piped.stderr);
+    assert.equal(calls.at(-1).body.value, value);
+    assert.deepEqual({ public: calls.at(-1).body.public, provider: calls.at(-1).body.provider, purpose: calls.at(-1).body.purpose }, { public: false, provider: 'Example', purpose: 'Server requests' });
+    assert.doesNotMatch(piped.stdout + piped.stderr, /a-secret-value-for-test/);
+
+    const before = calls.length;
+    const conflictingVisibility = await run(['env', 'set', 'SERVICE_KEY', value, '--public', '--private'], { cwd, env });
+    assert.notEqual(conflictingVisibility.status, 0);
+    assert.equal(calls.length, before);
+    const conflictingInput = await run(['env', 'set', 'SERVICE_KEY', value, '--stdin'], { cwd, env, stdin: 'another-secret' });
+    assert.notEqual(conflictingInput.status, 0);
+    assert.equal(calls.length, before);
+    assert.doesNotMatch(conflictingVisibility.stdout + conflictingVisibility.stderr + conflictingInput.stdout + conflictingInput.stderr, /a-secret-value-for-test|another-secret/);
+  });
+});
+
+test('env list shows configuration and exact references without values', async () => {
+  await withPlatform(async ({ env }) => {
+    const listed = await run(['env', 'list'], { cwd: linkedDir(), env });
+    assert.equal(listed.status, 0, listed.stderr);
+    assert.match(listed.stdout, /VITE_PUBLIC_URL\s+prod · public/);
+    assert.match(listed.stdout, /Example · Browser endpoint/);
+    assert.match(listed.stdout, /Server: sw\.env\.VITE_PUBLIC_URL/);
+    assert.match(listed.stdout, /Browser: import\.meta\.env\.VITE_PUBLIC_URL/);
+    assert.doesNotMatch(listed.stdout, /value=/);
   });
 });
 
