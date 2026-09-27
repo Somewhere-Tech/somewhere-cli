@@ -269,7 +269,7 @@ export function runTypecheck(
           ...parsed.files,
           relative(projectDir, declaredData.declarationPath),
           ...(declaredData.filesDeclarationPath ? [relative(projectDir, declaredData.filesDeclarationPath)] : []),
-          relative(projectDir, declaredData.schemaPath),
+          ...(declaredData.schemaPath ? [relative(projectDir, declaredData.schemaPath)] : []),
         ])],
         include: [], exclude: [],
       }));

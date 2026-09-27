@@ -335,7 +335,8 @@ test('every combination typechecks against the SDK and the generated somewhere:d
     writeFileSync(join(typesDir, 'index.d.ts'), CONTRACT_TYPES);
     const result = await runTypecheck(dir);
     assert.equal(result.ok, true, `${features}/${ui}\n${result.raw}`);
-    assert.equal(existsSync(join(dir, 'src/__somewhere_data.d.ts')), features.includes('private-data'));
+    // Runtime types are always generated; somewhere:data only with a schema.
+    assert.equal(/declare module "somewhere:data"/.test(readFileSync(join(dir, 'src/__somewhere_data.d.ts'), 'utf8')), features.includes('private-data'));
 
     if (features.includes('private-data')) {
       // Control: the generated declaration is what types the service.

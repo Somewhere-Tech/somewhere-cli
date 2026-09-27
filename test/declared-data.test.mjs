@@ -185,11 +185,15 @@ test('imported DSL and changed schema regenerate the actual field types before c
   assert.notEqual(prepareDeclaredData(root).client.contract_digest, oldDigest);
 });
 
-test('no schema remains untouched while unresolved somewhere:data is never filtered away', async t => {
+test('no schema declares runtime types only, and unresolved somewhere:data is never filtered away', async t => {
   const root = fixture(t);
   rmSync(join(root, 'db/schema.ts'));
-  assert.equal(prepareDeclaredData(root), undefined);
-  assert.equal(existsSync(join(root, 'src', DATA_DECLARATION_FILE)), false);
+  const prepared = prepareDeclaredData(root);
+  assert.equal(prepared.client, undefined);
+  assert.equal(prepared.schemaPath, undefined);
+  const declaration = readFileSync(join(root, 'src', DATA_DECLARATION_FILE), 'utf8');
+  assert.match(declaration, /runtime types only/);
+  assert.doesNotMatch(declaration, /declare module "somewhere:data"|declare module 'somewhere\/db'/);
   assert.equal((await check(root)).ok, true);
   writeFileSync(join(root, 'src/main.ts'), `import { data } from 'somewhere:data'; data.notes.list();`);
   const missing = await check(root);

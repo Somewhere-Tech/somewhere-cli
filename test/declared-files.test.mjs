@@ -144,7 +144,7 @@ test('removing the files block or the schema removes the stale generated declara
   prepareDeclaredData(root);
   assert.equal(existsSync(path), true);
   rmSync(join(root, 'db/schema.ts'));
-  assert.equal(prepareDeclaredData(root), undefined);
+  assert.equal(prepareDeclaredData(root).filesDeclarationPath, undefined);
   assert.equal(existsSync(path), false);
 });
 
