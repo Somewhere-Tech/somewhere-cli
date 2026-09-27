@@ -7,6 +7,7 @@ import {
   mkdirSync,
   openSync,
   readFileSync,
+  realpathSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -96,8 +97,10 @@ export function clearConfig(): void {
  * reason this is a separate file: config.json keeps the account login
  * untouched, and `somewhere login` / `logout` / `whoami` never read this one.
  *
- * It carries the temp project too, so a second `--temporary` deploy from the
- * same directory redeploys the SAME throwaway instead of minting another. The
+ * It carries the temp projects too, one per project root, so a second
+ * `--temporary` deploy from the same directory redeploys the SAME throwaway
+ * instead of minting another, and a deploy from an unrelated directory gets its
+ * own throwaway instead of replacing that one (pfb_29428f76480e). The
  * project link is deliberately NOT written into the directory's
  * `.somewhere.json`: that file is the developer's own link, and a throwaway
  * their account does not own does not belong in it.
@@ -109,8 +112,34 @@ export interface StoredTempSession {
   token: string;
   temp_expires_at?: string;
   claim_url?: string;
-  /** The auto-created throwaway project this session already deployed to. */
+  /** Throwaway projects this session auto-created, keyed by the canonical
+   *  project root they were deployed from (see canonicalProjectRoot). */
+  projects?: Record<string, ProjectConfig>;
+  /** Written by CLI <= 0.35.2 without recording its directory. Kept so the
+   *  record is not lost, but never used as a deploy target: an unrelated
+   *  directory must not silently adopt it. */
   project?: ProjectConfig;
+}
+
+/** The directory a temporary throwaway belongs to: the deploy target with
+ *  symlinks and `..` resolved, so every spelling of one directory is one root.
+ *  Like project discovery (`.somewhere.json` is read from the target itself),
+ *  a subdirectory is its own root. */
+export function canonicalProjectRoot(dir: string): string {
+  const absolute = resolve(dir);
+  try {
+    return realpathSync.native(absolute);
+  } catch {
+    return absolute;
+  }
+}
+
+export function tempProjectFor(session: StoredTempSession | null, root: string): ProjectConfig | undefined {
+  return session?.projects?.[root];
+}
+
+export function withTempProject(session: StoredTempSession, root: string, project: ProjectConfig): StoredTempSession {
+  return { ...session, projects: { ...session.projects, [root]: project } };
 }
 
 const TEMP_SESSION_PATH = join(CONFIG_DIR, 'temp-session.json');

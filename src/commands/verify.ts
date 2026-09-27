@@ -3,7 +3,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Command } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
-import { getToken, loadConfig, loadProjectConfig, loadTempSession } from '../lib/config.js';
+import { canonicalProjectRoot, getToken, loadConfig, loadProjectConfig, loadTempSession, tempProjectFor } from '../lib/config.js';
 import {
   normalizeBrowserActions,
   type BrowserRequestExpectationResult,
@@ -1143,10 +1143,13 @@ projects: a login approved for "Only these projects" cannot open named browsers
           if (!project && client) project = await linkedVerifyTarget(url, client, linkedProjectId);
           if (!project) {
             const temporary = loadTempSession();
-            if (temporary?.project?.project_id && temporary.token
+            // This directory's throwaway first; the unscoped one an older CLI
+            // recorded is only a candidate the URL must still match.
+            const temporaryProject = tempProjectFor(temporary, canonicalProjectRoot(process.cwd())) ?? temporary?.project;
+            if (temporaryProject?.project_id && temporary?.token
                 && (!temporary.temp_expires_at || Date.parse(temporary.temp_expires_at) > Date.now())) {
               const tempClient = new ApiClient(temporary.token);
-              const tempProject = await linkedVerifyTarget(url, tempClient, temporary.project.project_id);
+              const tempProject = await linkedVerifyTarget(url, tempClient, temporaryProject.project_id);
               if (tempProject) {
                 project = tempProject;
                 client = tempClient;

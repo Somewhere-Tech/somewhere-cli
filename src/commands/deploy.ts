@@ -18,6 +18,9 @@ import {
   saveProjectDeployState,
   loadTempSession,
   saveTempSession,
+  canonicalProjectRoot,
+  tempProjectFor,
+  withTempProject,
   type ProjectConfigEntry,
   type StoredTempSession,
 } from '../lib/config.js';
@@ -448,6 +451,9 @@ export function registerDeploy(program: Command) {
         opts.temporary && storedConfig?.token && !storedConfig.temporary,
       );
       let sideCar: StoredTempSession | null = besideRealLogin ? loadTempSession() : null;
+      // The throwaway minted beside a real login belongs to this project root
+      // only; another directory gets its own (pfb_29428f76480e).
+      const projectRoot = canonicalProjectRoot(targetDir);
 
       let token: string;
       if (useTemporary) {
@@ -548,11 +554,13 @@ export function registerDeploy(program: Command) {
         if (linkedProjectEntry) {
           projectId = linkedProjectEntry.config.project_id;
           deployStateEntry = linkedProjectEntry;
-        } else if (besideRealLogin && sideCar?.project) {
-          // Same temporary session, same throwaway — a re-run redeploys it
-          // instead of littering the account's namespace with another.
-          targetProjectConfig = sideCar.project;
-          projectId = sideCar.project.project_id;
+        } else if (besideRealLogin && tempProjectFor(sideCar, projectRoot)) {
+          // Same temporary session, same project root, same throwaway — a
+          // re-run redeploys it instead of creating another. A throwaway from
+          // a different root (or the unscoped one older CLIs recorded) is
+          // never picked up here.
+          targetProjectConfig = tempProjectFor(sideCar, projectRoot)!;
+          projectId = targetProjectConfig.project_id;
         } else if (tempSession) {
           // Nothing linked that this credential can write — auto-create the
           // project so a temporary deploy stays a single command.
@@ -575,7 +583,7 @@ export function registerDeploy(program: Command) {
               // directory's `.somewhere.json` — that file is the developer's
               // own link and a throwaway their account does not own has no
               // business overwriting it.
-              sideCar = { ...sideCar, project: targetProjectConfig };
+              sideCar = withTempProject(sideCar, projectRoot, targetProjectConfig);
               saveTempSession(sideCar);
             } else {
               saveProjectConfig(targetDir, targetProjectConfig);

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { createHash } from 'node:crypto';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, realpathSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -282,7 +282,8 @@ test('--temporary while logged in and unlinked takes the temporary path, no link
 
   const sideCar = JSON.parse(readFileSync(join(HOME, '.somewhere', 'temp-session.json'), 'utf8'));
   assert.equal(sideCar.token, 'smt_e2e_temp');
-  assert.equal(sideCar.project.project_id, 'proj_e2e_1');
+  assert.equal(sideCar.projects[realpathSync(fixtureDir)].project_id, 'proj_e2e_1', 'recorded for this project root');
+  assert.equal(sideCar.project, undefined);
 
   // A re-run in the same window redeploys the SAME throwaway.
   const second = await run(['deploy', '--temporary'], { cwd: fixtureDir, env });
