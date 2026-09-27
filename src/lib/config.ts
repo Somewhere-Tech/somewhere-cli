@@ -9,6 +9,7 @@ import {
   readFileSync,
   realpathSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs';
@@ -157,6 +158,61 @@ export function loadTempSession(): StoredTempSession | null {
 export function saveTempSession(session: StoredTempSession): void {
   ensureDir();
   writeSecret(TEMP_SESSION_PATH, JSON.stringify(session, null, 2) + '\n');
+}
+
+const TEMP_SESSION_LOCK_PATH = `${TEMP_SESSION_PATH}.lock`;
+/** A lock older than this was left by a process that died mid-update: the
+ *  critical section is one read and one write. */
+const TEMP_SESSION_LOCK_STALE_MS = 10_000;
+const TEMP_SESSION_LOCK_WAIT_MS = 5_000;
+
+/**
+ * Read-modify-write the sidecar under an exclusive lock, so two CLI
+ * processes (say, deploys from two project roots) cannot lose each other's
+ * update by saving copies they loaded before the other one saved.
+ * `change` receives what is on disk NOW and returns what to store; returning
+ * `current` unchanged writes nothing. Returns what is stored afterwards.
+ */
+export function updateTempSession(
+  change: (current: StoredTempSession | null) => StoredTempSession | null,
+): StoredTempSession | null {
+  ensureDir();
+  const release = lockTempSession();
+  try {
+    const current = loadTempSession();
+    const next = change(current);
+    if (next && next !== current) writeSecret(TEMP_SESSION_PATH, JSON.stringify(next, null, 2) + '\n');
+    return next;
+  } finally {
+    release();
+  }
+}
+
+function lockTempSession(): () => void {
+  const deadline = Date.now() + TEMP_SESSION_LOCK_WAIT_MS;
+  const pause = new Int32Array(new SharedArrayBuffer(4));
+  for (;;) {
+    try {
+      closeSync(openSync(TEMP_SESSION_LOCK_PATH, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600));
+      return () => {
+        try { unlinkSync(TEMP_SESSION_LOCK_PATH); } catch { /* already gone */ }
+      };
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    }
+    try {
+      if (Date.now() - statSync(TEMP_SESSION_LOCK_PATH).mtimeMs > TEMP_SESSION_LOCK_STALE_MS) {
+        unlinkSync(TEMP_SESSION_LOCK_PATH);
+        continue;
+      }
+    } catch {
+      continue; // released between our attempts
+    }
+    if (Date.now() > deadline) {
+      throw new Error('Another somewhere command is updating the temporary session. Try again in a moment.');
+    }
+    Atomics.wait(pause, 0, 0, 20);
+  }
 }
 
 export function clearTempSession(): void {

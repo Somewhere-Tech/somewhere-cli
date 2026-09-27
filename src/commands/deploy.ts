@@ -17,7 +17,7 @@ import {
   publishNoticeSeen,
   saveProjectDeployState,
   loadTempSession,
-  saveTempSession,
+  updateTempSession,
   canonicalProjectRoot,
   tempProjectFor,
   withTempProject,
@@ -495,12 +495,16 @@ export function registerDeploy(program: Command) {
             const account = await mintTempAccount();
             powSpinner?.stop();
             if (besideRealLogin) {
-              sideCar = {
+              const minted: StoredTempSession = {
                 token: account.key,
                 temp_expires_at: account.expires_at,
                 claim_url: account.claim_url,
               };
-              saveTempSession(sideCar);
+              // Another process may have saved a live credential while this
+              // one was minting. Its throwaways live under it, so it stays;
+              // this deploy joins it instead of replacing it.
+              sideCar = updateTempSession((current) =>
+                isTempSessionLive(current) && current!.token !== minted.token ? current : minted);
             } else {
               saveConfig({
                 token: account.key,
@@ -510,13 +514,18 @@ export function registerDeploy(program: Command) {
                 user: { email: '', username: '' },
               });
             }
-            token = account.key;
-            tempSession = {
-              claimUrl: account.claim_url,
-              ttlSeconds: account.ttl_seconds,
-              expiresAt: account.expires_at,
-              reused: false,
-            };
+            if (besideRealLogin && sideCar && sideCar.token !== account.key) {
+              token = sideCar.token;
+              tempSession = { claimUrl: sideCar.claim_url ?? '', expiresAt: sideCar.temp_expires_at, reused: true };
+            } else {
+              token = account.key;
+              tempSession = {
+                claimUrl: account.claim_url,
+                ttlSeconds: account.ttl_seconds,
+                expiresAt: account.expires_at,
+                reused: false,
+              };
+            }
           } catch (err) {
             powSpinner?.fail('Could not create a temporary session');
             error(err instanceof Error ? err.message : String(err), err);
@@ -583,8 +592,13 @@ export function registerDeploy(program: Command) {
               // directory's `.somewhere.json` — that file is the developer's
               // own link and a throwaway their account does not own has no
               // business overwriting it.
-              sideCar = withTempProject(sideCar, projectRoot, targetProjectConfig);
-              saveTempSession(sideCar);
+              // Merged into what is on disk now: other roots' throwaways,
+              // recorded by other processes since this one loaded, stay. A
+              // credential that changed meanwhile is left alone.
+              const owner = sideCar.token;
+              const created = targetProjectConfig;
+              sideCar = updateTempSession((current) =>
+                current?.token === owner ? withTempProject(current, projectRoot, created) : current) ?? sideCar;
             } else {
               saveProjectConfig(targetDir, targetProjectConfig);
             }
