@@ -15,9 +15,10 @@ code a human approves in their browser; the machine stays signed in.
 \`docs({ topic })\`, \`advisor({ question })\`, \`catalog\`).
 
 After every change:
-1. \`somewhere typecheck\`, then \`somewhere deploy\` — raw source;
-   do not build first. It prints the live URL. A page that renders blank is
-   refused; the previous version stays live.
+1. \`somewhere typecheck\`, then \`somewhere deploy\` (do not build first). Deploy
+   runs the platform compile, schema and secret checks and refuses a blank page
+   before going live; \`somewhere deploy-check\` runs them without publishing
+   (diagnosis, review, \`--run /api/x\`).
 2. \`somewhere verify\` — desktop and phone screenshots, console and network
    health; \`somewhere verify --flow flow.json\` fills and clicks. Several users:
    \`actors\` + \`journey\` (\`somewhere docs browser\`).
@@ -27,10 +28,9 @@ After every change:
    \`somewhere email test-inbox <addr>\` prints the message and its magic link.
 
 Routes: \`index.html\` loads \`src/main.tsx\`; every extensionless path with no file
-(\`/signin\`) serves \`index.html\`, so one app routes by \`location.pathname\`. An
-unknown \`*.html\` or \`/api/*\` is a 404. \`api/notes/[id].ts\` is \`/api/notes/:id\`;
-\`_\`-prefixed names are import-only helpers. Never create paths differing only
-in case (\`SignIn.tsx\`, \`signin.tsx\`): a case-insensitive disk keeps only one.
+(\`/signin\`) serves \`index.html\`, so one app routes by \`location.pathname\`.
+\`api/notes/[id].ts\` is \`/api/notes/:id\`; \`_\`-prefixed names are import-only
+helpers. Avoid names differing only in letter case (\`SignIn.tsx\`, \`signin.tsx\`).
 
 Sign-in: \`api/auth/[...path].ts\` is
 \`export { somewhereAuth as default } from '@somewhere-tech/sdk/server'\`; pages
@@ -38,25 +38,25 @@ use \`createSomewhereAuth()\` from \`@somewhere-tech/sdk/auth\` (no SDK:
 \`docs({ topic: 'auth-client' })\`). \`auth.signUp({ email, password,
 displayName? })\` / \`auth.signIn({ email, password })\` return the user or throw
 with the message. Gate pages on \`auth.getState().status\` (React:
-\`useAuthState()\`): \`checking\`, \`authenticated\`, \`signed-out\` or \`indeterminate\`
-(check failed, last user kept), as the starter's \`src/App.tsx\` does. Sign-up
-signs the user in with \`email_verified: false\`; unverified users can sign in
-and pass \`auth: 'required'\`. \`sw.auth.requireUser(req)\` returns \`{ id, email,
-display_name, role, email_verified, … }\` or throws 401 \`AUTH_REQUIRED\`;
+\`useAuthState()\`) as the starter's \`src/App.tsx\` does. Sign-up signs the user
+in with \`email_verified: false\`; unverified users can sign in and pass
+\`auth: 'required'\`. \`sw.auth.requireUser(req)\` returns \`{ id, email,
+role, email_verified, … }\` or throws 401 \`AUTH_REQUIRED\`;
 \`sw.auth.fromRequest(req)\` returns it or \`null\`.
 
 Functions: a bare \`export default async function (req, sw)\` returning a
-\`Response\` is always valid. \`sw.endpoint({ auth: 'none' | 'optional' |
-'required', body: { title: 'string', n: 'number?' }, rateLimit: '30/minute',
-handler: async ({ body, user, params }, sw) => value })\` is an optional wrapper
-that answers 401/400 itself and sends \`value\` as JSON. Route params:
-\`params.id\` in the wrapper, \`sw.params.id\` (also \`req.params.id\`) bare.
+\`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
+'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
+}, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
+\`params.id\` there, \`sw.params.id\` bare. With \`db/schema.ts\`, \`somewhere
+typecheck\` types bare handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
 
 Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
 guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
 access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
 \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
-changes }\`. Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
+changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
+operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
 user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
 
 export const INIT_AGENTS_MD = `# somewhere.tech project contract\n\n${AGENT_WORKFLOW}\n`;
