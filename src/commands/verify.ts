@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { Command } from 'commander';
@@ -75,6 +76,9 @@ export interface VerifyReport {
     };
   };
   screenshots: VerifyScreenshotReport[];
+  /** The platform's non-blocking layout line per run: contrast, horizontal
+   *  overflow, and tap-target sizing at that viewport. */
+  layout: Array<VerifySignal<string>>;
 }
 
 interface ResolvedViewport {
@@ -209,6 +213,9 @@ export function normalizeVerifyFlow(raw: unknown, baseDir = process.cwd()): Veri
     return { actions: [], expect_requests: [], visible_only: false, viewports: [...DEFAULT_VIEWPORTS] };
   }
   if (!isRecord(raw)) throw new Error('flow must be a JSON object.');
+  if (raw.actors !== undefined || raw.journey !== undefined) {
+    throw new Error('This is a multi-user flow (actors + journey). Run it with `somewhere verify --project <project> --flow <file>`.');
+  }
   const supported = new Set(['actions', 'auth', 'local_storage', 'cookies', 'headers', 'expect_requests', 'visible_only', 'viewports']);
   const unknown = Object.keys(raw).filter((key) => !supported.has(key));
   if (unknown.length) throw new Error(`flow has unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`);
@@ -263,6 +270,7 @@ function actionName(action: BrowserSequenceAction | undefined, fallback: string)
   if ('wait' in action) return `wait ${String(action.wait)}`;
   if ('expect' in action) return `expect ${action.expect.selector}`;
   if ('screenshot' in action) return `screenshot ${action.screenshot}`;
+  if ('goto' in action) return `goto ${action.goto}`;
   return `eval ${action.eval}`;
 }
 
@@ -281,8 +289,8 @@ function reportPassed(report: BrowserResult): boolean {
 
 function shapeVerificationReport(
   target: string,
-  flow: VerifyFlow,
-  runs: Array<{ viewport: ResolvedViewport; report: BrowserResult }>,
+  flow: Pick<VerifyFlow, 'actions'>,
+  runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions?: BrowserSequenceAction[] }>,
 ): VerifyReport {
   const steps: VerifyStepReport[] = [];
   const pageErrors: Array<VerifySignal<unknown>> = [];
@@ -290,19 +298,24 @@ function shapeVerificationReport(
   const failedRequests: Array<VerifySignal<unknown>> = [];
   const expectations: Array<VerifySignal<BrowserRequestExpectationResult>> = [];
   const screenshots: VerifyScreenshotReport[] = [];
+  const layout: Array<VerifySignal<string>> = [];
 
-  for (const { viewport, report } of runs) {
+  for (const { viewport, report, actions: runActions } of runs) {
+    const actions = runActions ?? flow.actions;
+    if (typeof report.accessibility_layout === 'string' && report.accessibility_layout) {
+      layout.push({ viewport: viewport.label, detail: report.accessibility_layout });
+    }
     for (const [index, step] of (report.steps ?? []).entries()) {
       const sourceIndex = typeof step.step === 'number' ? step.step : index;
       // The local browser models its requested final capture as an internal
       // screenshot step. Hosted capture_after does not, so keep the public
       // verification steps limited to the caller's flow on both halves.
-      if (sourceIndex >= flow.actions.length && step.action === 'screenshot') continue;
+      if (sourceIndex >= actions.length && step.action === 'screenshot') continue;
       const passed = (step.ok ?? step.passed) !== false;
       steps.push({
         viewport: viewport.label,
         step: sourceIndex + 1,
-        name: actionName(flow.actions[sourceIndex], step.action ?? 'page load'),
+        name: actionName(actions[sourceIndex], step.action ?? 'page load'),
         passed,
         ...(step.error ? { error: step.error } : {}),
         ...(typeof step.duration_ms === 'number' ? { duration_ms: step.duration_ms } : {}),
@@ -370,6 +383,7 @@ function shapeVerificationReport(
       },
     },
     screenshots,
+    layout,
   };
 }
 
@@ -431,6 +445,492 @@ export async function runVerification(
   return shapeVerificationReport(targetLabel, flow, runs);
 }
 
+// ── Multi-user journeys (tsk_f49ccbb75f994f1fb5179198087d24de) ──────────────
+//
+// Several signed-in people in one run: each actor is its own named browser
+// session on the platform (a separate browser, so no cookie, storage or cache
+// is shared between actors), and the journey's segments run in the order
+// written, each as one ordinary bounded browser call. Every call carries the
+// project, so the platform's owned-origin rules apply to every actor on every
+// step. Sessions this run opened are closed when it ends, whatever the outcome.
+
+export const VERIFY_JOURNEY_LIMITS = {
+  actors: 3,
+  segments: 12,
+  actions_per_segment: 30,
+  total_actions: 120,
+  deadline_ms: 10 * 60 * 1000,
+  segment_timeout_ms: VERIFY_TIMEOUT_MS,
+  /** Separate from the journey budget: how long closing the actors' browsers
+   *  may take once the run stops, including waiting for a call in flight. */
+  cleanup_budget_ms: 20_000,
+} as const;
+
+export interface VerifyActor {
+  auth?: { user_id: string };
+  local_storage?: Record<string, string>;
+  cookies?: Array<{ name: string; value: string }>;
+  headers?: Record<string, string>;
+}
+
+export interface VerifyJourneySegment {
+  as: string;
+  path?: string;
+  actions: BrowserSequenceAction[];
+  expect_requests: ExpectedBrowserRequest[];
+  visible_only: boolean;
+  viewport: VerifyViewportInput;
+}
+
+export interface VerifyJourney {
+  actors: Record<string, VerifyActor>;
+  journey: VerifyJourneySegment[];
+}
+
+export interface VerifyJourneySegmentReport {
+  segment: number;
+  as: string;
+  viewport: string;
+  path?: string;
+  ran: boolean;
+  passed: boolean;
+  final_url?: string;
+  error?: { code: string; message: string };
+}
+
+/**
+ * What closing one actor's browser achieved:
+ *  - closed: the platform closed it, after every call for that actor settled.
+ *  - already_closed: the platform had nothing open for it (a failed call closes
+ *    its own browser).
+ *  - unconfirmed: a close failed, or a call for that actor may still be running
+ *    on the platform, so a browser can exist that this run could not close. The
+ *    platform closes an idle browser within 3 minutes.
+ */
+export interface VerifyJourneyCleanup {
+  actor: string;
+  status: 'closed' | 'already_closed' | 'unconfirmed';
+  reason?: string;
+}
+
+export interface VerifyJourneyReport extends VerifyReport {
+  mode: 'journey';
+  actors: string[];
+  segments: VerifyJourneySegmentReport[];
+  browser_runs: number;
+  limits: typeof VERIFY_JOURNEY_LIMITS;
+  cleanup: VerifyJourneyCleanup[];
+  cleanup_ms: number;
+  cleanup_confirmed: boolean;
+}
+
+const ACTOR_NAME = /^[a-z][a-z0-9_-]{0,15}$/;
+
+function isJourneyPath(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('/') && !value.startsWith('//') && !/[\\\s]/.test(value);
+}
+
+export function isVerifyJourneyInput(raw: unknown): boolean {
+  return isRecord(raw) && (raw.actors !== undefined || raw.journey !== undefined);
+}
+
+export function normalizeVerifyJourney(raw: unknown, baseDir = process.cwd()): VerifyJourney {
+  const limits = VERIFY_JOURNEY_LIMITS;
+  if (!isRecord(raw)) throw new Error('flow must be a JSON object.');
+  const extra = Object.keys(raw).filter((key) => key !== 'actors' && key !== 'journey');
+  if (extra.length) {
+    throw new Error(`A multi-user flow has only "actors" and "journey" (found ${extra.join(', ')}). Put actions, path, viewport and expect_requests on each journey segment, and session seeds on each actor.`);
+  }
+  if (!isRecord(raw.actors)) throw new Error('actors must be an object such as { "alice": {}, "bob": { "auth": { "user_id": "..." } } }.');
+  const names = Object.keys(raw.actors);
+  if (names.length < 1 || names.length > limits.actors) {
+    throw new Error(`actors has ${names.length} entries; a journey has 1 to ${limits.actors} actors, each its own browser.`);
+  }
+  const actors: Record<string, VerifyActor> = {};
+  for (const name of names) {
+    if (!ACTOR_NAME.test(name)) throw new Error(`actor name "${name}" must be 1-16 lowercase letters, digits, "-" or "_", starting with a letter.`);
+    const value = raw.actors[name];
+    if (!isRecord(value)) throw new Error(`actors.${name} must be an object ({} for a signed-out browser).`);
+    const unknown = Object.keys(value).filter((key) => !['auth', 'local_storage', 'cookies', 'headers'].includes(key));
+    if (unknown.length) throw new Error(`actors.${name} has unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`);
+    const actor: VerifyActor = {};
+    const auth = normalizeAuth(value.auth);
+    const localStorage = normalizeStringRecord(value.local_storage, `actors.${name}.local_storage`);
+    const cookies = normalizeCookies(value.cookies);
+    const headers = normalizeStringRecord(value.headers, `actors.${name}.headers`);
+    if (auth) actor.auth = auth;
+    if (localStorage) actor.local_storage = localStorage;
+    if (cookies) actor.cookies = cookies;
+    if (headers) actor.headers = headers;
+    assertSessionSeedSize(actor);
+    actors[name] = actor;
+  }
+  if (!Array.isArray(raw.journey) || raw.journey.length < 1) throw new Error('journey must be a non-empty array of segments like { "as": "alice", "path": "/", "actions": [...] }.');
+  if (raw.journey.length > limits.segments) {
+    throw new Error(`journey has ${raw.journey.length} segments; the limit is ${limits.segments}. Each segment is one browser run, so combine consecutive steps by the same actor.`);
+  }
+  const seen = new Set<string>();
+  let total = 0;
+  const journey = raw.journey.map((value, index): VerifyJourneySegment => {
+    const at = `journey[${index}]`;
+    if (!isRecord(value)) throw new Error(`${at} must be an object.`);
+    const unknown = Object.keys(value).filter((key) => !['as', 'path', 'actions', 'expect_requests', 'visible_only', 'viewport'].includes(key));
+    if (unknown.length) throw new Error(`${at} has unsupported field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}.`);
+    if (typeof value.as !== 'string' || !(value.as in actors)) {
+      throw new Error(`${at}.as must name one of the actors (${names.join(', ')}).`);
+    }
+    if (value.path !== undefined && !isJourneyPath(value.path)) {
+      throw new Error(`${at}.path must be a path on this app starting with "/" (for example "/club").`);
+    }
+    const actions = normalizeBrowserActions(value.actions ?? [], baseDir);
+    if (!actions.ok) throw new Error(`${at}: ${actions.error}`);
+    if (value.visible_only !== undefined && typeof value.visible_only !== 'boolean') throw new Error(`${at}.visible_only must be boolean.`);
+    const continued = seen.has(value.as);
+    seen.add(value.as);
+    // A continued actor's page moves with a leading goto, which is one action.
+    const count = actions.actions.length + (continued && value.path ? 1 : 0);
+    if (count > limits.actions_per_segment) {
+      throw new Error(`${at} has ${count} actions${continued && value.path ? ' (including the goto for its path)' : ''}; the limit per segment is ${limits.actions_per_segment}. Split it into two segments by the same actor.`);
+    }
+    total += count;
+    const viewport = value.viewport === undefined ? 'desktop' : normalizeViewports([value.viewport])[0];
+    return {
+      as: value.as,
+      ...(value.path !== undefined ? { path: value.path as string } : {}),
+      actions: actions.actions,
+      expect_requests: normalizeExpectedRequests(value.expect_requests),
+      visible_only: value.visible_only === true,
+      viewport,
+    };
+  });
+  if (total > limits.total_actions) throw new Error(`journey has ${total} actions in total; the limit is ${limits.total_actions}.`);
+  const unused = names.filter((name) => !seen.has(name));
+  if (unused.length) throw new Error(`actor${unused.length === 1 ? '' : 's'} ${unused.join(', ')} ${unused.length === 1 ? 'is' : 'are'} declared but never used in the journey.`);
+  return { actors, journey };
+}
+
+export function loadVerifyInput(path?: string, cwd = process.cwd()):
+  | { kind: 'single'; flow: VerifyFlow }
+  | { kind: 'journey'; journey: VerifyJourney } {
+  if (!path) return { kind: 'single', flow: normalizeVerifyFlow(undefined) };
+  const absolute = resolve(cwd, path);
+  if (!existsSync(absolute)) throw new Error(`Flow file not found: ${absolute}`);
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(absolute, 'utf8')) as unknown;
+  } catch (cause) {
+    throw new Error(`Flow file is not valid JSON: ${absolute} — ${cause instanceof Error ? cause.message : String(cause)}`);
+  }
+  return isVerifyJourneyInput(parsed)
+    ? { kind: 'journey', journey: normalizeVerifyJourney(parsed, dirname(absolute)) }
+    : { kind: 'single', flow: normalizeVerifyFlow(parsed, dirname(absolute)) };
+}
+
+export interface VerifyJourneyRun {
+  /** The session id each actor uses in this run. */
+  readonly sessions: Readonly<Record<string, string>>;
+  run(): Promise<VerifyJourneyReport>;
+  /** Stop starting segments, now. Synchronous; the first reason wins. */
+  stop(code: string, message: string): void;
+  /** Stop, then close every browser this run opened, within the cleanup
+   *  budget. Idempotent; never throws; reports what it could not confirm. */
+  closeAll(): Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }>;
+}
+
+const UNCONFIRMED_BACKSTOP = 'the platform closes an idle browser within 3 minutes';
+/** A call the client stopped waiting for may still be admitted on the
+ *  platform; wait this long (inside the cleanup budget) before closing again. */
+const RECLOSE_AFTER_ABANDONED_MS = 5_000;
+
+function settleWithin<T>(promise: Promise<T>, ms: number): Promise<boolean> {
+  if (ms <= 0) return Promise.resolve(false);
+  return new Promise((resolveSettled) => {
+    const timer = setTimeout(() => resolveSettled(false), ms);
+    promise.then(() => { clearTimeout(timer); resolveSettled(true); }, () => { clearTimeout(timer); resolveSettled(true); });
+  });
+}
+
+export function createVerifyJourneyRun(
+  target: VerificationTarget,
+  journey: VerifyJourney,
+  client: Pick<ApiClient, 'call'>,
+  opts: { runId?: string; now?: () => number; cleanupBudgetMs?: number; recloseAfterAbandonedMs?: number } = {},
+): VerifyJourneyRun {
+  const now = opts.now ?? Date.now;
+  const cleanupBudgetMs = opts.cleanupBudgetMs ?? VERIFY_JOURNEY_LIMITS.cleanup_budget_ms;
+  const recloseAfterAbandonedMs = opts.recloseAfterAbandonedMs ?? RECLOSE_AFTER_ABANDONED_MS;
+  const runId = opts.runId ?? randomBytes(4).toString('hex');
+  const sessions: Record<string, string> = Object.fromEntries(
+    Object.keys(journey.actors).map((name) => [name, `vf-${runId}-${name}`]),
+  );
+  // Actors a call has been sent for (their browser may exist).
+  const opened = new Set<string>();
+  // Actors whose last call ended without a platform answer (client timeout or
+  // lost connection): the platform may still be running it.
+  const abandoned = new Set<string>();
+  // The one segment call in flight, if any.
+  let inFlight: { actor: string; settled: Promise<unknown> } | null = null;
+  let stopReason: { code: string; message: string } | null = null;
+  let closing: Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }> | null = null;
+
+  const stop = (code: string, message: string): void => {
+    stopReason ??= { code, message };
+  };
+
+  const closeOne = async (actor: string, budgetEnd: number): Promise<{ closed: boolean } | { error: string }> => {
+    const remaining = budgetEnd - now();
+    if (remaining <= 0) return { error: 'cleanup budget spent' };
+    try {
+      const result = await client.call<{ closed?: boolean }>('POST', '/browser/test', { session_id: sessions[actor] }, undefined, { timeoutMs: remaining });
+      return { closed: result?.closed === true };
+    } catch (cause) {
+      return { error: cause instanceof CliApiError ? cause.code : cause instanceof Error ? cause.message : String(cause) };
+    }
+  };
+
+  const closeAll = (): Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }> => {
+    // Set before anything is awaited, so a segment that settles while the
+    // browsers are closing cannot start another one.
+    stop('VERIFY_STOPPED', 'The run stopped to close its browsers.');
+    closing ??= (async () => {
+      const startedAt = now();
+      const budgetEnd = startedAt + cleanupBudgetMs;
+      const pending = inFlight;
+      const actors = [...opened];
+      // One concurrent pass: every opened browser at once, one shared budget.
+      const first = await Promise.all(actors.map(async (actor) => [actor, await closeOne(actor, budgetEnd)] as const));
+      const outcome = new Map<string, VerifyJourneyCleanup>();
+      for (const [actor, result] of first) {
+        outcome.set(actor, 'error' in result
+          ? { actor, status: 'unconfirmed', reason: `close failed (${result.error}); ${UNCONFIRMED_BACKSTOP}` }
+          : { actor, status: result.closed ? 'closed' : 'already_closed' });
+      }
+      // A call still in flight may create or reuse its browser after the close
+      // above. Wait for it inside the budget, then close that actor again.
+      if (pending) {
+        const settled = await settleWithin(pending.settled, budgetEnd - now());
+        if (!settled) {
+          outcome.set(pending.actor, { actor: pending.actor, status: 'unconfirmed', reason: `its call was still running when cleanup ran out of time; ${UNCONFIRMED_BACKSTOP}` });
+        } else if (!abandoned.has(pending.actor)) {
+          const again = await closeOne(pending.actor, budgetEnd);
+          const earlier = outcome.get(pending.actor);
+          outcome.set(pending.actor, 'error' in again
+            ? { actor: pending.actor, status: 'unconfirmed', reason: `close after its call finished failed (${again.error}); ${UNCONFIRMED_BACKSTOP}` }
+            : { actor: pending.actor, status: again.closed || earlier?.status === 'closed' ? 'closed' : 'already_closed' });
+        }
+      }
+      // A call the client gave up on has no answer to wait for. Close once more
+      // a little later (inside the budget) and say plainly it is unconfirmed.
+      for (const actor of actors.filter((name) => abandoned.has(name))) {
+        const waitMs = Math.min(recloseAfterAbandonedMs, budgetEnd - now());
+        if (waitMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, waitMs));
+        const again = await closeOne(actor, budgetEnd);
+        outcome.set(actor, {
+          actor,
+          status: 'unconfirmed',
+          reason: `its call got no answer, so the platform may still start it${'error' in again ? ` (the second close failed: ${again.error})` : ''}; ${UNCONFIRMED_BACKSTOP}`,
+        });
+      }
+      return { cleanup: actors.map((actor) => outcome.get(actor)!), cleanup_ms: now() - startedAt };
+    })();
+    return closing;
+  };
+
+  const run = async (): Promise<VerifyJourneyReport> => {
+    if (!target.project_id) {
+      throw new Error('Multi-user verification needs --project <project>: every actor signs in to that project, and its browsers stay on its addresses.');
+    }
+    if (target.url && isLoopbackUrl(target.url)) {
+      throw new Error('Multi-user journeys run on the deployed app. Deploy first, then run somewhere verify --project <project> --flow <file>.');
+    }
+    const startedAt = now();
+    const deadlineAt = startedAt + VERIFY_JOURNEY_LIMITS.deadline_ms;
+    const segments: VerifyJourneySegmentReport[] = [];
+    const runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions: BrowserSequenceAction[] }> = [];
+    const started = new Set<string>();
+    // 'report': the segment ran and its own report failed (the step verdict
+    // says why). 'error': the segment could not run or could not continue.
+    let stopped: { kind: 'report' | 'error'; segment: number; as: string; viewport: string; code: string; message: string } | null = null;
+    const deadlineMessage = `The journey reached its ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000}-minute limit.`;
+    try {
+      for (const [index, segment] of journey.journey.entries()) {
+        const viewport = resolveViewport(segment.viewport);
+        const label = `${segment.as} #${index + 1} ${viewport.label}`;
+        const base: VerifyJourneySegmentReport = {
+          segment: index + 1,
+          as: segment.as,
+          viewport: viewport.label,
+          ...(segment.path ? { path: segment.path } : {}),
+          ran: false,
+          passed: false,
+        };
+        if (!stopped && !stopReason && now() >= deadlineAt) stop('VERIFY_JOURNEY_DEADLINE', deadlineMessage);
+        if (stopped) { segments.push(base); continue; }
+        if (stopReason) {
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, ...stopReason };
+          segments.push({ ...base, error: { ...stopReason } });
+          continue;
+        }
+        const actor = journey.actors[segment.as];
+        const first = !started.has(segment.as);
+        const actions = !first && segment.path ? [{ goto: segment.path } as BrowserSequenceAction, ...segment.actions] : segment.actions;
+        const hasSeeds = actor.local_storage !== undefined || actor.cookies !== undefined || actor.headers !== undefined;
+        const url = first ? (segment.path ?? target.url ?? (hasSeeds ? '/' : undefined)) : undefined;
+        const body: Record<string, unknown> = {
+          project_id: target.project_id,
+          session_id: sessions[segment.as],
+          ...(url ? { url } : {}),
+          actions,
+          expect_requests: segment.expect_requests,
+          visible_only: segment.visible_only,
+          viewport: viewport.wire,
+          capture_after: true,
+          inline: false,
+          ...(first && actor.auth ? { auth: actor.auth } : {}),
+          ...(first && actor.local_storage ? { local_storage: actor.local_storage } : {}),
+          ...(first && actor.cookies ? { cookies: actor.cookies } : {}),
+          ...(first && actor.headers ? { headers: actor.headers } : {}),
+        };
+        // Each wait is capped by what is left of the journey budget.
+        const remaining = deadlineAt - now();
+        const waitMs = Math.min(VERIFY_JOURNEY_LIMITS.segment_timeout_ms, remaining);
+        opened.add(segment.as);
+        started.add(segment.as);
+        abandoned.delete(segment.as);
+        const call = client.call<BrowserResult>('POST', '/browser/test', body, undefined, { timeoutMs: waitMs });
+        inFlight = { actor: segment.as, settled: call };
+        let report: BrowserResult;
+        try {
+          report = await call;
+        } catch (cause) {
+          const code = cause instanceof CliApiError ? cause.code : 'VERIFY_SEGMENT_FAILED';
+          const message = cause instanceof Error ? cause.message : String(cause);
+          if (code === 'TIMEOUT' || code === 'NETWORK_ERROR') abandoned.add(segment.as);
+          const budgetCut = code === 'TIMEOUT' && waitMs < VERIFY_JOURNEY_LIMITS.segment_timeout_ms;
+          const reported = budgetCut ? { code: 'VERIFY_JOURNEY_DEADLINE', message: `${deadlineMessage} Segment ${index + 1} was still running.` } : { code, message };
+          if (budgetCut) stop(reported.code, reported.message);
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, ...reported };
+          // A refusal (limit, authority, validation) happens before a browser runs.
+          segments.push({ ...base, error: reported });
+          continue;
+        } finally {
+          inFlight = null;
+        }
+        runs.push({ viewport: { ...viewport, label }, report, actions });
+        // A continued actor whose browser was reaped would carry on signed out
+        // in a fresh browser; that is a different person, so the journey stops.
+        if (!first && report.session_note) {
+          const message = `${segment.as}'s browser ended between segments (${report.session_note}), so ${segment.as} is no longer the same signed-in user. Keep each actor's gap between segments under 3 minutes and run the journey again.`;
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_ACTOR_SESSION_ENDED', message };
+          segments.push({ ...base, ran: true, final_url: report.final_url, error: { code: stopped.code, message } });
+          continue;
+        }
+        const passed = reportPassed(report);
+        segments.push({ ...base, ran: true, passed, ...(report.final_url ? { final_url: report.final_url } : {}) });
+        if (!passed) stopped = { kind: 'report', segment: index + 1, as: segment.as, viewport: viewport.label, code: '', message: '' };
+      }
+    } finally {
+      await closeAll();
+    }
+    const shaped = shapeVerificationReport(target.url ?? target.project_id, { actions: [] }, runs);
+    const names = Object.keys(journey.actors);
+    const passed = !stopped && runs.length === journey.journey.length && shaped.passed;
+    let verdict: string;
+    if (stopped?.kind === 'error') {
+      verdict = `FAIL — segment ${stopped.segment} (${stopped.as}, ${stopped.viewport}): ${stopped.message} [${stopped.code}]`;
+    } else if (!passed) {
+      verdict = shaped.verdict.replace(/^FAIL — /, `FAIL — segment ${stopped?.segment ?? '?'} — `);
+    } else {
+      verdict = `PASS — ${journey.journey.length} segment${journey.journey.length === 1 ? '' : 's'} by ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')}) passed; page, console, and network healthy.`;
+    }
+    const { cleanup, cleanup_ms } = await closeAll();
+    return {
+      ...shaped,
+      passed,
+      verdict,
+      mode: 'journey',
+      actors: names,
+      segments,
+      browser_runs: segments.filter((segment) => segment.ran).length,
+      limits: VERIFY_JOURNEY_LIMITS,
+      cleanup,
+      cleanup_ms,
+      cleanup_confirmed: cleanup.every((item) => item.status !== 'unconfirmed'),
+    };
+  };
+
+  return { sessions, run, stop, closeAll };
+}
+
+/** The flow file contract, for agents: `somewhere verify --schema`. */
+export function verifyFlowSchema(): Record<string, unknown> {
+  const L = VERIFY_JOURNEY_LIMITS;
+  const path = { type: 'string', pattern: '^/(?!/)[^\\s\\\\]*$', description: 'A path on the app, e.g. "/club".' };
+  const action = {
+    description: 'Exactly one action key per item.',
+    oneOf: [
+      { type: 'object', required: ['click'], properties: { click: { type: 'string', description: 'CSS selector' } }, additionalProperties: false },
+      { type: 'object', required: ['fill', 'value'], properties: { fill: { type: 'string' }, value: { type: 'string' } }, additionalProperties: false },
+      { type: 'object', required: ['select', 'value'], properties: { select: { type: 'string' }, value: { type: 'string' } }, additionalProperties: false },
+      { type: 'object', required: ['upload', 'file'], properties: { upload: { type: 'string' }, file: { type: 'string', description: 'Local path, data URL, or base64' }, name: { type: 'string' } }, additionalProperties: false },
+      { type: 'object', required: ['wait'], properties: { wait: { oneOf: [{ type: 'string' }, { type: 'number', minimum: 0 }, { type: 'object', required: ['selector'], properties: { selector: { type: 'string' } } }] } }, additionalProperties: false },
+      { type: 'object', required: ['expect'], properties: { expect: { type: 'object', required: ['selector'], properties: { selector: { type: 'string' }, text: { type: 'string' }, value: { type: 'string' }, visible: { type: 'boolean' }, count: { type: 'integer', minimum: 0 } } } }, additionalProperties: false },
+      { type: 'object', required: ['screenshot'], properties: { screenshot: { type: 'string', description: 'Label' } }, additionalProperties: false },
+      { type: 'object', required: ['eval'], properties: { eval: { type: 'string', description: 'Page script on your own app; its value is reported and a throw fails the step. Use it for in-page API checks.' } }, additionalProperties: false },
+      { type: 'object', required: ['goto'], properties: { goto: path }, additionalProperties: false },
+    ],
+  };
+  const expectRequests = { type: 'array', maxItems: 30, items: { type: 'object', required: ['path', 'status'], properties: { path: { type: 'string' }, status: { type: 'integer', minimum: 100, maximum: 599 } }, additionalProperties: false }, description: 'Responses the flow intends, such as a 403 for another user. Seen = not a failure; missing = failure.' };
+  const viewport = { oneOf: [{ enum: ['desktop', 'mobile'] }, { type: 'object', required: ['label', 'width', 'height'], properties: { label: { type: 'string' }, width: { type: 'integer', minimum: 100, maximum: 3840 }, height: { type: 'integer', minimum: 100, maximum: 2160 } } }] };
+  const seeds = {
+    auth: { type: 'object', required: ['user_id'], properties: { user_id: { type: 'string', description: 'An existing app user of this project to sign in as.' } }, additionalProperties: false },
+    local_storage: { type: 'object', additionalProperties: { type: 'string' } },
+    cookies: { type: 'array', items: { type: 'object', required: ['name', 'value'], properties: { name: { type: 'string' }, value: { type: 'string' } } } },
+    headers: { type: 'object', additionalProperties: { type: 'string' } },
+  };
+  return {
+    $schema: 'https://json-schema.org/draft/2020-12/schema',
+    title: 'somewhere verify --flow',
+    oneOf: [
+      {
+        title: 'One user',
+        type: 'object',
+        properties: { actions: { type: 'array', maxItems: 30, items: action }, ...seeds, expect_requests: expectRequests, visible_only: { type: 'boolean' }, viewports: { type: 'array', minItems: 1, maxItems: 4, items: viewport } },
+        additionalProperties: false,
+      },
+      {
+        title: 'Several users (needs --project; hosted apps; claimed accounts)',
+        type: 'object',
+        required: ['actors', 'journey'],
+        properties: {
+          actors: {
+            type: 'object', minProperties: 1, maxProperties: L.actors,
+            propertyNames: { pattern: ACTOR_NAME.source },
+            additionalProperties: { type: 'object', properties: seeds, additionalProperties: false, description: 'Each actor is its own browser. {} starts signed out.' },
+          },
+          journey: {
+            type: 'array', minItems: 1, maxItems: L.segments,
+            items: {
+              type: 'object', required: ['as'],
+              properties: {
+                as: { type: 'string', description: 'Actor name' },
+                path: { ...path, description: 'Where this segment starts: the actor\'s first page, or a goto for a continued actor.' },
+                actions: { type: 'array', maxItems: L.actions_per_segment, items: action },
+                expect_requests: expectRequests,
+                viewport: { ...viewport, default: 'desktop' },
+                visible_only: { type: 'boolean' },
+              },
+              additionalProperties: false,
+            },
+          },
+        },
+        additionalProperties: false,
+      },
+    ],
+    'x-limits': L,
+  };
+}
+
 export function formatVerifyReport(report: VerifyReport): string[] {
   const lines = [report.passed ? green(report.verdict) : red(report.verdict)];
   for (const step of report.steps) {
@@ -444,6 +944,23 @@ export function formatVerifyReport(report: VerifyReport): string[] {
     lines.push(`screenshot: [${shot.viewport}] ${teal(location)}`);
     if (shot.fs_path && (shot.url || shot.scratch_url)) lines.push(`screenshot_file: [${shot.viewport}] ${shot.fs_path}`);
   }
+  for (const item of report.layout ?? []) lines.push(`layout: [${item.viewport}] ${dim(item.detail)}`);
+  return lines;
+}
+
+export function formatVerifyJourneyReport(report: VerifyJourneyReport): string[] {
+  const lines = formatVerifyReport(report);
+  const segmentLines = report.segments.map((segment) => {
+    const mark = !segment.ran && !segment.error ? dim('not run') : segment.passed ? green('✓') : red('✗');
+    return `segment ${segment.segment} ${mark} ${segment.as} [${segment.viewport}]${segment.path ? ` ${segment.path}` : ''}${segment.error ? ` ${dim(`— ${segment.error.code}`)}` : ''}`;
+  });
+  return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}`, ...formatJourneyCleanup(report.cleanup, report.cleanup_ms)];
+}
+
+export function formatJourneyCleanup(cleanup: VerifyJourneyCleanup[], cleanupMs: number): string[] {
+  if (!cleanup.length) return ['browsers: none were opened'];
+  const lines = [`browsers (cleanup ${Math.round(cleanupMs / 100) / 10}s of ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000}s budget): ${cleanup.map((item) => `${item.actor} ${item.status.replace('_', ' ')}`).join(', ')}`];
+  for (const item of cleanup) if (item.status === 'unconfirmed' && item.reason) lines.push(`  ${item.actor}: ${item.reason}`);
   return lines;
 }
 
@@ -464,6 +981,7 @@ export function registerVerify(program: Command): void {
     .option('--session <session-id>', 'Existing app session value to seed as localStorage sw_auth in every viewport.')
     .option('--cookie <name=value>', 'Existing app cookie to seed in every viewport. Repeatable.', collectCookie)
     .option('--json', 'Print the structured verification report as JSON.')
+    .option('--schema', 'Print the JSON Schema for --flow files (one user, or several users) and exit.')
     .addHelpText('after', `
 Minimal --flow JSON:
   {
@@ -477,8 +995,33 @@ Minimal --flow JSON:
 
 Save that object as flow.json, then pass --flow flow.json.
 For the complete flow and action schema, run: somewhere docs browser
+
+Several users in one run (--project required; each actor is its own browser):
+  {
+    "actors": { "alice": {}, "bob": {} },
+    "journey": [
+      { "as": "alice", "path": "/signup", "actions": [{ "click": "#create" }] },
+      { "as": "bob", "path": "/club", "actions": [{ "click": "#join" }],
+        "expect_requests": [{ "path": "/api/admin", "status": 403 }] },
+      { "as": "alice", "path": "/club", "viewport": "mobile",
+        "actions": [{ "eval": "fetch('/api/state').then(r => r.status)" }] }
+    ]
+  }
+Segments run in order; a later segment for the same actor continues in that
+actor's browser (path becomes a goto). Limits: ${VERIFY_JOURNEY_LIMITS.actors} actors, ${VERIFY_JOURNEY_LIMITS.segments} segments,
+${VERIFY_JOURNEY_LIMITS.actions_per_segment} actions per segment, ${VERIFY_JOURNEY_LIMITS.total_actions} in total, ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000} minutes. Each segment is one browser
+run against your plan's browser limits. When the run ends or is interrupted,
+every actor browser is closed within ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000} seconds; any close that cannot be
+confirmed is reported, and the platform closes idle browsers within 3 minutes.
+Several users need a claimed account and a CLI login approved for all your
+projects: a login approved for "Only these projects" cannot open named browsers
+(SESSION_SCOPE_FORBIDDEN). Print the full flow schema with: somewhere verify --schema
 `)
-    .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean }) => {
+    .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean; schema?: boolean }) => {
+      if (opts.schema) {
+        console.log(JSON.stringify(verifyFlowSchema(), null, 2));
+        process.exit(0);
+      }
       try {
         const url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);
         const local = !!url && isLoopbackUrl(url);
@@ -506,7 +1049,38 @@ For the complete flow and action schema, run: somewhere docs browser
           }
         }
         if (!local && !client) client = new ApiClient(getToken());
-        const loadedFlow = loadVerifyFlow(opts.flow);
+        const input = loadVerifyInput(opts.flow);
+        if (input.kind === 'journey') {
+          if (opts.session || cliCookies.length) {
+            throw new Error('--session and --cookie seed one browser; in a multi-user flow put each actor\'s seeds on that actor in the flow file.');
+          }
+          if (!client) client = new ApiClient(getToken());
+          const journeyRun = createVerifyJourneyRun({ ...(project ? { project_id: project } : {}), ...(url ? { url } : {}) }, input.journey, client);
+          // Ctrl-C or a terminating signal: stop starting segments at once, then
+          // close every opened browser within the cleanup budget and say what
+          // could not be confirmed.
+          const onSignal = (signal: NodeJS.Signals) => {
+            journeyRun.stop('VERIFY_INTERRUPTED', `Stopped by ${signal}.`);
+            void journeyRun.closeAll()
+              .then(({ cleanup, cleanup_ms }) => {
+                for (const line of formatJourneyCleanup(cleanup, cleanup_ms)) process.stderr.write(`${line}\n`);
+              })
+              .finally(() => process.exit(signal === 'SIGINT' ? 130 : 143));
+          };
+          process.once('SIGINT', onSignal);
+          process.once('SIGTERM', onSignal);
+          let report: VerifyJourneyReport;
+          try {
+            report = await journeyRun.run();
+          } finally {
+            process.removeListener('SIGINT', onSignal);
+            process.removeListener('SIGTERM', onSignal);
+          }
+          if (opts.json) console.log(JSON.stringify(report, null, 2));
+          else for (const line of formatVerifyJourneyReport(report)) console.log(line);
+          process.exit(report.passed ? 0 : 1);
+        }
+        const loadedFlow = input.flow;
         const flow: VerifyFlow = {
           ...loadedFlow,
           ...(opts.session ? { local_storage: { ...loadedFlow.local_storage, sw_auth: opts.session } } : {}),
