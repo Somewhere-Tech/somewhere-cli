@@ -10,7 +10,7 @@ import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, unlinkSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const distIndex = process.env.SOMEWHERE_TEST_CLI ?? join(dirname(fileURLToPath(import.meta.url)), '..', 'dist', 'index.js');
 const DIFFICULTY = 8;
@@ -42,6 +42,7 @@ let mints = 0;
 let projectSeq = 0;
 let projectsGate = null;
 let mintGate = null;
+const deploys = [];
 const server = createServer((req, res) => {
   let body = '';
   req.on('data', (c) => (body += c));
@@ -81,6 +82,7 @@ const server = createServer((req, res) => {
     }
     if (req.method === 'POST' && req.url === '/v1/deploy') {
       const parsed = JSON.parse(body);
+      deploys.push(parsed.project_id);
       return send(200, { files: 1, url: `https://${parsed.project_id}.somewhere.tech`, has_functions: false });
     }
     if (req.method === 'POST' && req.url === '/v1/auth/temp-handoff/register') {
@@ -183,29 +185,110 @@ test('many processes recording different roots at once lose none of them', async
   assert.equal(new Set(Object.values(stored.projects).map((p) => p.project_id)).size, names.length, 'six distinct throwaways');
 });
 
-test('a lock left by a crashed process is recovered; a held lock is waited for; none is left behind; no credential is printed', async () => {
+async function waitForFile(path) {
+  const deadline = Date.now() + 5000;
+  while (!existsSync(path) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
+  assert.equal(existsSync(path), true, 'holder reached the locked critical section');
+}
+
+function holdSidecarLock(configDir, marker) {
+  const configModule = pathToFileURL(join(dirname(distIndex), 'lib', 'config.js')).href;
+  const script = `import { updateTempSession } from ${JSON.stringify(configModule)};
+    import { writeFileSync } from 'node:fs';
+    updateTempSession((current) => {
+      writeFileSync(process.env.TEMP_LOCK_MARKER, 'ready');
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 60000);
+      return current;
+    });`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, SOMEWHERE_CONFIG_DIR: configDir, TEMP_LOCK_MARKER: marker },
+  });
+  return { child, closed: new Promise((r) => child.on('close', r)) };
+}
+
+test('a crashed writer leaves an intact sidecar and a recoverable lock; a live old lock is not stolen', async () => {
   const HOME = realLoginHome();
   const work = realpathSync(mkdtempSync(join(tmpdir(), 'sw-temp-conc-work-')));
   const [alpha, beta] = [app(work, 'alpha'), app(work, 'beta')];
   writeFileSync(sidecarPath(HOME), JSON.stringify({ token: 'smt_temp_shared', temp_expires_at: new Date(Date.now() + 3_600_000).toISOString(), claim_url: 'https://somewhere.tech/claim?token=shared' }));
   const lock = `${sidecarPath(HOME)}.lock`;
 
-  writeFileSync(lock, '');
-  const old = new Date(Date.now() - 60_000);
-  utimesSync(lock, old, old); // a crashed process's leftover
+  const crashed = holdSidecarLock(join(HOME, '.somewhere'), join(work, 'crashed-ready'));
+  await waitForFile(join(work, 'crashed-ready'));
+  crashed.child.kill('SIGKILL');
+  await crashed.closed;
+  assert.equal(sidecar(HOME).token, 'smt_temp_shared', 'interrupted update did not corrupt the previous credential');
   const stale = await start(['deploy', '--temporary'], alpha, HOME).done;
-  assert.equal(stale.status, 0, stale.out);
+  assert.equal(stale.status, 0, 'dead writer lock was recovered');
   assert.ok(sidecar(HOME).projects[alpha], 'recorded despite the stale lock');
 
-  writeFileSync(lock, ''); // held right now by "another process"
-  const waiting = start(['deploy', '--temporary'], beta, HOME);
-  setTimeout(() => unlinkSync(lock), 400);
-  const waited = await waiting.done;
-  assert.equal(waited.status, 0, waited.out);
+  const live = holdSidecarLock(join(HOME, '.somewhere'), join(work, 'live-ready'));
+  await waitForFile(join(work, 'live-ready'));
+  const old = new Date(Date.now() - 60_000);
+  utimesSync(lock, old, old); // age alone must not permit takeover
+  const refused = await start(['deploy', '--temporary'], beta, HOME).done;
+  assert.notEqual(refused.status, 0, 'live writer is not replaced after its lock looks stale');
+  assert.equal(sidecar(HOME).projects?.[beta], undefined);
+  assert.equal(existsSync(lock), true, 'the original owner still holds the lock');
+  live.child.kill('SIGKILL');
+  await live.closed;
+  const waited = await start(['deploy', '--temporary'], beta, HOME).done;
+  assert.equal(waited.status, 0, 'the stopped holder can be reclaimed');
   assert.deepEqual(Object.keys(sidecar(HOME).projects).sort(), [alpha, beta].sort());
 
   assert.equal(existsSync(lock), false, 'no lock file left behind');
   for (const out of [stale.out, waited.out]) {
     assert.doesNotMatch(out, /smt_temp_shared|smt_real_account/, 'credentials never printed');
   }
+});
+
+test('a credential replaced while project creation is in flight is neither overwritten nor linked to the old project', async () => {
+  const HOME = realLoginHome();
+  const work = realpathSync(mkdtempSync(join(tmpdir(), 'sw-temp-conc-work-')));
+  const alpha = app(work, 'alpha');
+  writeFileSync(sidecarPath(HOME), JSON.stringify({ token: 'smt_temp_before', temp_expires_at: new Date(Date.now() + 3_600_000).toISOString() }));
+  projectsGate = gate(1);
+  const run = start(['deploy', '--temporary'], alpha, HOME);
+  const held = await projectsGate.allArrived;
+  projectsGate = null;
+  const unrelated = { project_id: 'proj_other', name: 'other', subdomain: 'other' };
+  writeFileSync(sidecarPath(HOME), JSON.stringify({
+    token: 'smt_temp_after', temp_expires_at: new Date(Date.now() + 3_600_000).toISOString(),
+    projects: { [app(work, 'other')]: unrelated },
+  }));
+  const deploysBefore = deploys.length;
+  held[0].answer();
+  const refused = await run.done;
+  assert.notEqual(refused.status, 0, 'in-flight old credential must not silently become this root mapping');
+  assert.match(refused.out, /temporary session changed/i);
+  assert.doesNotMatch(refused.out, /smt_temp_before|smt_temp_after/);
+  assert.equal(deploys.length, deploysBefore, 'no deployment follows the stale project creation');
+  assert.equal(sidecar(HOME).token, 'smt_temp_after');
+  assert.equal(sidecar(HOME).projects?.[alpha], undefined);
+  assert.deepEqual(Object.values(sidecar(HOME).projects), [unrelated]);
+
+  const retry = await start(['deploy', '--temporary'], alpha, HOME).done;
+  assert.equal(retry.status, 0, 'retry uses the current credential and records this root');
+  assert.ok(sidecar(HOME).projects?.[alpha]);
+});
+
+test('unlock leaves a replacement lock owned by another writer untouched', async () => {
+  const HOME = realLoginHome();
+  writeFileSync(sidecarPath(HOME), JSON.stringify({ token: 'smt_temp_shared' }));
+  const lock = `${sidecarPath(HOME)}.lock`;
+  const configModule = pathToFileURL(join(dirname(distIndex), 'lib', 'config.js')).href;
+  const script = `import { updateTempSession } from ${JSON.stringify(configModule)};
+    import { unlinkSync, writeFileSync } from 'node:fs';
+    updateTempSession((current) => {
+      unlinkSync(process.env.TEMP_LOCK_PATH);
+      writeFileSync(process.env.TEMP_LOCK_PATH, JSON.stringify({ pid: process.pid, nonce: 'replacement' }));
+      return current;
+    });`;
+  const child = spawn(process.execPath, ['--input-type=module', '-e', script], {
+    env: { ...process.env, SOMEWHERE_CONFIG_DIR: join(HOME, '.somewhere'), TEMP_LOCK_PATH: lock },
+  });
+  const status = await new Promise((r) => child.on('close', r));
+  assert.equal(status, 0);
+  assert.equal(JSON.parse(readFileSync(lock, 'utf8')).nonce, 'replacement', 'old owner did not unlink a new lock');
+  unlinkSync(lock);
 });

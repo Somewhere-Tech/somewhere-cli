@@ -4,6 +4,7 @@ import {
   constants,
   existsSync,
   fchmodSync,
+  linkSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -161,10 +162,40 @@ export function saveTempSession(session: StoredTempSession): void {
 }
 
 const TEMP_SESSION_LOCK_PATH = `${TEMP_SESSION_PATH}.lock`;
-/** A lock older than this was left by a process that died mid-update: the
- *  critical section is one read and one write. */
-const TEMP_SESSION_LOCK_STALE_MS = 10_000;
 const TEMP_SESSION_LOCK_WAIT_MS = 5_000;
+interface TempSessionLockOwner { pid: number; nonce: string }
+
+function tempSessionLockOwner(): TempSessionLockOwner | null {
+  try {
+    const value = JSON.parse(readFileSync(TEMP_SESSION_LOCK_PATH, 'utf8')) as Partial<TempSessionLockOwner>;
+    return Number.isSafeInteger(value.pid) && (value.pid ?? 0) > 0
+      && typeof value.nonce === 'string' && value.nonce.length > 0
+      ? { pid: value.pid!, nonce: value.nonce } : null;
+  } catch {
+    return null;
+  }
+}
+
+function processIsAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true; }
+  catch (err) { return (err as NodeJS.ErrnoException).code !== 'ESRCH'; }
+}
+
+/** Only a lock whose recorded process is gone may be reclaimed. Age alone
+ * cannot prove that a slow writer has stopped. */
+function reclaimDeadTempSessionLock(): void {
+  const owner = tempSessionLockOwner();
+  if (!owner || processIsAlive(owner.pid)) return;
+  try {
+    const before = statSync(TEMP_SESSION_LOCK_PATH);
+    const confirmed = tempSessionLockOwner();
+    const after = statSync(TEMP_SESSION_LOCK_PATH);
+    if (confirmed?.pid === owner.pid && confirmed.nonce === owner.nonce
+      && before.dev === after.dev && before.ino === after.ino) {
+      unlinkSync(TEMP_SESSION_LOCK_PATH);
+    }
+  } catch { /* another waiter already reclaimed it */ }
+}
 
 /**
  * Read-modify-write the sidecar under an exclusive lock, so two CLI
@@ -192,22 +223,30 @@ function lockTempSession(): () => void {
   const deadline = Date.now() + TEMP_SESSION_LOCK_WAIT_MS;
   const pause = new Int32Array(new SharedArrayBuffer(4));
   for (;;) {
+    const owner = { pid: process.pid, nonce: randomUUID() };
+    const stagedPath = join(CONFIG_DIR, `.temp-session-lock-${owner.nonce}.tmp`);
+    let stagedFd: number | null = null;
     try {
-      closeSync(openSync(TEMP_SESSION_LOCK_PATH, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600));
+      // A hard link publishes the complete owner record atomically. A crash
+      // before link leaves only an unused staged file, never an ownerless lock.
+      stagedFd = openSync(stagedPath, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600);
+      writeFileSync(stagedFd, JSON.stringify(owner));
+      closeSync(stagedFd);
+      stagedFd = null;
+      linkSync(stagedPath, TEMP_SESSION_LOCK_PATH);
       return () => {
-        try { unlinkSync(TEMP_SESSION_LOCK_PATH); } catch { /* already gone */ }
+        const held = tempSessionLockOwner();
+        if (held?.pid === owner.pid && held.nonce === owner.nonce) {
+          try { unlinkSync(TEMP_SESSION_LOCK_PATH); } catch { /* already gone */ }
+        }
       };
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    } finally {
+      if (stagedFd !== null) closeSync(stagedFd);
+      try { unlinkSync(stagedPath); } catch { /* linked or interrupted attempt */ }
     }
-    try {
-      if (Date.now() - statSync(TEMP_SESSION_LOCK_PATH).mtimeMs > TEMP_SESSION_LOCK_STALE_MS) {
-        unlinkSync(TEMP_SESSION_LOCK_PATH);
-        continue;
-      }
-    } catch {
-      continue; // released between our attempts
-    }
+    reclaimDeadTempSessionLock();
     if (Date.now() > deadline) {
       throw new Error('Another somewhere command is updating the temporary session. Try again in a moment.');
     }

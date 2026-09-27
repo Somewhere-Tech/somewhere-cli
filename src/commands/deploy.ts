@@ -598,7 +598,11 @@ export function registerDeploy(program: Command) {
               const owner = sideCar.token;
               const created = targetProjectConfig;
               sideCar = updateTempSession((current) =>
-                current?.token === owner ? withTempProject(current, projectRoot, created) : current) ?? sideCar;
+                current?.token === owner && !tempProjectFor(current, projectRoot)
+                  ? withTempProject(current, projectRoot, created) : current);
+              if (sideCar?.token !== owner || tempProjectFor(sideCar, projectRoot)?.project_id !== created.project_id) {
+                throw new Error('The temporary session changed while creating this project. Retry this deploy to use its current project.');
+              }
             } else {
               saveProjectConfig(targetDir, targetProjectConfig);
             }
