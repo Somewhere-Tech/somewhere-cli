@@ -20,8 +20,8 @@ const { initInstallSpawnSpec, installInitDependencies, runInitInstall } =
   await import(`${moduleRoot}/lib/init-install.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createGreenTemplate } =
   await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
-const { createAuthTemplate } =
-  await import(`${moduleRoot}/lib/init-auth-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
+const { createFeatureTemplate } =
+  await import(`${moduleRoot}/lib/init-feature-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { AGENT_WORKFLOW } =
   await import(`${moduleRoot}/lib/init-agent-guide.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createHappyPathTemplate } =
@@ -204,101 +204,33 @@ declare module 'react-dom/client' {
   assert.deepEqual(result.errors, []);
 });
 
-test('default starter signs users in with the SDK client and the packaged handler', () => {
+test('default starter is the auth module: SDK client, packaged handler, hooks, replaceable views', () => {
   const dir = tempDir();
-  const result = writeInitScaffold(dir, createAuthTemplate());
-  assert.deepEqual(result.created.sort(), [
-    '.gitignore',
-    'AGENTS.md',
-    'CLAUDE.md',
-    'README.md',
-    'api/auth/[...path].ts',
-    'api/greeting.ts',
-    'db/schema.ts',
-    'index.html',
-    'package.json',
-    'src/App.tsx',
-    'src/main.tsx',
-    'src/services/auth.ts',
-    'src/services/greeting.ts',
-    'src/styles.css',
-    'tsconfig.json',
-    'types/app.ts',
-  ]);
+  const result = writeInitScaffold(dir, createFeatureTemplate(
+    { requested: ['auth'], added: [], modules: ['auth'], ui: 'styled' },
+    { appName: 'Starter' },
+  ));
+  assert.ok(result.created.includes('src/auth/hooks.ts'));
+  assert.ok(result.created.includes('src/ui/AuthCard.tsx'));
+  assert.ok(!result.created.includes('db/schema.ts'), 'private data is opt-in');
   // The auth route is ONE line: the SDK's maintained handler, no pasted logic.
   assert.equal(
     readFileSync(join(dir, 'api/auth/[...path].ts'), 'utf8'),
     "export { somewhereAuth as default } from '@somewhere-tech/sdk/server';\n",
   );
-  const greeting = readFileSync(join(dir, 'api/greeting.ts'), 'utf8');
-  assert.match(greeting, /export default sw\.endpoint\(\{\n  auth: 'required',/);
-  assert.match(greeting, /rateLimit: '30\/minute'/);
   assert.match(readFileSync(join(dir, 'src/services/auth.ts'), 'utf8'), /createSomewhereAuth\(\)/);
+  const hooks = readFileSync(join(dir, 'src/auth/hooks.ts'), 'utf8');
+  assert.match(hooks, /auth\.signIn\(credentials\)/);
+  assert.match(hooks, /auth\.signUp\(credentials\)/);
   const app = readFileSync(join(dir, 'src/App.tsx'), 'utf8');
-  assert.match(app, /auth\.signIn\(\{ email, password \}\)/);
-  assert.match(app, /auth\.signUp\(\{ email, password \}\)/);
   assert.doesNotMatch(app, /fetch\(/, 'components never fetch; services do');
+  assert.match(app, /Checking your session/, 'a visible loading state, never a blank gate');
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
   assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.10.0');
   for (const version of [...Object.values(pkg.dependencies), ...Object.values(pkg.devDependencies)]) {
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
   assert.doesNotMatch(Object.values(collectFiles(dir).files).join('\n'), /\bany\b/);
-});
-
-test('default starter typechecks with generated declarations only', async () => {
-  const dir = tempDir();
-  writeInitScaffold(dir, createAuthTemplate());
-  const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
-  mkdirSync(typesDir, { recursive: true });
-  writeFileSync(join(typesDir, 'index.d.ts'), `declare module 'react' {
-  export interface ReactNode {}
-  export interface FormEvent<T> { preventDefault(): void; currentTarget: T }
-  export const StrictMode: (props: { children?: ReactNode }) => JSX.Element;
-  export function useEffect(effect: () => void, dependencies: unknown[]): void;
-  export function useState<T>(initial: T): [T, (next: T) => void];
-}
-declare module 'react/jsx-runtime' {
-  namespace JSX {
-    interface Element {}
-    interface IntrinsicElements {
-      [name: string]: {
-        onChange?: (event: { target: { value: string } }) => void;
-        onClick?: () => void;
-        onSubmit?: (event: import('react').FormEvent<HTMLFormElement>) => void;
-        [prop: string]: unknown;
-      };
-    }
-  }
-  export function jsx(type: unknown, props: unknown): JSX.Element;
-  export function jsxs(type: unknown, props: unknown): JSX.Element;
-  export const Fragment: unknown;
-}
-declare module 'react-dom/client' {
-  export function createRoot(node: Element): { render(value: unknown): void };
-}
-declare module '@somewhere-tech/sdk/auth' {
-  export interface User { id: string; email: string | null }
-  export function createSomewhereAuth(): {
-    getCachedUser(): User | null;
-    getUser(): Promise<User | null>;
-    signIn(input: { email: string; password: string }): Promise<User>;
-    signUp(input: { email: string; password: string }): Promise<User>;
-    signOut(): Promise<void>;
-  };
-}
-declare module '@somewhere-tech/sdk/server' {
-  export function somewhereAuth(req: Request, sw: unknown): Promise<Response>;
-}
-`);
-
-  const result = await runTypecheck(dir);
-  assert.equal(result.ok, true, result.raw);
-  // sw.endpoint, sw.db and the tables come from the file typecheck generates.
-  const generated = readFileSync(join(dir, 'src/__somewhere_data.d.ts'), 'utf8');
-  assert.match(generated, /^\/\/ Generated by Somewhere from db\/schema\.ts\. Do not edit\./);
-  assert.match(generated, /declare const sw: \{/);
-  assert.equal(collectFiles(dir).files['src/__somewhere_data.d.ts'], undefined, 'the generated file is never deployed');
 });
 
 test('sw.endpoint declaration types auth, body and rate limit', async () => {

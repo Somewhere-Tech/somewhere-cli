@@ -683,8 +683,9 @@ test('init creates the green starter, --bare keeps only the workflow guide, and 
     });
     assert.equal(created.status, 0, `stdout:\n${created.stdout}\nstderr:\n${created.stderr}`);
     assert.deepEqual(JSON.parse(created.stdout), project);
-    assert.match(readFileSync(join(empty, 'api/greeting.ts'), 'utf8'), /sw\.db\.from/);
-    assert.match(readFileSync(join(empty, 'db/schema.ts'), 'utf8'), /greetings: table/);
+    assert.match(readFileSync(join(empty, 'src/auth/hooks.ts'), 'utf8'), /useAuthState as useSdkAuthState/);
+    assert.match(readFileSync(join(empty, 'src/config.ts'), 'utf8'), /APP_NAME = "Scaffold App"/);
+    assert.throws(() => readFileSync(join(empty, 'db/schema.ts')), /ENOENT/, 'private data is opt-in');
     assert.match(readFileSync(join(empty, 'AGENTS.md'), 'utf8'), /somewhere verify --flow flow\.json/);
     assert.equal(
       readFileSync(join(empty, 'CLAUDE.md'), 'utf8'),
@@ -696,9 +697,8 @@ test('init creates the green starter, --bare keeps only the workflow guide, and 
     const checked = await run(['deploy-check', '.', '--json'], { cwd: empty, env });
     assert.equal(checked.status, 0, `stdout:\n${checked.stdout}\nstderr:\n${checked.stderr}`);
     assert.deepEqual(JSON.parse(checked.stdout), { ok: true, errors: [] });
-    assert.ok(deployCheckBody.files['db/schema.ts']);
     assert.ok(deployCheckBody.files['src/main.tsx']);
-    assert.ok(deployCheckBody.functions['api/greeting.ts']);
+    assert.ok(deployCheckBody.files['src/ui/AuthCard.tsx']);
     assert.equal(
       readFileSync(join(empty, 'api/auth/[...path].ts'), 'utf8'),
       "export { somewhereAuth as default } from '@somewhere-tech/sdk/server';\n",

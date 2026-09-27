@@ -42,8 +42,25 @@ export function writeInitScaffold(
   dir: string,
   files: readonly InitScaffoldFile[],
 ): InitScaffoldResult {
+  const targets = preflightInitScaffold(dir, files);
+  for (const [target, file] of targets) {
+    mkdirSync(dirname(target), { recursive: true });
+    writeFileSync(target, file.content, { encoding: 'utf8', flag: 'wx' });
+  }
+
+  return { created: [...targets.values()].map(({ path }) => path) };
+}
+
+/**
+ * The confinement and overwrite checks alone, with nothing written, so a
+ * caller can refuse a plan before any remote mutation.
+ */
+export function preflightInitScaffold(
+  dir: string,
+  files: readonly InitScaffoldFile[],
+): Map<string, InitScaffoldFile> {
   const root = resolve(dir);
-  const targets = new Map<string, { path: string; content: string }>();
+  const targets = new Map<string, InitScaffoldFile>();
 
   for (const file of files) {
     const normalizedPath = file.path.replace(/\\/g, '/').replace(/^\/+/, '');
@@ -65,13 +82,7 @@ export function writeInitScaffold(
     }
     targets.set(target, { path: normalizedPath, content: file.content });
   }
-
-  for (const [target, file] of targets) {
-    mkdirSync(dirname(target), { recursive: true });
-    writeFileSync(target, file.content, { encoding: 'utf8', flag: 'wx' });
-  }
-
-  return { created: [...targets.values()].map(({ path }) => path) };
+  return targets;
 }
 
 /**
