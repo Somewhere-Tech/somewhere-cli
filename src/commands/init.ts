@@ -20,9 +20,8 @@ import {
   type InitScaffoldFile,
 } from '../lib/init-scaffold.js';
 import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from '../lib/init-agent-guide.js';
-import { createAuthTemplate } from '../lib/init-auth-template.js';
 import { createGreenTemplate } from '../lib/init-green-template.js';
-import { createFeatureTemplate } from '../lib/init-feature-template.js';
+import { createFeatureTemplate, extensionPoints } from '../lib/init-feature-template.js';
 import {
   describeSelection,
   initCatalog,
@@ -50,9 +49,8 @@ interface InitOptions {
 const INIT_TEMPLATES = ['auth', 'minimal'] as const;
 type InitTemplateName = (typeof INIT_TEMPLATES)[number];
 
-function starterFiles(name: InitTemplateName) {
-  return name === 'minimal' ? createGreenTemplate() : createAuthTemplate();
-}
+/** The default (auth) starter is the same generator as `--features auth`. */
+const DEFAULT_AUTH_SELECTION: InitSelection = { requested: ['auth'], added: [], modules: ['auth'], ui: 'styled' };
 
 interface LinkProject {
   id: string;
@@ -78,11 +76,11 @@ export function registerInit(program: Command) {
     .addHelpText(
       'after',
       '\nRecommended for a new app: run `somewhere init` in an empty directory.\n'
-        + 'The starter is a deployable React + TypeScript app with cookie sign-in: the SDK\n'
-        + 'client in src/services/auth.ts, the SDK\'s packaged handler as a one-line\n'
-        + 'api/auth/[...path].ts, a protected api/greeting.ts (sw.endpoint), db/schema.ts,\n'
-        + 'and an AGENTS.md workflow (typecheck, deploy, verify). `--template minimal` writes\n'
-        + 'the same app without sign-in.\n'
+        + 'The starter is a deployable React + TypeScript app with cookie sign-in (the\n'
+        + '`auth` module): the SDK\'s packaged handler as a one-line api/auth/[...path].ts,\n'
+        + 'the SDK client in src/services/auth.ts, hooks in src/auth/, pages in src/pages/,\n'
+        + 'replaceable views in src/ui/ and styles in src/styles/, plus an AGENTS.md workflow\n'
+        + '(typecheck, deploy, verify). `--template minimal` writes an app without sign-in.\n'
         + '\nA directory that already has files is linked and left untouched. Use --bare\n'
         + 'only to bring your own layout; existing AGENTS.md/CLAUDE.md are never replaced.\n'
         + '\nPick modules instead of a template (agents: no questions asked):\n'
@@ -150,7 +148,9 @@ export function registerInit(program: Command) {
       const client = new ApiClient(token);
       const shouldScaffold = !opts.bare && canWriteInitScaffold(dir);
       const scaffoldFiles = (projectName: string): InitScaffoldFile[] =>
-        plan ? createFeatureTemplate(plan.selection, { appName: projectName }) : starterFiles(template);
+        template === 'minimal' && !plan
+          ? createGreenTemplate()
+          : createFeatureTemplate(plan?.selection ?? DEFAULT_AUTH_SELECTION, { appName: projectName });
 
       const existing = loadProjectConfig(dir);
       if (existing && !opts.project) {
@@ -233,7 +233,9 @@ export function registerInit(program: Command) {
           } else if (opts.bare) {
             writeBareGuide(dir);
           }
-          printJson(plan ? { ...project, selection: plan.selection } : project);
+          printJson(plan
+            ? { ...project, selection: plan.selection, extension_points: extensionPoints(plan.selection) }
+            : project);
           return;
         }
         success(`Project created: ${teal(project.name)}`);
@@ -250,7 +252,11 @@ export function registerInit(program: Command) {
         if (shouldScaffold) {
           const scaffold = writeInitScaffold(dir, scaffoldFiles(project.name));
           success(`Full-stack starter written (${scaffold.created.length} files)`);
-          if (plan) info(`Modules: ${describeSelection(plan.selection)}`);
+          if (template !== 'minimal' || plan) {
+            const selection = plan?.selection ?? DEFAULT_AUTH_SELECTION;
+            info(`Modules: ${describeSelection(selection)}`);
+            for (const [area, where] of Object.entries(extensionPoints(selection))) console.log(`  ${area}: ${where}`);
+          }
           info('Installing pinned dependencies with `npm install`…');
           await installInitDependencies({ cwd: dir, quiet: false });
           success('Dependencies installed');
@@ -333,8 +339,7 @@ function printCatalog(opts: InitOptions, command: Command): void {
     command.getOptionValueSource('template') === 'cli' ? '--template' : null,
   ].filter((flag): flag is string => flag !== null);
   if (extra.length) throw new InitSelectionError(`--catalog only prints the catalog; drop ${extra.join(', ')}.`);
-  const catalog: InitCatalog = initCatalog((selection) =>
-    createFeatureTemplate(selection, { appName: 'app' }).map((file) => file.path));
+  const catalog: InitCatalog = initCatalog((selection) => createFeatureTemplate(selection, { appName: 'app' }));
   if (opts.json) {
     printJson(catalog);
     return;

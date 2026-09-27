@@ -75,7 +75,7 @@ test('unknown modules, unoffered modules and unknown UI modes are usage errors',
 });
 
 test('catalog is machine-readable and lists module files from the generator', () => {
-  const catalog = initCatalog((selection) => createFeatureTemplate(selection, { appName: 'x' }).map((f) => f.path));
+  const catalog = initCatalog((selection) => createFeatureTemplate(selection, { appName: 'x' }));
   assert.equal(catalog.version, 1);
   assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['private-data', ['auth']]]);
   assert.ok(catalog.modules[0].files.includes('api/auth/[...path].ts'));
@@ -88,7 +88,8 @@ test('catalog is machine-readable and lists module files from the generator', ()
   ]);
   assert.deepEqual(catalog.ui.map((u) => u.id), ['styled', 'headless']);
   assert.ok(catalog.ui[0].files.includes('src/styles/tokens.css'));
-  assert.deepEqual(catalog.ui[1].files, []);
+  assert.deepEqual(catalog.ui[1].files, ['src/ui/AppShell.tsx', 'src/ui/AuthCard.tsx', 'src/ui/NotesBoard.tsx', 'src/ui/feedback.tsx']);
+  assert.ok(!catalog.ui[0].files.some((path) => path.startsWith('src/pages/')), 'pages are shared by both modes');
   assert.equal(catalog.defaults.ui, 'styled');
   for (const id of ['private-files', 'payments', 'teams', 'public-sharing', 'password-reset', 'oauth', 'mfa']) {
     assert.ok(catalog.not_offered.some((entry) => entry.id === id), id);
@@ -107,15 +108,14 @@ test('every combination separates types, services, hooks, pages and presentation
       'api/auth/[...path].ts',
       'types/auth.ts',
       'src/services/auth.ts',
-      'src/auth/AuthProvider.tsx',
       'src/auth/hooks.ts',
       'src/routes.ts',
       'src/App.tsx',
       'src/pages/SignInPage.tsx',
-      'src/pages/LoadingPage.tsx',
+      'src/pages/HomePage.tsx',
+      'src/ui/AuthCard.tsx',
     ]) assert.ok(files.includes(path), `${label}: ${path}`);
     assert.equal(files.includes('db/schema.ts'), features.includes('private-data'), label);
-    assert.equal(files.some((path) => path.startsWith('src/ui/')), ui === 'styled', label);
     assert.equal(files.some((path) => path.startsWith('src/styles/')), ui === 'styled', label);
 
     // The packaged SDK route, byte-identical to the default starter's.
@@ -123,8 +123,9 @@ test('every combination separates types, services, hooks, pages and presentation
     // App.tsx routes; it neither fetches nor renders forms.
     const app = read('src/App.tsx');
     assert.doesNotMatch(app, /fetch\(|<form|<input|somewhere:data/);
-    assert.match(app, /session\.status === 'loading'\) return <LoadingPage \/>/);
+    assert.match(app, /session\.status === 'loading'\) return <LoadingScreen /);
     assert.match(app, /session\.status === 'signed-out'\) return <SignInPage \/>/);
+    assert.match(app, /<PrivateRoutes key=\{session\.user\.id\}/, 'private subtree is keyed by the verified user');
 
     const all = Object.values(collectFiles(dir).files).join('\n');
     assert.doesNotMatch(all, /\bany\b/);
@@ -138,18 +139,27 @@ test('every combination separates types, services, hooks, pages and presentation
   }
 });
 
-test('presentational ui files take props only: no auth, data, service or SDK imports', () => {
-  const { dir, result } = generate('auth,private-data', 'styled');
-  const uiFiles = result.created.filter((path) => path.startsWith('src/ui/'));
-  assert.ok(uiFiles.length >= 7);
-  for (const path of uiFiles) {
-    const content = readFileSync(join(dir, path), 'utf8');
+test('views take props only, and both UI modes share pages, hooks and view signatures', () => {
+  const styled = generate('auth,private-data', 'styled');
+  const plain = generate('auth,private-data', 'headless');
+  for (const path of styled.result.created.filter((p) => /^(src\/(pages|auth|data|services)\/|types\/|src\/App|src\/routes)/.test(p))) {
+    assert.equal(plain.read(path), styled.read(path), `${path} is shared`);
+  }
+  const signatures = (text) => [...text.matchAll(/^export (?:function \w+\([^)]*\)|interface \w+)/gm)].map((m) => m[0]);
+  for (const path of styled.result.created.filter((p) => p.startsWith('src/ui/'))) {
+    assert.deepEqual(signatures(plain.read(path)), signatures(styled.read(path)), `${path}: same exports and props`);
+  }
+  const { dir, result } = styled;
+  const uiFiles = [...result.created.filter((path) => path.startsWith('src/ui/'))];
+  assert.equal(uiFiles.length, 4);
+  for (const [root, path] of [...uiFiles.map((p) => [dir, p]), ...uiFiles.map((p) => [plain.dir, p])]) {
+    const content = readFileSync(join(root, path), 'utf8');
     const imports = [...content.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
     for (const specifier of imports) {
       assert.match(specifier, /^(react|\.\/[A-Za-z]+|\.\.\/routes|\.\.\/\.\.\/types\/(auth|notes))$/, `${path} imports ${specifier}`);
     }
     assert.doesNotMatch(content, /import (?!type)[^;]*\.\.\/\.\.\/types/, `${path}: types are type-only imports`);
-    assert.doesNotMatch(content, /\buse(Auth|User|Notes|SignOut|CredentialsForm)\b/, path);
+    assert.doesNotMatch(content, /\buse(Auth|User|Notes|SignOut|CredentialsForm)\b|fetch\(/, path);
   }
   // Deleting the look leaves behaviour intact: services/hooks never import ui or styles.
   for (const path of ['src/services/auth.ts', 'src/services/notes.ts', 'src/auth/hooks.ts', 'src/data/useNotes.ts']) {
@@ -259,6 +269,7 @@ const CONTRACT_TYPES = `declare module 'react' {
 declare module 'react/jsx-runtime' {
   namespace JSX {
     interface Element {}
+    interface IntrinsicAttributes { key?: string | number }
     interface IntrinsicElements {
       [name: string]: {
         onChange?: (event: { target: { value: string } }) => void;
@@ -368,7 +379,8 @@ test('--dry-run resolves requirements and prints the plan without login, request
   assert.equal(plan.dry_run, true);
   assert.deepEqual(plan.selection, { requested: ['private-data'], added: ['auth'], modules: ['auth', 'private-data'], ui: 'headless' });
   assert.ok(plan.files.includes('db/schema.ts'));
-  assert.ok(!plan.files.some((path) => path.startsWith('src/ui/')));
+  assert.ok(plan.files.includes('src/ui/AuthCard.tsx'));
+  assert.ok(!plan.files.some((path) => path.startsWith('src/styles/')));
   assert.deepEqual(readdirSync(dir), []);
   assert.deepEqual(requests, []);
 });

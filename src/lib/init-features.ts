@@ -17,19 +17,19 @@ interface InitModuleDefinition {
 const MODULES: readonly InitModuleDefinition[] = [
   {
     id: 'auth',
-    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, an auth provider and hooks, sign-in and account pages, and a signed-out gate with a loading state.',
+    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, auth hooks over the SDK provider, a sign-in page, and a per-user private boundary behind a loading state. This is what plain `somewhere init` writes.',
     requires: [],
   },
   {
     id: 'private-data',
-    summary: 'A notes table each signed-in user owns (db/schema.ts owner()), read and written from the browser through the generated somewhere:data client, with validation, error mapping and no-change results.',
+    summary: 'A notes table each signed-in user owns (db/schema.ts owner()), read and written from the browser through the generated somewhere:data client, with form validation, error mapping, no-change results, and a per-user reset on sign-out or account switch.',
     requires: ['auth'],
   },
 ];
 
 const UI_MODES: readonly { id: InitUiMode; summary: string }[] = [
-  { id: 'styled', summary: 'Presentational components in src/ui and design tokens in src/styles/tokens.css. Restyle or delete them without touching auth or data behaviour.' },
-  { id: 'headless', summary: 'Same types, services, hooks and routing; pages use plain semantic markup and there is no CSS, for an app that brings its own UI.' },
+  { id: 'styled', summary: 'Styled views in src/ui plus src/styles/tokens.css and app.css. Replace them without touching auth or data behaviour.' },
+  { id: 'headless', summary: 'The same pages, hooks and view props; src/ui holds plain semantic views and there is no CSS, for an app that brings its own UI.' },
 ];
 
 // Listed so an agent reading the catalog does not invent them from scratch.
@@ -113,11 +113,12 @@ export interface InitCatalog {
 }
 
 /**
- * The machine-readable menu. `filesFor` lists the paths a selection writes;
- * each module's `files` are the paths it adds over its requirements (styled),
- * and each UI mode's `files` are the paths only that mode writes.
+ * The machine-readable menu. `generate` writes a selection's files; each
+ * module's `files` are the paths it adds over its requirements (styled), and
+ * each UI mode's `files` are the paths whose content that mode decides.
  */
-export function initCatalog(filesFor: (selection: InitSelection) => string[]): InitCatalog {
+export function initCatalog(generate: (selection: InitSelection) => { path: string; content: string }[]): InitCatalog {
+  const filesFor = (selection: InitSelection) => generate(selection).map((file) => file.path);
   const selection = (modules: InitModuleId[], ui: InitUiMode = 'styled'): InitSelection =>
     ({ requested: modules, added: [], modules, ui });
   const difference = (all: string[], base: string[]) => all.filter((path) => !base.includes(path)).sort();
@@ -134,14 +135,18 @@ export function initCatalog(filesFor: (selection: InitSelection) => string[]): I
         entry.requires.length ? filesFor(selection([...entry.requires])) : [],
       ),
     })),
-    ui: UI_MODES.map((mode) => ({
-      id: mode.id,
-      summary: mode.summary,
-      files: difference(
-        filesFor(selection(everything, mode.id)),
-        filesFor(selection(everything, mode.id === 'styled' ? 'headless' : 'styled')),
-      ),
-    })),
+    ui: UI_MODES.map((mode) => {
+      const other = new Map(generate(selection(everything, mode.id === 'styled' ? 'headless' : 'styled'))
+        .map((file) => [file.path, file.content]));
+      return {
+        id: mode.id,
+        summary: mode.summary,
+        files: generate(selection(everything, mode.id))
+          .filter((file) => other.get(file.path) !== file.content && !file.path.endsWith('.md') && file.path !== 'src/main.tsx')
+          .map((file) => file.path)
+          .sort(),
+      };
+    }),
     defaults: { ui: 'styled' },
     not_offered: NOT_OFFERED.map((entry) => ({ ...entry })),
   };

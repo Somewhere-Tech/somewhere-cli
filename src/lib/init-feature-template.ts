@@ -2,9 +2,10 @@ import type { InitScaffoldFile } from './init-scaffold.js';
 import type { InitSelection } from './init-features.js';
 import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from './init-agent-guide.js';
 
-// Files for `somewhere init --features`. Behaviour (types, services, hooks,
-// routing) is shared by both UI modes; `styled` adds src/ui + src/styles and
-// pages that compose them, `headless` writes plain-markup pages instead.
+// Files for the auth starter (`somewhere init`, `--features ...`). Types,
+// services, hooks, routing and pages are written once. Only the views in
+// src/ui differ by --ui: styled views + src/styles, or plain semantic views
+// with the same exported names and props.
 
 export interface FeatureTemplateOptions {
   appName: string;
@@ -66,21 +67,19 @@ function indexHtml(appName: string): string {
 `;
 }
 
-// ---------------------------------------------------------------- auth: server
+// ------------------------------------------------------------------ behaviour
 
 const AUTH_API = `export { somewhereAuth as default } from '@somewhere-tech/sdk/server';
 `;
-
-// ----------------------------------------------------------------- auth: types
 
 const AUTH_TYPES = `import type { User } from '@somewhere-tech/sdk/auth';
 
 export type { User };
 
-/** loading: the first session check has not answered and nothing is cached. */
+/** loading: the first /api/auth/me check has not answered yet. */
 export type AuthState =
-  | { status: 'loading'; user: null }
-  | { status: 'signed-out'; user: null }
+  | { status: 'loading' }
+  | { status: 'signed-out' }
   | { status: 'signed-in'; user: User };
 
 export type CredentialsMode = 'sign-in' | 'sign-up';
@@ -106,13 +105,10 @@ export interface SignOutAction {
 }
 `;
 
-// -------------------------------------------------------------- auth: services
-
 const AUTH_SERVICE = `import { AuthError, createSomewhereAuth } from '@somewhere-tech/sdk/auth';
 
-// The app's only auth client. It talks to api/auth/[...path].ts (the SDK's
-// packaged handler). The session is an httpOnly cookie the browser keeps;
-// nothing in this app reads, stores or sends a token.
+// The app's auth client (SDK). It talks to api/auth/[...path].ts. The session
+// is an httpOnly cookie the browser keeps; app code never handles a token.
 export const auth = createSomewhereAuth();
 
 export const PASSWORD_MIN_LENGTH = 8;
@@ -125,29 +121,19 @@ export function authErrorMessage(reason: unknown): string {
 }
 `;
 
-// ----------------------------------------------------------------- auth: hooks
-
-const AUTH_PROVIDER = `import type { ReactNode } from 'react';
-import { SomewhereAuthProvider } from '@somewhere-tech/sdk/react';
-import { auth } from '../services/auth';
-
-/** The SDK provider bound to the app's client: it checks /api/auth/me once on
- *  load and re-renders on sign-in and sign-out. */
-export function AuthProvider({ children }: { children: ReactNode }) {
-  return <SomewhereAuthProvider client={auth}>{children}</SomewhereAuthProvider>;
-}
-`;
-
 const AUTH_HOOKS = `import { useState } from 'react';
 import { useAuth, useAuthLoading, useUser } from '@somewhere-tech/sdk/react';
 import type { AuthState, CredentialsForm, CredentialsMode, SignOutAction } from '../../types/auth';
 import { authErrorMessage, PASSWORD_MIN_LENGTH } from '../services/auth';
 
+// State and actions over the SDK provider; no session store of its own.
+// A user cached from an earlier visit is not treated as signed in until the
+// first session check answers.
 export function useAuthState(): AuthState {
   const user = useUser();
   const loading = useAuthLoading();
-  if (user) return { status: 'signed-in', user };
-  return loading ? { status: 'loading', user: null } : { status: 'signed-out', user: null };
+  if (loading) return { status: 'loading' };
+  return user ? { status: 'signed-in', user } : { status: 'signed-out' };
 }
 
 export function useCredentialsForm(initialMode: CredentialsMode = 'sign-in'): CredentialsForm {
@@ -168,7 +154,7 @@ export function useCredentialsForm(initialMode: CredentialsMode = 'sign-in'): Cr
     try {
       const credentials = { email: email.trim(), password };
       await (mode === 'sign-in' ? auth.signIn(credentials) : auth.signUp(credentials));
-      // The provider now has the user, so the sign-in page unmounts.
+      // The provider now has the user; App replaces the sign-in page.
     } catch (reason: unknown) {
       setError(authErrorMessage(reason));
       setPending(false);
@@ -205,7 +191,6 @@ export function useSignOut(): SignOutAction {
       await auth.signOut();
     } catch (reason: unknown) {
       setError(authErrorMessage(reason));
-    } finally {
       setPending(false);
     }
   }
@@ -214,16 +199,13 @@ export function useSignOut(): SignOutAction {
 }
 `;
 
-// --------------------------------------------------------------------- routing
-
 const ROUTES = `import { useEffect, useState, type MouseEvent } from 'react';
 
-// Single entry: the platform serves index.html for every extensionless path
-// (/account, /anything), so the app routes on location.pathname. To add a
-// page, add its path here and a case in App.tsx.
+// Single entry: the platform serves index.html for every extensionless path,
+// so the app routes on location.pathname. To add a page, add its path here
+// and a case in App.tsx.
 export const ROUTES = {
   home: '/',
-  account: '/account',
 } as const;
 
 export type RoutePath = (typeof ROUTES)[keyof typeof ROUTES];
@@ -239,7 +221,7 @@ export function navigate(path: RoutePath): void {
   window.dispatchEvent(new PopStateEvent('popstate'));
 }
 
-/** Props for an <a> that navigates in-app but keeps new-tab/copy-link behaviour. */
+/** Props for an <a> that navigates in-app and keeps new-tab behaviour. */
 export function linkTo(path: RoutePath): LinkProps {
   return {
     href: path,
@@ -263,31 +245,33 @@ export function usePathname(): string {
 }
 `;
 
-const APP = `import { useAuthState } from './auth/hooks';
-import { AccountPage } from './pages/AccountPage';
+const APP = `import type { User } from '../types/auth';
+import { useAuthState } from './auth/hooks';
 import { HomePage } from './pages/HomePage';
-import { LoadingPage } from './pages/LoadingPage';
 import { NotFoundPage } from './pages/NotFoundPage';
 import { SignInPage } from './pages/SignInPage';
 import { ROUTES, usePathname } from './routes';
+import { LoadingScreen } from './ui/feedback';
 
-// Routing and the sign-in gate only. Every path is private here: signed-out
-// visitors see the sign-in page at whatever URL they opened, and land on it
-// again after signing in. For a public page, route it above the gate.
+// Routing and the sign-in boundary. This gate is UX: the server and
+// db/schema.ts decide what each request may read or write.
 export function App() {
   const session = useAuthState();
-  const pathname = usePathname();
 
-  if (session.status === 'loading') return <LoadingPage />;
+  if (session.status === 'loading') return <LoadingScreen label="Checking your session…" />;
   if (session.status === 'signed-out') return <SignInPage />;
+  // Keyed by user id: signing out or switching accounts unmounts every
+  // private page, so no state from the previous account renders again.
+  return <PrivateRoutes key={session.user.id} user={session.user} />;
+}
 
+function PrivateRoutes({ user }: { user: User }) {
+  const pathname = usePathname();
   switch (pathname) {
     case ROUTES.home:
-      return <HomePage user={session.user} />;
-    case ROUTES.account:
-      return <AccountPage user={session.user} />;
+      return <HomePage user={user} />;
     default:
-      return <NotFoundPage user={session.user} />;
+      return <NotFoundPage user={user} />;
   }
 }
 `;
@@ -296,33 +280,34 @@ function mainTsx(styled: boolean): string {
   const styles = styled ? `import './styles/tokens.css';\nimport './styles/app.css';\n` : '';
   return `import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
+import { SomewhereAuthProvider } from '@somewhere-tech/sdk/react';
 import { App } from './App';
-import { AuthProvider } from './auth/AuthProvider';
+import { auth } from './services/auth';
 ${styles}
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <AuthProvider>
+    <SomewhereAuthProvider client={auth}>
       <App />
-    </AuthProvider>
+    </SomewhereAuthProvider>
   </StrictMode>,
 );
 `;
 }
 
 function configTs(appName: string): string {
-  return `// Shown in the header, the sign-in page and the tab title (index.html).
+  return `// Shown in the header and on the sign-in page; index.html holds the tab title.
 export const APP_NAME = ${JSON.stringify(appName)};
 `;
 }
 
-// -------------------------------------------------------- private-data: server
+// ------------------------------------------------------- private-data: backend
 
 const SCHEMA = `import { id, owner, schema, table, text } from 'somewhere/db';
 
-// notes: owner() means each signed-in user reads and writes only their own
-// rows. The platform enforces it on the browser client (somewhere:data),
-// direct HTTP and sw.db inside functions, so no code in this app filters by
-// user. \`somewhere docs declared-data\` is the contract.
+// notes: owner() gives each signed-in user their own rows through the
+// generated somewhere:data client, so the browser code sends no user filter.
+// Functions you add can use explicit server-authority calls that skip this
+// scope; they must check the caller themselves. \`somewhere docs declared-data\`
 export default schema({
   notes: table(
     { id: id(), title: text(), body: text({ default: '' }) },
@@ -340,8 +325,6 @@ export default schema({
 });
 `;
 
-// --------------------------------------------------------- private-data: types
-
 const NOTES_TYPES = `export interface Note {
   id: number | string;
   title: string;
@@ -357,8 +340,8 @@ export interface NoteDraft {
 
 export type NoteDraftErrors = Partial<Record<keyof NoteDraft, string>>;
 
-/** unchanged: nothing differed, so nothing was written. missing: the note no
- *  longer exists for this user (deleted elsewhere, or never theirs). */
+/** unchanged: nothing differed, so nothing was written. missing: the note is
+ *  gone for this user (deleted elsewhere, or never theirs). */
 export type NoteSaveResult =
   | { kind: 'saved'; note: Note }
   | { kind: 'unchanged' }
@@ -392,16 +375,13 @@ export interface NotesController {
 }
 `;
 
-// ------------------------------------------------------ private-data: services
-
 const NOTES_SERVICE = `import { data, DataError } from 'somewhere:data';
 import type { Note, NoteDraft, NoteDraftErrors, NoteId, NoteRemoveResult, NoteSaveResult } from '../../types/notes';
 
+// Length limits are for the form. db/schema.ts has no length constraint, so
+// a hard limit belongs in a function that validates before it writes.
 export const NOTE_LIMITS = { title: 120, body: 4000 } as const;
 const PAGE_SIZE = 100;
-
-// Rows arrive already limited to the signed-in user (owner() in
-// db/schema.ts). Never add a user filter here; the platform owns it.
 
 export function normalizeDraft(draft: NoteDraft): NoteDraft {
   return { title: draft.title.trim(), body: draft.body.trim() };
@@ -416,11 +396,12 @@ export function validateDraft(draft: NoteDraft): NoteDraftErrors {
   return errors;
 }
 
-export function sameDraft(note: Note, draft: NoteDraft): boolean {
+function sameDraft(note: Note, draft: NoteDraft): boolean {
   const next = normalizeDraft(draft);
   return note.title === next.title && note.body === next.body;
 }
 
+// Rows come back scoped to the signed-in user by owner(); send no user filter.
 export async function listNotes(): Promise<{ notes: Note[]; truncated: boolean }> {
   const page = await data.notes.list({ limit: PAGE_SIZE });
   return { notes: page.data, truncated: page.has_more };
@@ -454,7 +435,7 @@ export async function removeNote(id: NoteId): Promise<NoteRemoveResult> {
   }
 }
 
-/** A missing note and a note this user may not write answer the same way. */
+/** A missing note and one this user may not write answer the same way. */
 function isNotFound(reason: unknown): boolean {
   return reason instanceof DataError && reason.code === 'DATA_NOT_FOUND';
 }
@@ -470,10 +451,6 @@ export function notesErrorMessage(reason: unknown): string {
         return 'Your session ended. Sign in again.';
       case 'DATA_CONTRACT_MISMATCH':
         return 'This app was just updated. Reload the page to continue.';
-      case 'DATA_INPUT_INVALID':
-      case 'DATA_VALUE_INVALID':
-      case 'DATA_INPUT_TOO_LARGE':
-        return reason.message || 'That note could not be saved as written.';
       default:
         return reason.message || 'The request failed (' + reason.status + ').';
     }
@@ -484,9 +461,7 @@ export function notesErrorMessage(reason: unknown): string {
 }
 `;
 
-// --------------------------------------------------------- private-data: hooks
-
-const USE_NOTES = `import { useEffect, useState } from 'react';
+const USE_NOTES = `import { useEffect, useRef, useState } from 'react';
 import { useAuth } from '@somewhere-tech/sdk/react';
 import type { Note, NoteDraft, NoteDraftErrors, NoteId, NotesController, NotesStatus } from '../../types/notes';
 import {
@@ -502,10 +477,12 @@ import {
 
 const EMPTY_DRAFT: NoteDraft = { title: '', body: '' };
 
-/** Notes for one signed-in user. Changing userId clears everything first, so
- *  one account never sees another's rows while the new list loads. */
-export function useNotes(userId: string): NotesController {
+// Mounted inside App's per-user boundary, so a new account always starts from
+// a fresh hook. Results that arrive after this view unmounted (sign-out,
+// account switch) are dropped, including writes still in flight.
+export function useNotes(): NotesController {
   const auth = useAuth();
+  const mounted = useRef(true);
   const [status, setStatus] = useState<NotesStatus>('loading');
   const [notes, setNotes] = useState<Note[]>([]);
   const [truncated, setTruncated] = useState(false);
@@ -518,9 +495,15 @@ export function useNotes(userId: string): NotesController {
   const [notice, setNotice] = useState<NotesController['notice']>(null);
 
   useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
     let current = true;
     setStatus('loading');
-    setNotes([]);
     setLoadError(null);
     listNotes()
       .then((result) => {
@@ -538,16 +521,10 @@ export function useNotes(userId: string): NotesController {
     return () => {
       current = false;
     };
-  }, [userId, reloadKey, auth]);
-
-  useEffect(() => {
-    setDraft(EMPTY_DRAFT);
-    setEditingId(null);
-    setNotice(null);
-  }, [userId]);
+  }, [reloadKey, auth]);
 
   const errors = validateDraft(draft);
-  // An empty title only disables the button; it is not shouted at while typing.
+  // An empty title disables Save; it is not flagged while the user types.
   const draftErrors: NoteDraftErrors = draft.title.trim() ? errors : { body: errors.body };
   const editing = editingId === null ? null : notes.find((note) => note.id === editingId) ?? null;
   const canSave = !saving && Object.keys(errors).length === 0;
@@ -564,6 +541,7 @@ export function useNotes(userId: string): NotesController {
     try {
       if (editing) {
         const result = await updateNote(editing, draft);
+        if (!mounted.current) return;
         if (result.kind === 'saved') {
           setNotes((list) => list.map((note) => (note.id === editing.id ? result.note : note)));
           setNotice({ tone: 'info', text: 'Saved.' });
@@ -575,15 +553,16 @@ export function useNotes(userId: string): NotesController {
         }
       } else {
         const created = await createNote(draft);
+        if (!mounted.current) return;
         setNotes((list) => [...list, created]);
         setNotice({ tone: 'info', text: 'Added.' });
       }
       setDraft(EMPTY_DRAFT);
       setEditingId(null);
     } catch (reason: unknown) {
-      fail(reason);
+      if (mounted.current) fail(reason);
     } finally {
-      setSaving(false);
+      if (mounted.current) setSaving(false);
     }
   }
 
@@ -592,18 +571,17 @@ export function useNotes(userId: string): NotesController {
     setNotice(null);
     try {
       const result = await removeNote(note.id);
+      if (!mounted.current) return;
       setNotes((list) => list.filter((item) => item.id !== note.id));
       if (editingId === note.id) {
         setEditingId(null);
         setDraft(EMPTY_DRAFT);
       }
-      setNotice(result.kind === 'removed'
-        ? { tone: 'info', text: 'Deleted.' }
-        : { tone: 'info', text: 'That note was already removed.' });
+      setNotice({ tone: 'info', text: result.kind === 'removed' ? 'Deleted.' : 'That note was already removed.' });
     } catch (reason: unknown) {
-      fail(reason);
+      if (mounted.current) fail(reason);
     } finally {
-      setRemovingId(null);
+      if (mounted.current) setRemovingId(null);
     }
   }
 
@@ -637,13 +615,106 @@ export function useNotes(userId: string): NotesController {
 }
 `;
 
-// ------------------------------------------------------------------- styled ui
+// ---------------------------------------------------------------------- pages
+// One set of pages for both UI modes: hooks in, typed values and callbacks out.
 
-const UI_FEEDBACK = `import type { ReactNode } from 'react';
+const SIGN_IN_PAGE = `import { useCredentialsForm } from '../auth/hooks';
+import { APP_NAME } from '../config';
+import { AuthCard } from '../ui/AuthCard';
+
+export function SignInPage() {
+  const form = useCredentialsForm();
+  return <AuthCard appName={APP_NAME} form={form} />;
+}
+`;
+
+const SIGNED_IN_LAYOUT = `import type { ReactNode } from 'react';
+import type { User } from '../../types/auth';
+import { useSignOut } from '../auth/hooks';
+import { APP_NAME } from '../config';
+import { linkTo, ROUTES } from '../routes';
+import { AppShell } from '../ui/AppShell';
+
+/** The frame every signed-in page shares. */
+export function SignedInLayout({ user, children }: { user: User; children: ReactNode }) {
+  const signOut = useSignOut();
+  return (
+    <AppShell
+      appName={APP_NAME}
+      homeLink={linkTo(ROUTES.home)}
+      account={{
+        label: user.email ?? 'Signed in',
+        onSignOut: () => void signOut.signOut(),
+        signingOut: signOut.pending,
+        error: signOut.error,
+      }}
+    >
+      {children}
+    </AppShell>
+  );
+}
+`;
+
+function homePage(privateData: boolean): string {
+  if (privateData) {
+    return `import type { User } from '../../types/auth';
+import { useNotes } from '../data/useNotes';
+import { NotesBoard } from '../ui/NotesBoard';
+import { SignedInLayout } from './SignedInLayout';
+
+// The notes example is removable: delete this page's body, NotesBoard,
+// useNotes, services/notes.ts, types/notes.ts and the table in db/schema.ts.
+export function HomePage({ user }: { user: User }) {
+  const notes = useNotes();
+  return (
+    <SignedInLayout user={user}>
+      <NotesBoard notes={notes} />
+    </SignedInLayout>
+  );
+}
+`;
+  }
+  return `import type { User } from '../../types/auth';
+import { EmptyState } from '../ui/feedback';
+import { SignedInLayout } from './SignedInLayout';
+
+// Your app starts here.
+export function HomePage({ user }: { user: User }) {
+  return (
+    <SignedInLayout user={user}>
+      <EmptyState title="You're signed in.">
+        Build your app in src/pages/HomePage.tsx.
+      </EmptyState>
+    </SignedInLayout>
+  );
+}
+`;
+}
+
+const NOT_FOUND_PAGE = `import type { User } from '../../types/auth';
+import { linkTo, ROUTES } from '../routes';
+import { EmptyState } from '../ui/feedback';
+import { SignedInLayout } from './SignedInLayout';
+
+export function NotFoundPage({ user }: { user: User }) {
+  return (
+    <SignedInLayout user={user}>
+      <EmptyState title="Page not found.">
+        <a {...linkTo(ROUTES.home)}>Go home</a>
+      </EmptyState>
+    </SignedInLayout>
+  );
+}
+`;
+
+// ------------------------------------------------------------ styled views
+// Presentational: props in, markup out. No SDK, service or network calls.
+
+const STYLED_FEEDBACK = `import type { ReactNode } from 'react';
 
 export function LoadingScreen({ label }: { label: string }) {
   return (
-    <main className="loading-screen" aria-busy="true">
+    <main className="loading" aria-busy="true">
       <span className="spinner" aria-hidden="true" />
       <p role="status">{label}</p>
     </main>
@@ -669,17 +740,11 @@ export function EmptyState({ title, children }: { title: string; children?: Reac
 }
 `;
 
-const UI_AUTH_CARD = `import type { FormEvent } from 'react';
+const STYLED_AUTH_CARD = `import type { FormEvent } from 'react';
 import type { CredentialsForm } from '../../types/auth';
 
-interface AuthCardProps {
-  appName: string;
-  form: CredentialsForm;
-}
-
-export function AuthCard({ appName, form }: AuthCardProps) {
+export function AuthCard({ appName, form }: { appName: string; form: CredentialsForm }) {
   const signUp = form.mode === 'sign-up';
-  const passwordHint = 'At least ' + form.passwordMinLength + ' characters.';
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -688,54 +753,33 @@ export function AuthCard({ appName, form }: AuthCardProps) {
 
   return (
     <main className="auth">
-      <section className="auth__intro" aria-labelledby="auth-title">
-        <p className="eyebrow">{appName}</p>
-        <h1 id="auth-title" className="display">
-          {signUp ? 'Open an account.' : 'Welcome back.'}
-        </h1>
-        <p className="lede">
-          {signUp ? 'One account, private to you. It takes a few seconds.' : 'Sign in to pick up where you left off.'}
-        </p>
-      </section>
-
-      <form className="card auth__form" onSubmit={onSubmit} noValidate>
-        <h2 className="card__title">{signUp ? 'Create account' : 'Sign in'}</h2>
+      <div className="auth__intro">
+        <p className="auth__app">{appName}</p>
+        <h1 className="auth__title">{signUp ? 'Create your account' : 'Welcome back'}</h1>
+        <p className="muted">{signUp ? 'It takes a few seconds.' : 'Sign in to continue.'}</p>
+      </div>
+      <form className="panel auth__form" onSubmit={onSubmit} noValidate aria-label={signUp ? 'Create account' : 'Sign in'}>
         <div className="field">
           <label htmlFor="auth-email">Email</label>
-          <input
-            id="auth-email"
-            type="email"
-            name="email"
-            autoComplete="email"
-            inputMode="email"
-            required
-            autoFocus
-            value={form.email}
-            onChange={(event) => form.setEmail(event.target.value)}
-          />
+          <input id="auth-email" type="email" name="email" autoComplete="email" inputMode="email" required autoFocus
+            value={form.email} onChange={(event) => form.setEmail(event.target.value)} />
         </div>
         <div className="field">
           <label htmlFor="auth-password">Password</label>
-          <input
-            id="auth-password"
-            type="password"
-            name="password"
+          <input id="auth-password" type="password" name="password" required
             autoComplete={signUp ? 'new-password' : 'current-password'}
-            required
             minLength={signUp ? form.passwordMinLength : undefined}
             aria-describedby={signUp ? 'auth-password-hint' : undefined}
-            value={form.password}
-            onChange={(event) => form.setPassword(event.target.value)}
-          />
-          {signUp ? <p id="auth-password-hint" className="field__hint">{passwordHint}</p> : null}
+            value={form.password} onChange={(event) => form.setPassword(event.target.value)} />
+          {signUp ? <p id="auth-password-hint" className="hint">At least {form.passwordMinLength} characters.</p> : null}
         </div>
-        {form.error ? <p className="form-error" role="alert">{form.error}</p> : null}
+        {form.error ? <p className="error" role="alert">{form.error}</p> : null}
         <button type="submit" className="button" disabled={!form.canSubmit} aria-busy={form.pending}>
-          {form.pending ? (signUp ? 'Creating account…' : 'Signing in…') : (signUp ? 'Create account' : 'Sign in')}
+          {form.pending ? 'Please wait…' : signUp ? 'Create account' : 'Sign in'}
         </button>
         <p className="auth__switch">
           {signUp ? 'Already have an account?' : 'New here?'}{' '}
-          <button type="button" className="text-button" onClick={form.toggleMode} disabled={form.pending}>
+          <button type="button" className="link-button" onClick={form.toggleMode} disabled={form.pending}>
             {signUp ? 'Sign in' : 'Create an account'}
           </button>
         </p>
@@ -745,409 +789,145 @@ export function AuthCard({ appName, form }: AuthCardProps) {
 }
 `;
 
-const UI_APP_SHELL = `import type { ReactNode } from 'react';
+const STYLED_APP_SHELL = `import type { ReactNode } from 'react';
 import type { LinkProps } from '../routes';
 
-interface AppShellProps {
-  appName: string;
-  homeLink: LinkProps;
-  menu: ReactNode;
-  children: ReactNode;
-}
-
-export function AppShell({ appName, homeLink, menu, children }: AppShellProps) {
-  return (
-    <div className="shell">
-      <a className="skip-link" href="#content">Skip to content</a>
-      <header className="shell__header">
-        <a className="brand" {...homeLink}>{appName}</a>
-        {menu}
-      </header>
-      <main id="content" className="shell__main" tabIndex={-1}>
-        {children}
-      </main>
-    </div>
-  );
-}
-`;
-
-const UI_ACCOUNT_MENU = `import { useEffect, useId, useRef, useState } from 'react';
-import type { LinkProps } from '../routes';
-
-interface AccountMenuProps {
+export interface AccountSummary {
   label: string;
-  accountLink: LinkProps;
   onSignOut(): void;
   signingOut: boolean;
   error: string | null;
 }
 
-// Menu open/closed is presentation state; signing out is the caller's action.
-export function AccountMenu({ label, accountLink, onSignOut, signingOut, error }: AccountMenuProps) {
-  const [open, setOpen] = useState(false);
-  const menuId = useId();
-  const root = useRef<HTMLDivElement>(null);
-  const trigger = useRef<HTMLButtonElement>(null);
+interface AppShellProps {
+  appName: string;
+  homeLink: LinkProps;
+  account: AccountSummary;
+  children: ReactNode;
+}
 
-  useEffect(() => {
-    if (!open) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setOpen(false);
-      trigger.current?.focus();
-    };
-    const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    document.addEventListener('keydown', onKey);
-    document.addEventListener('pointerdown', onPointer);
-    return () => {
-      document.removeEventListener('keydown', onKey);
-      document.removeEventListener('pointerdown', onPointer);
-    };
-  }, [open]);
-
+export function AppShell({ appName, homeLink, account, children }: AppShellProps) {
   return (
-    <div className="menu" ref={root}>
-      <button
-        ref={trigger}
-        type="button"
-        className="menu__trigger"
-        aria-label={'Account menu, ' + label}
-        aria-expanded={open}
-        aria-controls={menuId}
-        onClick={() => setOpen(!open)}
-      >
-        <span className="menu__avatar" aria-hidden="true">{label.slice(0, 1).toUpperCase()}</span>
-        <span className="menu__label">{label}</span>
-      </button>
-      <div id={menuId} className="menu__panel" hidden={!open}>
-        <a className="menu__item" {...accountLink} onClick={(event) => { setOpen(false); accountLink.onClick(event); }}>
-          Account
-        </a>
-        <button type="button" className="menu__item" onClick={onSignOut} disabled={signingOut}>
-          {signingOut ? 'Signing out…' : 'Sign out'}
-        </button>
-      </div>
-      {error ? <p className="menu__error" role="alert">{error}</p> : null}
+    <div className="shell">
+      <a className="skip-link" href="#content">Skip to content</a>
+      <header className="topbar">
+        <a className="brand" {...homeLink}>{appName}</a>
+        <div className="account">
+          <span className="account__label" title={account.label}>{account.label}</span>
+          <button type="button" className="button button--quiet" onClick={account.onSignOut} disabled={account.signingOut}>
+            {account.signingOut ? 'Signing out…' : 'Sign out'}
+          </button>
+        </div>
+      </header>
+      {account.error ? <p className="error topbar__error" role="alert">{account.error}</p> : null}
+      <main id="content" className="content" tabIndex={-1}>{children}</main>
     </div>
   );
 }
 `;
 
-const UI_ACCOUNT_DETAILS = `interface AccountDetailsProps {
-  email: string | null;
-  userId: string;
-  verified: boolean | null;
-  onSignOut(): void;
-  signingOut: boolean;
-}
-
-export function AccountDetails({ email, userId, verified, onSignOut, signingOut }: AccountDetailsProps) {
-  return (
-    <section className="page" aria-labelledby="account-title">
-      <p className="eyebrow">Account</p>
-      <h1 id="account-title" className="display display--page">{email ?? 'Your account'}</h1>
-      <dl className="details card">
-        <div>
-          <dt>Email</dt>
-          <dd>{email ?? 'Not set'}</dd>
-        </div>
-        <div>
-          <dt>Email verified</dt>
-          <dd>{verified === null ? 'Unknown' : verified ? 'Yes' : 'Not yet'}</dd>
-        </div>
-        <div>
-          <dt>User ID</dt>
-          <dd className="mono">{userId}</dd>
-        </div>
-      </dl>
-      <button type="button" className="button button--quiet" onClick={onSignOut} disabled={signingOut}>
-        {signingOut ? 'Signing out…' : 'Sign out'}
-      </button>
-    </section>
-  );
-}
-`;
-
-const UI_WELCOME = `import type { LinkProps } from '../routes';
-
-export function WelcomePanel({ name, accountLink }: { name: string; accountLink: LinkProps }) {
-  return (
-    <section className="page" aria-labelledby="welcome-title">
-      <p className="eyebrow">Signed in</p>
-      <h1 id="welcome-title" className="display display--page">You're in.</h1>
-      <p className="lede">Signed in as <strong>{name}</strong>. This page is private; build your app here, in src/pages/HomePage.tsx.</p>
-      <p><a className="button button--quiet" {...accountLink}>View account</a></p>
-    </section>
-  );
-}
-`;
-
-const UI_NOT_FOUND = `import type { LinkProps } from '../routes';
-
-export function NotFound({ homeLink }: { homeLink: LinkProps }) {
-  return (
-    <section className="page" aria-labelledby="not-found-title">
-      <p className="eyebrow">404</p>
-      <h1 id="not-found-title" className="display display--page">Nothing lives here.</h1>
-      <p><a className="button button--quiet" {...homeLink}>Go home</a></p>
-    </section>
-  );
-}
-`;
-
-const UI_NOTES_BOARD = `import type { FormEvent } from 'react';
+const STYLED_NOTES_BOARD = `import type { FormEvent } from 'react';
 import type { NotesController } from '../../types/notes';
 import { Alert, EmptyState } from './feedback';
 
-export function NotesBoard({ notes: controller, heading }: { notes: NotesController; heading: string }) {
-  const { draft, draftErrors, limits } = controller;
-  const editing = controller.editingId !== null;
+export function NotesBoard({ notes }: { notes: NotesController }) {
+  const { draft, draftErrors, limits } = notes;
+  const editing = notes.editingId !== null;
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
-    void controller.save();
+    void notes.save();
   }
 
   return (
-    <div className="board">
-      <section className="board__compose" aria-labelledby="compose-title">
-        <p className="eyebrow">{heading}</p>
-        <h1 id="compose-title" className="display display--page">{editing ? 'Edit note' : 'New note'}</h1>
-        <form className="card compose" onSubmit={onSubmit} noValidate>
-          <div className="field">
-            <label htmlFor="note-title">Title</label>
-            <input
-              id="note-title"
-              name="title"
-              required
-              maxLength={limits.title + 1}
-              aria-invalid={draftErrors.title ? true : undefined}
-              aria-describedby={draftErrors.title ? 'note-title-error' : undefined}
-              value={draft.title}
-              onChange={(event) => controller.setDraft({ ...draft, title: event.target.value })}
-            />
-            {draftErrors.title ? <p id="note-title-error" className="field__error">{draftErrors.title}</p> : null}
-          </div>
-          <div className="field">
-            <label htmlFor="note-body">
-              Note <span className="field__count">{draft.body.length}/{limits.body}</span>
-            </label>
-            <textarea
-              id="note-body"
-              name="body"
-              rows={5}
-              aria-invalid={draftErrors.body ? true : undefined}
-              aria-describedby={draftErrors.body ? 'note-body-error' : undefined}
-              value={draft.body}
-              onChange={(event) => controller.setDraft({ ...draft, body: event.target.value })}
-            />
-            {draftErrors.body ? <p id="note-body-error" className="field__error">{draftErrors.body}</p> : null}
-          </div>
-          <div className="actions">
-            <button type="submit" className="button" disabled={!controller.canSave} aria-busy={controller.saving}>
-              {controller.saving ? 'Saving…' : editing ? 'Save changes' : 'Add note'}
-            </button>
-            {editing ? (
-              <button type="button" className="button button--quiet" onClick={controller.cancelEdit} disabled={controller.saving}>
-                Cancel
-              </button>
-            ) : null}
-          </div>
-          <p className={'notice notice--' + (controller.notice?.tone ?? 'info')} role="status" aria-live="polite">
-            {controller.notice?.text ?? ''}
-          </p>
-        </form>
-      </section>
+    <div className="notes-board">
+      <form className="panel" onSubmit={onSubmit} noValidate aria-labelledby="note-form-title">
+        <h1 id="note-form-title" className="panel__title">{editing ? 'Edit note' : 'New note'}</h1>
+        <div className="field">
+          <label htmlFor="note-title">Title</label>
+          <input id="note-title" name="title" required value={draft.title}
+            aria-invalid={draftErrors.title ? true : undefined}
+            aria-describedby={draftErrors.title ? 'note-title-error' : undefined}
+            onChange={(event) => notes.setDraft({ ...draft, title: event.target.value })} />
+          {draftErrors.title ? <p id="note-title-error" className="error">{draftErrors.title}</p> : null}
+        </div>
+        <div className="field">
+          <label htmlFor="note-body">Note <span className="hint">{draft.body.length}/{limits.body}</span></label>
+          <textarea id="note-body" name="body" rows={4} value={draft.body}
+            aria-invalid={draftErrors.body ? true : undefined}
+            aria-describedby={draftErrors.body ? 'note-body-error' : undefined}
+            onChange={(event) => notes.setDraft({ ...draft, body: event.target.value })} />
+          {draftErrors.body ? <p id="note-body-error" className="error">{draftErrors.body}</p> : null}
+        </div>
+        <div className="actions">
+          <button type="submit" className="button" disabled={!notes.canSave} aria-busy={notes.saving}>
+            {notes.saving ? 'Saving…' : editing ? 'Save changes' : 'Add note'}
+          </button>
+          {editing ? <button type="button" className="button button--quiet" onClick={notes.cancelEdit} disabled={notes.saving}>Cancel</button> : null}
+        </div>
+        <p className={notes.notice?.tone === 'error' ? 'notice error' : 'notice'} role="status">{notes.notice?.text ?? ''}</p>
+      </form>
 
-      <section className="board__list" aria-labelledby="notes-title" aria-busy={controller.status === 'loading'}>
-        <h2 id="notes-title" className="section-title">
-          Your notes {controller.status === 'ready' ? <span className="count">{controller.notes.length}</span> : null}
-        </h2>
-        {controller.status === 'loading' ? (
-          <ol className="notes notes--loading" aria-label="Loading notes">
-            <li className="note note--skeleton" /><li className="note note--skeleton" /><li className="note note--skeleton" />
-          </ol>
-        ) : null}
-        {controller.status === 'error' ? (
-          <Alert action={<button type="button" className="button button--quiet" onClick={controller.reload}>Try again</button>}>
-            {controller.loadError}
+      <section aria-labelledby="notes-title" aria-busy={notes.status === 'loading'}>
+        <h2 id="notes-title" className="section-title">Your notes</h2>
+        {notes.status === 'loading' ? <p className="muted" role="status">Loading notes…</p> : null}
+        {notes.status === 'error' ? (
+          <Alert action={<button type="button" className="button button--quiet" onClick={notes.reload}>Try again</button>}>
+            {notes.loadError}
           </Alert>
         ) : null}
-        {controller.status === 'ready' && controller.notes.length === 0 ? (
-          <EmptyState title="No notes yet.">Write the first one. Only you can see it.</EmptyState>
+        {notes.status === 'ready' && notes.notes.length === 0 ? (
+          <EmptyState title="No notes yet.">Only you can see the notes you add.</EmptyState>
         ) : null}
-        {controller.status === 'ready' && controller.notes.length > 0 ? (
-          <ol className="notes">
-            {controller.notes.map((note, index) => (
-              <li key={note.id} className={'note' + (note.id === controller.editingId ? ' note--editing' : '')}>
-                <span className="note__index" aria-hidden="true">{String(index + 1).padStart(2, '0')}</span>
-                <div className="note__content">
+        {notes.status === 'ready' && notes.notes.length > 0 ? (
+          <ul className="note-list">
+            {notes.notes.map((note) => (
+              <li key={note.id} className="note" aria-current={note.id === notes.editingId ? 'true' : undefined}>
+                <div className="note__text">
                   <h3 className="note__title">{note.title}</h3>
                   {note.body ? <p className="note__body">{note.body}</p> : null}
                 </div>
                 <div className="note__actions">
-                  <button type="button" className="text-button" onClick={() => controller.startEdit(note)} aria-label={'Edit ' + note.title}>
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    className="text-button text-button--danger"
-                    onClick={() => void controller.remove(note)}
-                    disabled={controller.removingId === note.id}
-                    aria-label={'Delete ' + note.title}
-                  >
-                    {controller.removingId === note.id ? 'Deleting…' : 'Delete'}
+                  <button type="button" className="link-button" onClick={() => notes.startEdit(note)} aria-label={'Edit ' + note.title}>Edit</button>
+                  <button type="button" className="link-button link-button--danger" onClick={() => void notes.remove(note)}
+                    disabled={notes.removingId === note.id} aria-label={'Delete ' + note.title}>
+                    {notes.removingId === note.id ? 'Deleting…' : 'Delete'}
                   </button>
                 </div>
               </li>
             ))}
-          </ol>
+          </ul>
         ) : null}
-        {controller.truncated ? <p className="field__hint">Showing the first {controller.notes.length} notes.</p> : null}
+        {notes.truncated ? <p className="hint">Showing the first {notes.notes.length} notes.</p> : null}
       </section>
     </div>
   );
 }
 `;
 
-// ---------------------------------------------------------------- styled pages
+// ------------------------------------------------------------- plain views
+// --ui headless: the same exports and props as the styled views, as plain
+// semantic markup with no CSS. Replace them with your own components.
 
-const STYLED_LOADING_PAGE = `import { LoadingScreen } from '../ui/feedback';
+const PLAIN_FEEDBACK = `import type { ReactNode } from 'react';
 
-export function LoadingPage() {
-  return <LoadingScreen label="Checking your session…" />;
+export function LoadingScreen({ label }: { label: string }) {
+  return <main aria-busy="true"><p role="status">{label}</p></main>;
+}
+
+export function Alert({ children, action }: { children: ReactNode; action?: ReactNode }) {
+  return <div role="alert"><p>{children}</p>{action}</div>;
+}
+
+export function EmptyState({ title, children }: { title: string; children?: ReactNode }) {
+  return <div><p><strong>{title}</strong></p>{children ? <p>{children}</p> : null}</div>;
 }
 `;
 
-const STYLED_SIGN_IN_PAGE = `import { useCredentialsForm } from '../auth/hooks';
-import { APP_NAME } from '../config';
-import { AuthCard } from '../ui/AuthCard';
+const PLAIN_AUTH_CARD = `import type { FormEvent } from 'react';
+import type { CredentialsForm } from '../../types/auth';
 
-export function SignInPage() {
-  const form = useCredentialsForm();
-  return <AuthCard appName={APP_NAME} form={form} />;
-}
-`;
-
-const STYLED_LAYOUT = `import type { ReactNode } from 'react';
-import type { User } from '../../types/auth';
-import { useSignOut } from '../auth/hooks';
-import { APP_NAME } from '../config';
-import { linkTo, ROUTES } from '../routes';
-import { AccountMenu } from '../ui/AccountMenu';
-import { AppShell } from '../ui/AppShell';
-
-/** The signed-in frame every private page shares. */
-export function SignedInLayout({ user, children }: { user: User; children: ReactNode }) {
-  const signOut = useSignOut();
-  return (
-    <AppShell
-      appName={APP_NAME}
-      homeLink={linkTo(ROUTES.home)}
-      menu={(
-        <AccountMenu
-          label={user.email ?? 'Account'}
-          accountLink={linkTo(ROUTES.account)}
-          onSignOut={() => void signOut.signOut()}
-          signingOut={signOut.pending}
-          error={signOut.error}
-        />
-      )}
-    >
-      {children}
-    </AppShell>
-  );
-}
-`;
-
-function styledHomePage(privateData: boolean): string {
-  if (privateData) {
-    return `import type { User } from '../../types/auth';
-import { useNotes } from '../data/useNotes';
-import { NotesBoard } from '../ui/NotesBoard';
-import { SignedInLayout } from './SignedInLayout';
-
-export function HomePage({ user }: { user: User }) {
-  const notes = useNotes(user.id);
-  return (
-    <SignedInLayout user={user}>
-      <NotesBoard notes={notes} heading="Private notes" />
-    </SignedInLayout>
-  );
-}
-`;
-  }
-  return `import type { User } from '../../types/auth';
-import { linkTo, ROUTES } from '../routes';
-import { WelcomePanel } from '../ui/WelcomePanel';
-import { SignedInLayout } from './SignedInLayout';
-
-export function HomePage({ user }: { user: User }) {
-  return (
-    <SignedInLayout user={user}>
-      <WelcomePanel name={user.email ?? 'there'} accountLink={linkTo(ROUTES.account)} />
-    </SignedInLayout>
-  );
-}
-`;
-}
-
-const STYLED_ACCOUNT_PAGE = `import type { User } from '../../types/auth';
-import { useSignOut } from '../auth/hooks';
-import { AccountDetails } from '../ui/AccountDetails';
-import { SignedInLayout } from './SignedInLayout';
-
-export function AccountPage({ user }: { user: User }) {
-  const signOut = useSignOut();
-  const verified = typeof user.email_verified === 'boolean' ? user.email_verified : null;
-  return (
-    <SignedInLayout user={user}>
-      <AccountDetails
-        email={user.email}
-        userId={user.id}
-        verified={verified}
-        onSignOut={() => void signOut.signOut()}
-        signingOut={signOut.pending}
-      />
-    </SignedInLayout>
-  );
-}
-`;
-
-const STYLED_NOT_FOUND_PAGE = `import type { User } from '../../types/auth';
-import { linkTo, ROUTES } from '../routes';
-import { NotFound } from '../ui/NotFound';
-import { SignedInLayout } from './SignedInLayout';
-
-export function NotFoundPage({ user }: { user: User }) {
-  return (
-    <SignedInLayout user={user}>
-      <NotFound homeLink={linkTo(ROUTES.home)} />
-    </SignedInLayout>
-  );
-}
-`;
-
-// -------------------------------------------------------------- headless pages
-
-const HEADLESS_LOADING_PAGE = `export function LoadingPage() {
-  return (
-    <main aria-busy="true">
-      <p role="status">Checking your session…</p>
-    </main>
-  );
-}
-`;
-
-const HEADLESS_SIGN_IN_PAGE = `import type { FormEvent } from 'react';
-import { useCredentialsForm } from '../auth/hooks';
-import { APP_NAME } from '../config';
-
-// Behaviour comes from useCredentialsForm; replace this markup with your own.
-export function SignInPage() {
-  const form = useCredentialsForm();
+export function AuthCard({ appName, form }: { appName: string; form: CredentialsForm }) {
   const signUp = form.mode === 'sign-up';
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
@@ -1157,57 +937,62 @@ export function SignInPage() {
 
   return (
     <main>
-      <h1>{signUp ? 'Create an account' : 'Sign in'} to {APP_NAME}</h1>
+      <h1>{signUp ? 'Create your account' : 'Sign in'} · {appName}</h1>
       <form onSubmit={onSubmit} noValidate>
         <p>
-          <label htmlFor="auth-email">Email</label>
-          <input id="auth-email" type="email" name="email" autoComplete="email" required autoFocus value={form.email} onChange={(event) => form.setEmail(event.target.value)} />
+          <label htmlFor="auth-email">Email</label><br />
+          <input id="auth-email" type="email" name="email" autoComplete="email" required autoFocus
+            value={form.email} onChange={(event) => form.setEmail(event.target.value)} />
         </p>
         <p>
-          <label htmlFor="auth-password">Password</label>
-          <input
-            id="auth-password"
-            type="password"
-            name="password"
+          <label htmlFor="auth-password">Password</label><br />
+          <input id="auth-password" type="password" name="password" required
             autoComplete={signUp ? 'new-password' : 'current-password'}
-            required
             minLength={signUp ? form.passwordMinLength : undefined}
-            value={form.password}
-            onChange={(event) => form.setPassword(event.target.value)}
-          />
+            value={form.password} onChange={(event) => form.setPassword(event.target.value)} />
         </p>
         {form.error ? <p role="alert">{form.error}</p> : null}
         <button type="submit" disabled={!form.canSubmit} aria-busy={form.pending}>
           {form.pending ? 'Please wait…' : signUp ? 'Create account' : 'Sign in'}
         </button>
       </form>
-      <button type="button" onClick={form.toggleMode} disabled={form.pending}>
-        {signUp ? 'Have an account? Sign in' : 'New here? Create an account'}
-      </button>
+      <p>
+        <button type="button" onClick={form.toggleMode} disabled={form.pending}>
+          {signUp ? 'Sign in' : 'Create an account'}
+        </button>
+      </p>
     </main>
   );
 }
 `;
 
-const HEADLESS_LAYOUT = `import type { ReactNode } from 'react';
-import type { User } from '../../types/auth';
-import { useSignOut } from '../auth/hooks';
-import { APP_NAME } from '../config';
-import { linkTo, ROUTES } from '../routes';
+const PLAIN_APP_SHELL = `import type { ReactNode } from 'react';
+import type { LinkProps } from '../routes';
 
-export function SignedInLayout({ user, children }: { user: User; children: ReactNode }) {
-  const signOut = useSignOut();
+export interface AccountSummary {
+  label: string;
+  onSignOut(): void;
+  signingOut: boolean;
+  error: string | null;
+}
+
+interface AppShellProps {
+  appName: string;
+  homeLink: LinkProps;
+  account: AccountSummary;
+  children: ReactNode;
+}
+
+export function AppShell({ appName, homeLink, account, children }: AppShellProps) {
   return (
     <>
       <header>
-        <a {...linkTo(ROUTES.home)}>{APP_NAME}</a>
-        <nav aria-label="Account">
-          <a {...linkTo(ROUTES.account)}>{user.email ?? 'Account'}</a>{' '}
-          <button type="button" onClick={() => void signOut.signOut()} disabled={signOut.pending}>
-            {signOut.pending ? 'Signing out…' : 'Sign out'}
-          </button>
-        </nav>
-        {signOut.error ? <p role="alert">{signOut.error}</p> : null}
+        <a {...homeLink}>{appName}</a>{' '}
+        <span>{account.label}</span>{' '}
+        <button type="button" onClick={account.onSignOut} disabled={account.signingOut}>
+          {account.signingOut ? 'Signing out…' : 'Sign out'}
+        </button>
+        {account.error ? <p role="alert">{account.error}</p> : null}
       </header>
       <main>{children}</main>
     </>
@@ -1215,30 +1000,13 @@ export function SignedInLayout({ user, children }: { user: User; children: React
 }
 `;
 
-function headlessHomePage(privateData: boolean): string {
-  if (!privateData) {
-    return `import type { User } from '../../types/auth';
-import { SignedInLayout } from './SignedInLayout';
+const PLAIN_NOTES_BOARD = `import type { FormEvent } from 'react';
+import type { NotesController } from '../../types/notes';
+import { Alert, EmptyState } from './feedback';
 
-export function HomePage({ user }: { user: User }) {
-  return (
-    <SignedInLayout user={user}>
-      <h1>Hello, {user.email ?? 'there'}.</h1>
-      <p>This page is private. Build your app here.</p>
-    </SignedInLayout>
-  );
-}
-`;
-  }
-  return `import type { FormEvent } from 'react';
-import type { User } from '../../types/auth';
-import { useNotes } from '../data/useNotes';
-import { SignedInLayout } from './SignedInLayout';
-
-// Behaviour comes from useNotes; replace this markup with your own.
-export function HomePage({ user }: { user: User }) {
-  const notes = useNotes(user.id);
+export function NotesBoard({ notes }: { notes: NotesController }) {
   const { draft, draftErrors } = notes;
+  const editing = notes.editingId !== null;
 
   function onSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -1246,205 +1014,142 @@ export function HomePage({ user }: { user: User }) {
   }
 
   return (
-    <SignedInLayout user={user}>
-      <h1>{notes.editingId === null ? 'New note' : 'Edit note'}</h1>
+    <>
+      <h1>{editing ? 'Edit note' : 'New note'}</h1>
       <form onSubmit={onSubmit} noValidate>
         <p>
-          <label htmlFor="note-title">Title</label>
-          <input id="note-title" name="title" required value={draft.title} aria-invalid={draftErrors.title ? true : undefined} onChange={(event) => notes.setDraft({ ...draft, title: event.target.value })} />
-          {draftErrors.title ? <span role="alert">{draftErrors.title}</span> : null}
+          <label htmlFor="note-title">Title</label><br />
+          <input id="note-title" name="title" required value={draft.title} aria-invalid={draftErrors.title ? true : undefined}
+            onChange={(event) => notes.setDraft({ ...draft, title: event.target.value })} />
+          {draftErrors.title ? <span role="alert"> {draftErrors.title}</span> : null}
         </p>
         <p>
-          <label htmlFor="note-body">Note</label>
-          <textarea id="note-body" name="body" value={draft.body} aria-invalid={draftErrors.body ? true : undefined} onChange={(event) => notes.setDraft({ ...draft, body: event.target.value })} />
-          {draftErrors.body ? <span role="alert">{draftErrors.body}</span> : null}
+          <label htmlFor="note-body">Note</label><br />
+          <textarea id="note-body" name="body" value={draft.body} aria-invalid={draftErrors.body ? true : undefined}
+            onChange={(event) => notes.setDraft({ ...draft, body: event.target.value })} />
+          {draftErrors.body ? <span role="alert"> {draftErrors.body}</span> : null}
         </p>
-        <button type="submit" disabled={!notes.canSave} aria-busy={notes.saving}>{notes.saving ? 'Saving…' : 'Save'}</button>
-        {notes.editingId !== null ? <button type="button" onClick={notes.cancelEdit}>Cancel</button> : null}
-        <p role="status" aria-live="polite">{notes.notice?.text ?? ''}</p>
+        <button type="submit" disabled={!notes.canSave} aria-busy={notes.saving}>
+          {notes.saving ? 'Saving…' : editing ? 'Save changes' : 'Add note'}
+        </button>{' '}
+        {editing ? <button type="button" onClick={notes.cancelEdit}>Cancel</button> : null}
+        <p role="status">{notes.notice?.text ?? ''}</p>
       </form>
-
       <h2>Your notes</h2>
       {notes.status === 'loading' ? <p role="status">Loading notes…</p> : null}
-      {notes.status === 'error' ? (
-        <p role="alert">{notes.loadError} <button type="button" onClick={notes.reload}>Try again</button></p>
-      ) : null}
-      {notes.status === 'ready' && notes.notes.length === 0 ? <p>No notes yet.</p> : null}
+      {notes.status === 'error' ? <Alert action={<button type="button" onClick={notes.reload}>Try again</button>}>{notes.loadError}</Alert> : null}
+      {notes.status === 'ready' && notes.notes.length === 0 ? <EmptyState title="No notes yet." /> : null}
       <ul>
         {notes.notes.map((note) => (
           <li key={note.id}>
             <strong>{note.title}</strong> {note.body}{' '}
-            <button type="button" onClick={() => notes.startEdit(note)}>Edit</button>{' '}
-            <button type="button" onClick={() => void notes.remove(note)} disabled={notes.removingId === note.id}>Delete</button>
+            <button type="button" onClick={() => notes.startEdit(note)} aria-label={'Edit ' + note.title}>Edit</button>{' '}
+            <button type="button" onClick={() => void notes.remove(note)} disabled={notes.removingId === note.id} aria-label={'Delete ' + note.title}>Delete</button>
           </li>
         ))}
       </ul>
-    </SignedInLayout>
-  );
-}
-`;
-}
-
-const HEADLESS_ACCOUNT_PAGE = `import type { User } from '../../types/auth';
-import { SignedInLayout } from './SignedInLayout';
-
-export function AccountPage({ user }: { user: User }) {
-  return (
-    <SignedInLayout user={user}>
-      <h1>Account</h1>
-      <dl>
-        <dt>Email</dt>
-        <dd>{user.email ?? 'Not set'}</dd>
-        <dt>User ID</dt>
-        <dd>{user.id}</dd>
-      </dl>
-    </SignedInLayout>
+    </>
   );
 }
 `;
 
-const HEADLESS_NOT_FOUND_PAGE = `import type { User } from '../../types/auth';
-import { linkTo, ROUTES } from '../routes';
-import { SignedInLayout } from './SignedInLayout';
+// --------------------------------------------------------------------- styles
 
-export function NotFoundPage({ user }: { user: User }) {
-  return (
-    <SignedInLayout user={user}>
-      <h1>Page not found</h1>
-      <p><a {...linkTo(ROUTES.home)}>Go home</a></p>
-    </SignedInLayout>
-  );
-}
-`;
-
-// ---------------------------------------------------------------------- styles
-
-const TOKENS_CSS = `/* Design tokens: the restyle surface. src/styles/app.css reads only these,
-   so a new look is usually a new copy of this block. Local fonts only. */
+const TOKENS_CSS = `/* Shared design values. app.css reads them; components and app.css can
+   still override locally. Local font stacks only (no network fonts). */
 :root {
-  color-scheme: light;
+  --font-body: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", sans-serif;
+  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
 
-  --font-display: "Iowan Old Style", "Palatino Linotype", Palatino, "Book Antiqua", Georgia, serif;
-  --font-body: "Avenir Next", "Segoe UI Variable Text", "Segoe UI", "Helvetica Neue", Helvetica, sans-serif;
-  --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-  --display-weight: 600;
-  --display-tracking: -0.025em;
-  --display-transform: none;
-  --display-size: clamp(2.6rem, 6.4vw, 4.75rem);
+  --text-sm: 0.875rem;
+  --text-base: 1rem;
+  --text-lg: 1.25rem;
+  --text-display: clamp(2rem, 4.4vw, 3rem);
 
-  --color-bg: #f3ede2;
-  --color-surface: #fffcf6;
-  --color-ink: #1c1915;
-  --color-muted: #6d6358;
-  --color-line: #dcd1c0;
-  --color-accent: #c2411c;
-  --color-accent-ink: #fffcf6;
-  --color-danger: #a3161a;
-  --color-focus: #c2411c;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+  --space-12: 48px;
 
-  --radius: 6px;
-  --radius-control: 4px;
-  --space: 8px;
-  --control-height: 46px;
-  --shadow: 0 1px 0 var(--color-line), 0 24px 48px -32px rgba(28, 25, 21, 0.45);
-  --backdrop: radial-gradient(120% 80% at 100% 0%, rgba(194, 65, 28, 0.08), transparent 60%),
-    repeating-linear-gradient(0deg, transparent 0 31px, rgba(28, 25, 21, 0.045) 31px 32px);
-  --measure: 1120px;
+  --radius-control: 8px;
+  --radius-panel: 14px;
+
+  --color-bg: #f5f3ee;
+  --color-surface: #ffffff;
+  --color-text: #1c1b18;
+  --color-muted: #66615a;
+  --color-border: #e0dbd1;
+  --color-accent: #1d6b52;
+  --color-on-accent: #ffffff;
+  --color-danger: #b42318;
+  --color-focus: #1d6b52;
 }
 `;
 
-const APP_CSS = `/* Component styles. Values come from tokens.css. */
-*, *::before, *::after { box-sizing: border-box; }
-html { -webkit-text-size-adjust: 100%; }
+const APP_CSS = `*, *::before, *::after { box-sizing: border-box; }
 body {
   margin: 0;
   min-width: 320px;
-  min-height: 100vh;
-  background: var(--backdrop), var(--color-bg);
-  color: var(--color-ink);
-  font: 400 1rem/1.55 var(--font-body);
+  background: var(--color-bg);
+  color: var(--color-text);
+  font: 400 var(--text-base)/1.55 var(--font-body);
 }
 button, input, textarea { font: inherit; color: inherit; }
-a { color: inherit; }
 :focus-visible { outline: 3px solid var(--color-focus); outline-offset: 2px; }
-[hidden] { display: none !important; }
+.muted { color: var(--color-muted); }
+.hint { margin: 0; color: var(--color-muted); font-size: var(--text-sm); font-weight: 400; }
+.error { margin: 0; color: var(--color-danger); font-size: var(--text-sm); }
+.skip-link { position: absolute; left: var(--space-3); top: -60px; padding: var(--space-2) var(--space-3); background: var(--color-text); color: var(--color-bg); }
+.skip-link:focus { top: var(--space-3); }
 
-.skip-link { position: absolute; left: 12px; top: -48px; padding: 8px 12px; background: var(--color-ink); color: var(--color-bg); z-index: 10; }
-.skip-link:focus { top: 12px; }
-
-.eyebrow {
-  margin: 0 0 calc(var(--space) * 1.5);
-  color: var(--color-accent);
-  font: 600 0.78rem/1 var(--font-mono);
-  letter-spacing: 0.14em;
-  text-transform: uppercase;
-}
-.display {
-  margin: 0;
-  font-family: var(--font-display);
-  font-size: var(--display-size);
-  font-weight: var(--display-weight);
-  letter-spacing: var(--display-tracking);
-  line-height: 0.98;
-  text-transform: var(--display-transform);
-  text-wrap: balance;
-  overflow-wrap: anywhere;
-}
-.display--page { font-size: calc(var(--display-size) * 0.62); line-height: 1.05; }
-.lede { max-width: 44ch; overflow-wrap: anywhere; margin: calc(var(--space) * 2) 0 0; color: var(--color-muted); font-size: 1.125rem; }
-.mono { font-family: var(--font-mono); font-size: 0.9em; word-break: break-all; }
-
-.card {
+.panel {
+  display: grid;
+  gap: var(--space-4);
+  padding: var(--space-6);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-panel);
   background: var(--color-surface);
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow);
-  padding: calc(var(--space) * 3);
+  box-shadow: 0 1px 2px rgba(28, 27, 24, 0.05), 0 16px 40px -28px rgba(28, 27, 24, 0.35);
 }
-.card__title { margin: 0 0 calc(var(--space) * 2); font: 600 1.05rem/1.2 var(--font-body); }
+.panel__title { margin: 0; font: 600 var(--text-lg)/1.2 var(--font-display); }
 
-.field { display: grid; gap: 6px; margin-bottom: calc(var(--space) * 2); }
-.field label { display: flex; justify-content: space-between; font-weight: 600; font-size: 0.95rem; }
+.field { display: grid; gap: 6px; }
+.field label { display: flex; justify-content: space-between; font-size: var(--text-sm); font-weight: 600; }
 .field input, .field textarea {
   width: 100%;
-  min-height: var(--control-height);
+  min-height: 44px;
   padding: 10px 12px;
-  border: 1px solid var(--color-line);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-control);
-  background: var(--color-bg);
-  transition: border-color 120ms ease, background-color 120ms ease;
+  background: var(--color-surface);
 }
-.field textarea { resize: vertical; min-height: 120px; }
+.field textarea { resize: vertical; }
 .field input:hover, .field textarea:hover { border-color: var(--color-muted); }
-.field input:focus-visible, .field textarea:focus-visible { outline-offset: 0; background: var(--color-surface); }
 .field [aria-invalid="true"] { border-color: var(--color-danger); }
-.field__hint, .field__count { color: var(--color-muted); font-size: 0.85rem; font-weight: 400; }
-.field__error, .form-error { margin: 0; color: var(--color-danger); font-size: 0.9rem; }
-.form-error { margin-bottom: calc(var(--space) * 2); }
 
 .button {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-height: var(--control-height);
-  padding: 0 calc(var(--space) * 2.5);
+  min-height: 44px;
+  padding: 0 var(--space-4);
   border: 1px solid var(--color-accent);
   border-radius: var(--radius-control);
   background: var(--color-accent);
-  color: var(--color-accent-ink);
-  font-weight: 650;
-  text-decoration: none;
+  color: var(--color-on-accent);
+  font-weight: 600;
+  white-space: nowrap;
   cursor: pointer;
-  transition: transform 120ms ease, filter 120ms ease;
 }
 .button:hover:not(:disabled) { filter: brightness(1.08); }
-.button:active:not(:disabled) { transform: translateY(1px); }
-.button:disabled { opacity: 0.45; cursor: not-allowed; }
-.button--quiet { background: transparent; color: var(--color-ink); border-color: var(--color-line); }
-.auth__form .button { width: 100%; }
-.text-button {
-  min-height: 32px;
-  padding: 4px 6px;
+.button:disabled { opacity: 0.5; cursor: not-allowed; }
+.button--quiet { background: transparent; border-color: var(--color-border); color: var(--color-text); }
+.link-button {
+  min-height: 44px;
+  padding: 0 var(--space-2);
   border: 0;
   background: none;
   color: var(--color-accent);
@@ -1453,150 +1158,86 @@ a { color: inherit; }
   text-underline-offset: 3px;
   cursor: pointer;
 }
-.text-button:disabled { opacity: 0.5; cursor: not-allowed; }
-.text-button--danger { color: var(--color-danger); }
+.link-button:disabled { opacity: 0.5; cursor: not-allowed; }
+.link-button--danger { color: var(--color-danger); }
+.actions { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 
-/* Sign-in */
+/* Sign-in: split panel on wide screens, stacked on phones. */
 .auth {
   display: grid;
-  gap: calc(var(--space) * 5);
+  grid-template-columns: minmax(0, 1fr) minmax(300px, 400px);
+  gap: var(--space-12);
   align-items: center;
-  width: min(var(--measure), calc(100% - 32px));
+  width: min(960px, calc(100% - 2 * var(--space-6)));
   min-height: 100vh;
   margin: 0 auto;
-  padding: calc(var(--space) * 6) 0;
-  grid-template-columns: minmax(0, 1.15fr) minmax(300px, 420px);
+  padding: var(--space-12) 0;
 }
-.auth__intro { animation: rise 520ms ease both; }
-.auth__form { animation: rise 520ms 90ms ease both; }
-.auth__switch { margin: calc(var(--space) * 2) 0 0; color: var(--color-muted); text-align: center; }
+.auth__app { margin: 0 0 var(--space-3); color: var(--color-accent); font-weight: 600; }
+.auth__title { margin: 0 0 var(--space-3); font: 600 var(--text-display)/1.05 var(--font-display); letter-spacing: -0.02em; }
+.auth__form .button { width: 100%; }
+.auth__switch { margin: 0; text-align: center; color: var(--color-muted); font-size: var(--text-sm); }
 
-/* Loading */
-.loading-screen { display: grid; place-content: center; justify-items: center; gap: 12px; min-height: 100vh; color: var(--color-muted); }
-.spinner { width: 28px; height: 28px; border: 3px solid var(--color-line); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 800ms linear infinite; }
+.loading { display: grid; place-content: center; justify-items: center; gap: var(--space-3); min-height: 100vh; color: var(--color-muted); }
+.spinner { width: 24px; height: 24px; border: 3px solid var(--color-border); border-top-color: var(--color-accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 
-/* Shell */
-.shell__header {
+/* Signed-in frame */
+.topbar {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 16px;
-  width: min(var(--measure), calc(100% - 32px));
+  gap: var(--space-4);
+  width: min(1040px, calc(100% - 2 * var(--space-6)));
   margin: 0 auto;
-  padding: calc(var(--space) * 2.5) 0;
-  border-bottom: 1px solid var(--color-line);
+  padding: var(--space-4) 0;
+  border-bottom: 1px solid var(--color-border);
 }
-.brand { font: var(--display-weight) 1.35rem/1 var(--font-display); letter-spacing: var(--display-tracking); text-transform: var(--display-transform); text-decoration: none; }
-.shell__main { width: min(var(--measure), calc(100% - 32px)); margin: 0 auto; padding: calc(var(--space) * 5) 0 calc(var(--space) * 8); outline: none; }
-.page { max-width: 640px; animation: rise 420ms ease both; }
-.page .card { margin: calc(var(--space) * 3) 0; }
+.topbar__error { width: min(1040px, calc(100% - 2 * var(--space-6))); margin: var(--space-2) auto 0; }
+.brand { font: 600 var(--text-lg)/1 var(--font-display); color: inherit; text-decoration: none; }
+.account { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
+.account__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-sm); }
+.content { width: min(1040px, calc(100% - 2 * var(--space-6))); margin: 0 auto; padding: var(--space-8) 0 var(--space-12); outline: none; }
 
-/* Account menu */
-.menu { position: relative; }
-.menu__trigger {
-  display: inline-flex;
-  align-items: center;
-  gap: 10px;
-  min-height: 44px;
-  max-width: 260px;
-  padding: 4px 12px 4px 4px;
-  border: 1px solid var(--color-line);
-  border-radius: 999px;
-  background: var(--color-surface);
-  cursor: pointer;
-}
-.menu__avatar { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 50%; background: var(--color-ink); color: var(--color-bg); font-weight: 700; flex: none; }
-.menu__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.92rem; }
-.menu__panel {
-  position: absolute;
-  right: 0;
-  top: calc(100% + 8px);
-  z-index: 5;
-  display: grid;
-  min-width: 200px;
-  padding: 6px;
-  border: 1px solid var(--color-line);
-  border-radius: var(--radius);
-  background: var(--color-surface);
-  box-shadow: var(--shadow);
-}
-.menu__item {
-  display: block;
-  width: 100%;
-  min-height: 44px;
-  padding: 10px 12px;
-  border: 0;
-  border-radius: var(--radius-control);
-  background: none;
-  text-align: left;
-  text-decoration: none;
-  cursor: pointer;
-}
-.menu__item:hover, .menu__item:focus-visible { background: var(--color-bg); }
-.menu__error { position: absolute; right: 0; margin: 6px 0 0; color: var(--color-danger); font-size: 0.85rem; }
+.empty { padding: var(--space-8) var(--space-6); border: 1px dashed var(--color-border); border-radius: var(--radius-panel); text-align: center; }
+.empty__title { margin: 0; font: 600 var(--text-lg)/1.3 var(--font-display); }
+.empty__body { margin: var(--space-2) 0 0; color: var(--color-muted); }
 
-/* Account details */
-.details { display: grid; gap: 14px; margin: 0; }
-.details div { display: grid; grid-template-columns: 140px 1fr; gap: 12px; }
-.details dt { color: var(--color-muted); }
-.details dd { margin: 0; }
-
-/* Notes */
-.board { display: grid; gap: calc(var(--space) * 6); grid-template-columns: minmax(280px, 400px) minmax(0, 1fr); align-items: start; }
-.board__compose { position: sticky; top: 24px; animation: rise 420ms ease both; }
-.board__compose .card { margin-top: calc(var(--space) * 3); }
-.board__list { animation: rise 420ms 80ms ease both; }
-.actions { display: flex; flex-wrap: wrap; gap: 10px; }
-.notice { min-height: 1.4em; margin: calc(var(--space) * 1.5) 0 0; font-size: 0.92rem; color: var(--color-muted); }
-.notice--error { color: var(--color-danger); }
-.section-title { display: flex; align-items: baseline; gap: 10px; margin: 0 0 calc(var(--space) * 2); padding-bottom: 10px; border-bottom: 2px solid var(--color-ink); font: 600 0.8rem/1 var(--font-mono); letter-spacing: 0.14em; text-transform: uppercase; }
-.count { color: var(--color-accent); }
-.notes { display: grid; margin: 0; padding: 0; list-style: none; }
-.note {
-  display: grid;
-  grid-template-columns: 3ch minmax(0, 1fr) auto;
-  gap: 16px;
-  align-items: start;
-  padding: calc(var(--space) * 2) 0;
-  border-bottom: 1px solid var(--color-line);
+@media (max-width: 760px) {
+  .auth { grid-template-columns: 1fr; gap: var(--space-6); align-content: start; }
 }
-.note--editing { background: linear-gradient(90deg, rgba(194, 65, 28, 0.08), transparent 70%); }
-.note__index { color: var(--color-accent); font: 600 0.85rem/1.9 var(--font-mono); }
-.note__title { margin: 0; font: var(--display-weight) 1.3rem/1.25 var(--font-display); letter-spacing: var(--display-tracking); overflow-wrap: anywhere; }
-.note__body { margin: 6px 0 0; color: var(--color-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
-.note__actions { display: flex; gap: 4px; }
-.note--skeleton { min-height: 76px; background: linear-gradient(90deg, transparent, var(--color-line), transparent) 0 0 / 200% 100%; opacity: 0.5; animation: shimmer 1.2s linear infinite; }
-.alert { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; justify-content: space-between; padding: 14px 16px; border: 1px solid var(--color-danger); border-radius: var(--radius); color: var(--color-danger); background: var(--color-surface); }
-.alert p { margin: 0; }
-.empty { padding: calc(var(--space) * 5) calc(var(--space) * 3); border: 1px dashed var(--color-line); border-radius: var(--radius); text-align: center; }
-.empty__title { margin: 0; font: var(--display-weight) 1.5rem/1.2 var(--font-display); }
-.empty__body { margin: 8px 0 0; color: var(--color-muted); }
-
-@keyframes rise { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-@keyframes spin { to { transform: rotate(360deg); } }
-@keyframes shimmer { to { background-position: -200% 0; } }
-
-@media (max-width: 820px) {
-  .auth { grid-template-columns: 1fr; align-content: start; gap: calc(var(--space) * 4); padding-top: calc(var(--space) * 7); }
-  .board { grid-template-columns: 1fr; gap: calc(var(--space) * 5); }
-  .board__compose { position: static; }
-}
-@media (max-width: 520px) {
-  .card { padding: calc(var(--space) * 2.25); }
-  .menu__label { display: none; }
-  .menu__trigger { padding-right: 4px; }
-  .details div { grid-template-columns: 1fr; gap: 2px; }
-  .note { grid-template-columns: 1fr; gap: 6px; }
-  .note__index { display: none; }
-  .note__actions { margin-left: -6px; }
-  .text-button { min-height: 44px; }
+@media (max-width: 480px) {
+  .panel { padding: var(--space-4); }
 }
 @media (prefers-reduced-motion: reduce) {
-  *, *::before, *::after { animation-duration: 1ms !important; animation-iteration-count: 1 !important; transition: none !important; }
+  .spinner { animation-duration: 3s; }
 }
 `;
 
-// ---------------------------------------------------------------------- readme
+const NOTES_CSS = `/* Notes example: delete with src/ui/NotesBoard.tsx. */
+.alert { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-danger); border-radius: var(--radius-control); color: var(--color-danger); background: var(--color-surface); }
+.alert p { margin: 0; }
+.notes-board { display: grid; grid-template-columns: minmax(280px, 360px) minmax(0, 1fr); gap: var(--space-8); align-items: start; }
+.notice { min-height: 1.4em; margin: 0; color: var(--color-muted); font-size: var(--text-sm); }
+.section-title { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-muted); }
+.note-list { margin: 0; padding: 0; list-style: none; border-top: 1px solid var(--color-border); }
+.note { display: flex; gap: var(--space-4); justify-content: space-between; align-items: start; padding: var(--space-4) 0; border-bottom: 1px solid var(--color-border); }
+.note[aria-current="true"] { box-shadow: inset 3px 0 0 var(--color-accent); padding-left: var(--space-3); }
+.note__text { min-width: 0; }
+.note__title { margin: 0; font: 600 var(--text-base)/1.35 var(--font-body); overflow-wrap: anywhere; }
+.note__body { margin: var(--space-1) 0 0; color: var(--color-muted); white-space: pre-wrap; overflow-wrap: anywhere; }
+.note__actions { display: flex; flex: none; }
+
+@media (max-width: 760px) {
+  .notes-board { grid-template-columns: 1fr; }
+}
+@media (max-width: 480px) {
+  .note { flex-direction: column; gap: var(--space-1); }
+  .note__actions { margin-left: calc(-1 * var(--space-2)); }
+}
+`;
+
+// --------------------------------------------------------------------- readme
 
 function readme(selection: InitSelection): string {
   const styled = selection.ui === 'styled';
@@ -1604,46 +1245,37 @@ function readme(selection: InitSelection): string {
   const lines = [
     '# somewhere.tech app',
     '',
-    `Generated by \`somewhere init --features ${selection.modules.join(',')} --ui ${selection.ui}\`.`,
+    '## Where things go',
     '',
-    '## Where things live',
-    '',
-    '| Change | Edit | Leave alone |',
-    '|---|---|---|',
+    '- Your app: `src/pages/HomePage.tsx`. Add a page: a path in `src/routes.ts`, a case in `src/App.tsx`, a file in `src/pages/`.',
+    styled
+      ? '- Look: `src/styles/tokens.css` (shared values), `src/styles/app.css`, and the views in `src/ui/`. Views take props only; rewrite or replace them freely.'
+      : '- Look: `src/ui/` holds plain semantic views. Replace them with your own components; keep their props, or change the pages that pass them.',
+    '- Sign-in: `src/auth/hooks.ts` (state and actions) over the SDK client in `src/services/auth.ts` and the SDK route `api/auth/[...path].ts`.',
   ];
-  if (styled) {
-    lines.push('| Colours, fonts, radius, spacing | `src/styles/tokens.css` | |');
-    lines.push('| Component look | `src/styles/app.css`, `src/ui/*.tsx` (props only; safe to rewrite or delete) | |');
-  } else {
-    lines.push('| Markup | `src/pages/*.tsx` (plain markup over the hooks; replace freely) | |');
-  }
-  lines.push('| App name | `src/config.ts`, `index.html` | |');
-  lines.push('| Add a page | `src/routes.ts` (path) + `src/App.tsx` (case) + `src/pages/` | |');
-  lines.push('| Sign-in behaviour | `src/auth/hooks.ts` | `api/auth/[...path].ts`, `src/services/auth.ts` (SDK) |');
   if (privateData) {
-    lines.push('| Note fields | `db/schema.ts` (+ `client` block), `types/notes.ts`, `src/services/notes.ts` | owner scoping (the platform applies `owner()`) |');
-    lines.push('| Note state | `src/data/useNotes.ts` | |');
+    lines.push('- Data: `db/schema.ts` (tables and browser permissions), `src/services/notes.ts` (calls), `src/data/useNotes.ts` (state). The notes example is removable.');
   }
   lines.push(
     '',
     '## Auth',
     '',
-    'Auth is handled by `@somewhere-tech/sdk`: `api/auth/[...path].ts` is its packaged',
-    'handler and `src/services/auth.ts` its client. The session is an httpOnly cookie;',
-    'app code never stores or sends a token. `src/App.tsx` shows a loading screen until',
-    'the first session check answers, then the sign-in page or the routed page.',
-    'Password reset, OAuth and MFA are not generated.',
+    'Auth is handled by `@somewhere-tech/sdk`. The session is an httpOnly cookie;',
+    'app code does not store or send a token. `src/App.tsx` shows a loading screen',
+    'until the first session check answers. The sign-in gate is only UX: functions',
+    'and `db/schema.ts` decide what a request may read or write. Password reset,',
+    'OAuth and MFA are not generated.',
   );
   if (privateData) {
     lines.push(
       '',
       '## Private data',
       '',
-      '`db/schema.ts` declares `notes` with `owner()`: each user reads and writes only',
-      'their own rows, on every path. `src/services/notes.ts` calls the generated',
-      '`somewhere:data` client and never filters by user. Updates report',
-      '"No changes" when nothing differed and "already removed" when the note is gone.',
-      'Contract: `somewhere docs declared-data`.',
+      '`db/schema.ts` declares `notes` with `owner()`, so the generated `somewhere:data`',
+      'client returns and changes only the signed-in user\'s rows; the browser code',
+      'sends no user filter. Functions you add can bypass this with explicit',
+      'server-authority calls and must check the caller themselves. The title/body',
+      'length limits are form checks only. Contract: `somewhere docs declared-data`.',
     );
   }
   lines.push(
@@ -1656,14 +1288,25 @@ function readme(selection: InitSelection): string {
     'somewhere verify',
     '```',
     '',
-    'Deploy the raw source; the platform compiles it. Failures: `somewhere logs --tail 10`,',
-    'then `somewhere errors`.',
+    'Deploy the raw source; the platform compiles it.',
     '',
   );
   return lines.join('\n');
 }
 
-// ----------------------------------------------------------------------- build
+/** Where to build, restyle, route and change data, for the init report. */
+export function extensionPoints(selection: InitSelection): Record<string, string> {
+  const points: Record<string, string> = {
+    app: 'src/pages/HomePage.tsx',
+    routes: 'src/routes.ts + src/App.tsx',
+    look: selection.ui === 'styled' ? 'src/styles/tokens.css, src/styles/app.css, src/ui/' : 'src/ui/',
+    auth: 'src/auth/hooks.ts',
+  };
+  if (selection.modules.includes('private-data')) points.data = 'db/schema.ts, src/services/notes.ts, src/data/useNotes.ts';
+  return points;
+}
+
+// ---------------------------------------------------------------------- build
 
 export function createFeatureTemplate(
   selection: InitSelection,
@@ -1686,49 +1329,29 @@ export function createFeatureTemplate(
     { path: 'src/config.ts', content: configTs(options.appName) },
     { path: 'src/routes.ts', content: ROUTES },
     { path: 'src/services/auth.ts', content: AUTH_SERVICE },
-    { path: 'src/auth/AuthProvider.tsx', content: AUTH_PROVIDER },
     { path: 'src/auth/hooks.ts', content: AUTH_HOOKS },
+    { path: 'src/pages/SignInPage.tsx', content: SIGN_IN_PAGE },
+    { path: 'src/pages/SignedInLayout.tsx', content: SIGNED_IN_LAYOUT },
+    { path: 'src/pages/HomePage.tsx', content: homePage(privateData) },
+    { path: 'src/pages/NotFoundPage.tsx', content: NOT_FOUND_PAGE },
+    { path: 'src/ui/feedback.tsx', content: styled ? STYLED_FEEDBACK : PLAIN_FEEDBACK },
+    { path: 'src/ui/AuthCard.tsx', content: styled ? STYLED_AUTH_CARD : PLAIN_AUTH_CARD },
+    { path: 'src/ui/AppShell.tsx', content: styled ? STYLED_APP_SHELL : PLAIN_APP_SHELL },
   ];
-
+  if (styled) {
+    files.push(
+      { path: 'src/styles/tokens.css', content: TOKENS_CSS },
+      { path: 'src/styles/app.css', content: privateData ? APP_CSS + '\n' + NOTES_CSS : APP_CSS },
+    );
+  }
   if (privateData) {
     files.push(
       { path: 'db/schema.ts', content: SCHEMA },
       { path: 'types/notes.ts', content: NOTES_TYPES },
       { path: 'src/services/notes.ts', content: NOTES_SERVICE },
       { path: 'src/data/useNotes.ts', content: USE_NOTES },
+      { path: 'src/ui/NotesBoard.tsx', content: styled ? STYLED_NOTES_BOARD : PLAIN_NOTES_BOARD },
     );
   }
-
-  if (styled) {
-    files.push(
-      { path: 'src/styles/tokens.css', content: TOKENS_CSS },
-      { path: 'src/styles/app.css', content: APP_CSS },
-      { path: 'src/ui/feedback.tsx', content: UI_FEEDBACK },
-      { path: 'src/ui/AuthCard.tsx', content: UI_AUTH_CARD },
-      { path: 'src/ui/AppShell.tsx', content: UI_APP_SHELL },
-      { path: 'src/ui/AccountMenu.tsx', content: UI_ACCOUNT_MENU },
-      { path: 'src/ui/AccountDetails.tsx', content: UI_ACCOUNT_DETAILS },
-      { path: 'src/ui/NotFound.tsx', content: UI_NOT_FOUND },
-      { path: 'src/pages/LoadingPage.tsx', content: STYLED_LOADING_PAGE },
-      { path: 'src/pages/SignInPage.tsx', content: STYLED_SIGN_IN_PAGE },
-      { path: 'src/pages/SignedInLayout.tsx', content: STYLED_LAYOUT },
-      { path: 'src/pages/HomePage.tsx', content: styledHomePage(privateData) },
-      { path: 'src/pages/AccountPage.tsx', content: STYLED_ACCOUNT_PAGE },
-      { path: 'src/pages/NotFoundPage.tsx', content: STYLED_NOT_FOUND_PAGE },
-    );
-    files.push(privateData
-      ? { path: 'src/ui/NotesBoard.tsx', content: UI_NOTES_BOARD }
-      : { path: 'src/ui/WelcomePanel.tsx', content: UI_WELCOME });
-  } else {
-    files.push(
-      { path: 'src/pages/LoadingPage.tsx', content: HEADLESS_LOADING_PAGE },
-      { path: 'src/pages/SignInPage.tsx', content: HEADLESS_SIGN_IN_PAGE },
-      { path: 'src/pages/SignedInLayout.tsx', content: HEADLESS_LAYOUT },
-      { path: 'src/pages/HomePage.tsx', content: headlessHomePage(privateData) },
-      { path: 'src/pages/AccountPage.tsx', content: HEADLESS_ACCOUNT_PAGE },
-      { path: 'src/pages/NotFoundPage.tsx', content: HEADLESS_NOT_FOUND_PAGE },
-    );
-  }
-
   return files;
 }
