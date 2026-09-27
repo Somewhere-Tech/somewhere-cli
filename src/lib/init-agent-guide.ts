@@ -48,8 +48,8 @@ Functions: a bare \`export default async function (req, sw)\` returning a
 \`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
 'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
 }, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
-\`params.id\` there, \`sw.params.id\` bare. With \`db/schema.ts\`, \`somewhere
-typecheck\` types bare handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
+\`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
+handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
 
 Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
 guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
