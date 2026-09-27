@@ -79,6 +79,57 @@ export interface VerifyReport {
   /** The platform's non-blocking layout line per run: contrast, horizontal
    *  overflow, and tap-target sizing at that viewport. */
   layout: Array<VerifySignal<string>>;
+  /** Responses of 4xx/5xx the flow did not declare, with who made the request
+   *  and the exact expect_requests entry that would declare it. Never applied
+   *  automatically: an undeclared status fails the run. */
+  undeclared_statuses: VerifyUndeclaredStatus[];
+  /** Start navigations the platform retried once because the document never
+   *  answered and no action had run. Reported, never hidden. */
+  infrastructure_retries: Array<VerifySignal<{ phase: string; error: string; elapsed_ms?: number }>>;
+}
+
+export interface VerifyUndeclaredStatus {
+  viewport: string;
+  method: string;
+  path: string;
+  status: number;
+  /** 'eval' = your flow's eval step made it (a probe); 'page' = the app's own code. */
+  initiator: 'eval' | 'page' | 'unknown';
+  declare: { path: string; status: number };
+}
+
+const GENERIC_RESOURCE_FAILURE = /^Failed to load resource: the server responded with a status of (\d{3})\b/;
+
+function undeclaredStatusOf(viewport: string, detail: unknown): VerifyUndeclaredStatus | null {
+  if (!isRecord(detail) || typeof detail.url !== 'string' || typeof detail.status !== 'number' || detail.status < 400) return null;
+  let path = detail.url;
+  try { path = new URL(detail.url).pathname; } catch { /* keep the raw value */ }
+  const initiator = detail.initiator === 'eval' || detail.initiator === 'page' ? detail.initiator : 'unknown';
+  return {
+    viewport,
+    method: typeof detail.method === 'string' ? detail.method : 'GET',
+    path,
+    status: detail.status,
+    initiator,
+    declare: { path, status: detail.status },
+  };
+}
+
+function undeclaredStatusVerdict(first: VerifyUndeclaredStatus, all: VerifyUndeclaredStatus[]): string {
+  const who = first.initiator === 'eval'
+    ? 'Your eval step made this request (a probe)'
+    : first.initiator === 'page'
+      ? 'The app\'s own code made this request, not a verify step'
+      : 'It could not be established whether a verify step or the app made this request';
+  const declare = JSON.stringify(first.declare);
+  const fix = first.status >= 500
+    ? `A ${first.status} is a server error: fix it, or, only if the flow triggers it on purpose, add ${declare} to expect_requests.`
+    : first.initiator === 'page'
+      ? `If the app is meant to be refused here, add ${declare} to expect_requests; otherwise it is an app failure to fix.`
+      : `If the refusal is intended, add ${declare} to expect_requests.`;
+  const others = all.filter((item) => item !== first).slice(0, 3).map((item) => `${item.method} ${item.path} ${item.status}`);
+  const more = all.length > 1 ? ` Also undeclared: ${others.join(', ')}${all.length > 4 ? ` and ${all.length - 4} more` : ''}.` : '';
+  return `FAIL — ${first.method} ${first.path} answered ${first.status} at ${first.viewport}, which the flow did not declare. ${who}. ${fix}${more}`;
 }
 
 interface ResolvedViewport {
@@ -299,13 +350,29 @@ function shapeVerificationReport(
   const expectations: Array<VerifySignal<BrowserRequestExpectationResult>> = [];
   const screenshots: VerifyScreenshotReport[] = [];
   const layout: Array<VerifySignal<string>> = [];
+  const infrastructureRetries: VerifyReport['infrastructure_retries'] = [];
 
   for (const { viewport, report, actions: runActions } of runs) {
     const actions = runActions ?? flow.actions;
     if (typeof report.accessibility_layout === 'string' && report.accessibility_layout) {
       layout.push({ viewport: viewport.label, detail: report.accessibility_layout });
     }
+    for (const retry of report.infrastructure_retries ?? []) {
+      infrastructureRetries.push({ viewport: viewport.label, detail: { phase: retry.phase, error: retry.error, ...(typeof retry.elapsed_ms === 'number' ? { elapsed_ms: retry.elapsed_ms } : {}) } });
+    }
     for (const [index, step] of (report.steps ?? []).entries()) {
+      // The platform's own navigation before the first action is step 0 of its
+      // own, never the caller's first action.
+      if (step.phase === 'start_navigation' || step.phase === 'session_restore') {
+        steps.push({
+          viewport: viewport.label,
+          step: 0,
+          name: step.phase === 'start_navigation' ? 'open the start page (before any action)' : 'restore the session page (before any action)',
+          passed: (step.ok ?? step.passed) !== false,
+          ...(step.error ? { error: step.error } : {}),
+        });
+        continue;
+      }
       const sourceIndex = typeof step.step === 'number' ? step.step : index;
       // The local browser models its requested final capture as an internal
       // screenshot step. Hosted capture_after does not, so keep the public
@@ -337,6 +404,19 @@ function shapeVerificationReport(
 
   const failingStep = steps.find((step) => !step.passed);
   const failedExpectation = expectations.find((item) => !item.detail.ok);
+  const undeclared = failedRequests
+    .map((item) => undeclaredStatusOf(item.viewport, item.detail))
+    .filter((item): item is VerifyUndeclaredStatus => item !== null);
+  // A console line that only restates an undeclared response ("Failed to load
+  // resource … status of 401") is explained by that response; any other
+  // console error still comes first.
+  const unexplainedConsole = consoleErrors.find((item) => {
+    const match = GENERIC_RESOURCE_FAILURE.exec(String(item.detail));
+    return !match || !undeclared.some((u) => u.viewport === item.viewport && String(u.status) === match[1]);
+  });
+  const retryNote = infrastructureRetries.length
+    ? ` The start page needed ${infrastructureRetries.length} infrastructure retr${infrastructureRetries.length === 1 ? 'y' : 'ies'} (${infrastructureRetries.map((r) => r.viewport).join(', ')}): its document never answered the first time.`
+    : '';
   const failedScreenshot = runs.find(({ report }) => !report.screenshots?.some((shot) => {
     if (typeof shot === 'string') return shot.length > 0;
     return !shot.error && !!(shot.path ?? shot.url ?? shot.fs_path ?? shot.scratch_url);
@@ -347,8 +427,10 @@ function shapeVerificationReport(
     verdict = `FAIL — step ${failingStep.step} (${failingStep.name}) failed at ${failingStep.viewport}${failingStep.error ? `: ${failingStep.error}` : '.'}`;
   } else if (pageErrors.length) {
     verdict = `FAIL — page error at ${pageErrors[0].viewport}: ${String(pageErrors[0].detail)}`;
-  } else if (consoleErrors.length) {
-    verdict = `FAIL — console error at ${consoleErrors[0].viewport}: ${String(consoleErrors[0].detail)}`;
+  } else if (unexplainedConsole) {
+    verdict = `FAIL — console error at ${unexplainedConsole.viewport}: ${String(unexplainedConsole.detail)}`;
+  } else if (undeclared.length) {
+    verdict = undeclaredStatusVerdict(undeclared[0], undeclared);
   } else if (failedRequests.length) {
     verdict = `FAIL — unexpected request failure at ${failedRequests[0].viewport}: ${JSON.stringify(failedRequests[0].detail)}`;
   } else if (failedExpectation) {
@@ -360,6 +442,7 @@ function shapeVerificationReport(
       ? `PASS — ${flow.actions.length} step${flow.actions.length === 1 ? '' : 's'} passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`
       : `PASS — default page check passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`;
   }
+  if (infrastructureRetries.length) verdict += retryNote;
 
   return {
     passed,
@@ -384,6 +467,8 @@ function shapeVerificationReport(
     },
     screenshots,
     layout,
+    undeclared_statuses: undeclared,
+    infrastructure_retries: infrastructureRetries,
   };
 }
 
@@ -841,7 +926,8 @@ export function createVerifyJourneyRun(
     } else if (!passed) {
       verdict = shaped.verdict.replace(/^FAIL — /, `FAIL — segment ${stopped?.segment ?? '?'} — `);
     } else {
-      verdict = `PASS — ${journey.journey.length} segment${journey.journey.length === 1 ? '' : 's'} by ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')}) passed; page, console, and network healthy.`;
+      verdict = `PASS — ${journey.journey.length} segment${journey.journey.length === 1 ? '' : 's'} by ${names.length} user${names.length === 1 ? '' : 's'} (${names.join(', ')}) passed; page, console, and network healthy.`
+        + (shaped.infrastructure_retries.length ? ` The start page needed ${shaped.infrastructure_retries.length} infrastructure retr${shaped.infrastructure_retries.length === 1 ? 'y' : 'ies'} (${shaped.infrastructure_retries.map((r) => r.viewport).join(', ')}): its document never answered the first time.` : '');
     }
     const { cleanup, cleanup_ms } = await closeAll();
     return {
@@ -945,6 +1031,12 @@ export function formatVerifyReport(report: VerifyReport): string[] {
     if (shot.fs_path && (shot.url || shot.scratch_url)) lines.push(`screenshot_file: [${shot.viewport}] ${shot.fs_path}`);
   }
   for (const item of report.layout ?? []) lines.push(`layout: [${item.viewport}] ${dim(item.detail)}`);
+  for (const item of report.undeclared_statuses ?? []) {
+    lines.push(`undeclared: [${item.viewport}] ${item.method} ${item.path} → ${item.status} (${item.initiator === 'eval' ? 'from your eval step' : item.initiator === 'page' ? 'from the app' : 'origin unknown'}); declare with ${JSON.stringify(item.declare)} if intended`);
+  }
+  for (const item of report.infrastructure_retries ?? []) {
+    lines.push(`infrastructure retry: [${item.viewport}] start page retried once after: ${item.detail.error}`);
+  }
   return lines;
 }
 

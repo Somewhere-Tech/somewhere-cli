@@ -251,7 +251,18 @@ test('an unexpected 500 fails network health and the one-line verdict', async ()
   );
   assert.equal(report.passed, false);
   assert.equal(report.health.network.passed, false);
+  assert.match(report.verdict, /^FAIL — GET \/api\/broken answered 500 at desktop, which the flow did not declare\. .*A 500 is a server error: fix it/);
+});
+
+test('a transport failure with no HTTP status keeps the generic request-failure verdict', async () => {
+  const report = await runVerification(
+    { project_id: 'fixture' },
+    normalizeVerifyFlow({ actions: [], viewports: ['desktop'] }),
+    fixtureClient([browserReport({ passed: false, failed_requests: [{ status: 0, method: 'GET', url: 'https://fixture.somewhere.site/api/x', error_text: 'net::ERR_FAILED' }] })]),
+  );
+  assert.equal(report.passed, false);
   assert.match(report.verdict, /unexpected request failure/);
+  assert.deepEqual(report.undeclared_statuses, []);
 });
 
 test('a missing final screenshot fails verification instead of returning a false green', async () => {

@@ -37,6 +37,8 @@ interface BrowserStepResult {
   result?: unknown;
   error?: string;
   duration_ms?: number;
+  /** The platform's own navigation before the caller's first action. */
+  phase?: 'start_navigation' | 'session_restore';
 }
 
 /** Step actions whose whole purpose is to hand back a value. When one of these
@@ -99,6 +101,10 @@ export interface BrowserResult {
   session_note?: string;
   /** One non-blocking line: contrast, horizontal overflow, tap-target sizing. */
   accessibility_layout?: string;
+  /** The page when the start navigation gave up (document status, ready state, what was loading). */
+  navigation_snapshot?: Record<string, unknown>;
+  /** A start navigation retried once because its document provably never answered. */
+  infrastructure_retries?: Array<{ phase: string; error: string; elapsed_ms?: number; snapshot?: Record<string, unknown> }>;
 }
 
 export interface BrowserOptions {
