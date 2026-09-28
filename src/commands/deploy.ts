@@ -33,7 +33,7 @@ import { showProjectNotices } from '../lib/project-notices.js';
 import { formatNextActions, nextActions } from '../lib/next-actions.js';
 import { countFromResponse, countFunctionRoutes, formatPublishSurface } from '../lib/surface-counts.js';
 import {
-  formatVerifyReport,
+  formatVerifyOutput,
   loadVerifyFlow,
   runVerification,
   type VerifyReport,
@@ -200,6 +200,16 @@ export function formatRemainingTempTime(expiresAt: string, nowMs = Date.now()): 
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+export function formatTempExpiry(expiresAt: string, ttlSeconds?: number, nowMs = Date.now()): string {
+  const delta = Date.parse(expiresAt) - nowMs;
+  // The server expiry is authoritative. An implausible local clock must not
+  // turn a freshly issued lifetime into a longer promise.
+  const clockDisagrees = ttlSeconds !== undefined && Number.isFinite(ttlSeconds)
+    && (delta > ttlSeconds * 1000 + 60_000 || delta < -60_000);
+  const remaining = !clockDisagrees && Number.isFinite(nowMs) ? formatRemainingTempTime(expiresAt, nowMs) : null;
+  return `Expires at: ${expiresAt} (UTC${remaining ? `; about ${remaining} remaining` : ''})`;
 }
 
 function plural(count: number, singular: string, pluralWord = `${singular}s`): string {
@@ -903,9 +913,6 @@ export function registerDeploy(program: Command) {
           // Every anonymous deploy ends with stable, machine-scannable labels.
           // The absolute server expiry avoids making a reused credential look
           // like it received a fresh three-hour window.
-          const remaining = tempSession.reused && tempSession.expiresAt
-            ? formatRemainingTempTime(tempSession.expiresAt)
-            : null;
           if (formatted.liveUrl) {
             success(`Live URL: ${teal(formatted.liveUrl)}`);
           } else {
@@ -913,7 +920,7 @@ export function registerDeploy(program: Command) {
           }
           info(`Claim URL: ${teal(tempSession.claimUrl)}`);
           if (tempSession.expiresAt) {
-            info(`Expires at: ${tempSession.expiresAt}${remaining ? ` (${remaining} remaining)` : ''}`);
+            info(formatTempExpiry(tempSession.expiresAt, tempSession.ttlSeconds));
           } else {
             const hours = formatTtlHours(tempSession.ttlSeconds);
             info(`Expires: about ${hours} hour${hours === 1 ? '' : 's'} after the temporary session was created`);
@@ -985,7 +992,7 @@ export function registerDeploy(program: Command) {
 
         if (verification) {
           console.log('');
-          for (const line of formatVerifyReport(verification)) console.log(line);
+          for (const line of formatVerifyOutput(verification)) console.log(line);
         }
 
         // Exit non-zero if any function failed to deploy — a CI step that

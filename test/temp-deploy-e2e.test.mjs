@@ -173,7 +173,7 @@ test('deploy while logged out — mint, auto-create project, claim relay, then s
   const second = await run(['deploy'], { cwd: fixtureDir, env });
   assert.equal(second.status, 0, `expected exit 0, got ${second.status}\nstdout:\n${second.stdout}\nstderr:\n${second.stderr}`);
   assert.match(second.stdout, /Live URL:/);
-  assert.match(second.stdout, /Expires at: .* \(\d+h \d+m remaining\)/);
+  assert.match(second.stdout, /Expires at: .* \(UTC; about \d+h \d+m remaining\)/);
   assert.match(second.stdout, /Claim URL:/);
   assert.match(second.stdout, /"Save project and connect agent".*signs in on its next command/i);
 

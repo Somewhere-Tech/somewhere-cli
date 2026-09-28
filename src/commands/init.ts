@@ -4,6 +4,7 @@ import ora from '../lib/spinner.js';
 import { ApiClient } from '../lib/client.js';
 import {
   getToken,
+  loadConfig,
   hasGlobalMcpConfig,
   loadProjectConfig,
   saveGlobalMcpConfig,
@@ -11,7 +12,8 @@ import {
   saveProjectConfig,
 } from '../lib/config.js';
 import { installInitDependencies } from '../lib/init-install.js';
-import { basename } from 'node:path';
+import { basename, join } from 'node:path';
+import { existsSync } from 'node:fs';
 import {
   canWriteInitScaffold,
   preflightInitScaffold,
@@ -62,7 +64,7 @@ interface LinkProject {
 export function registerInit(program: Command) {
   program
     .command('init')
-    .description('Create a project and link this directory; an empty directory also gets the React + TypeScript starter')
+    .description('Write a local starter; when signed in, also create a project and link this directory')
     .option('--name <name>', 'Project name (skip prompt)')
     .option('--link', 'Link to an existing project instead of creating one')
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
@@ -111,7 +113,7 @@ export function registerInit(program: Command) {
         } else {
           info(`Dry run: ${describeSelection(plan.selection)}`);
           for (const path of files) console.log(`  ${path}`);
-          info('Nothing was created. Drop --dry-run (and add --name) to create the project.');
+          info('Nothing was created. Drop --dry-run (and add --name) to write the starter; a signed-in run also creates the project.');
         }
         return;
       }
@@ -144,8 +146,6 @@ export function registerInit(program: Command) {
         }
       }
 
-      const token = getToken();
-      const client = new ApiClient(token);
       const shouldScaffold = !opts.bare && canWriteInitScaffold(dir);
       const scaffoldFiles = (projectName: string): InitScaffoldFile[] =>
         template === 'minimal' && !plan
@@ -153,6 +153,40 @@ export function registerInit(program: Command) {
           : createFeatureTemplate(plan?.selection ?? DEFAULT_AUTH_SELECTION, { appName: projectName });
 
       const existing = loadProjectConfig(dir);
+      // Missing credentials never block local source generation. Linking and
+      // bare project creation remain account operations; deploy owns anonymous
+      // provisioning and its proof-of-work / temporary-session isolation.
+      if (!loadConfig()?.token && !opts.link && !opts.bare) {
+        if (existing || existsSync(join(dir, '.somewhere.json')) || !shouldScaffold) {
+          error('Local starter generation requires an empty, unlinked directory. Existing files were kept. Run somewhere docs start for the anonymous deploy workflow.');
+          process.exit(1);
+        }
+        let localName = opts.name;
+        if (!localName) {
+          const answer = await prompts({ type: 'text', name: 'name', message: 'App name', initial: basename(dir) || 'my-app' });
+          localName = answer.name as string | undefined;
+          if (!localName) return;
+        }
+        try {
+          const scaffold = writeInitScaffold(dir, scaffoldFiles(localName));
+          const next = ['somewhere deploy', 'somewhere docs start'];
+          if (opts.json) {
+            printJson({ local: true, linked: false, name: localName, files: scaffold.created, dependencies_installed: false,
+              ...(plan ? { selection: plan.selection, extension_points: extensionPoints(plan.selection) } : {}), next });
+          } else {
+            success(`Local starter written (${scaffold.created.length} files); no account or project was created.`);
+            info('Dependencies are not installed. Run npm install if you want to run it locally.');
+            info('Next: somewhere deploy — publish with a temporary workspace, no login needed.');
+            info('Quickstart: somewhere docs start');
+          }
+        } catch (err) {
+          error(err instanceof Error ? err.message : String(err), err);
+          process.exit(1);
+        }
+        return;
+      }
+      const token = getToken();
+      const client = new ApiClient(token);
       if (existing && !opts.project) {
         if (opts.json) {
           error(`This directory is already linked to ${existing.name}.`);

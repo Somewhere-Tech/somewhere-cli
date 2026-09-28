@@ -12,6 +12,7 @@ import {
 } from '../lib/browser-actions.js';
 import { isLoopbackUrl, runLocalBrowser } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
+import { saveVerifyReport } from '../lib/verify-report.js';
 import type { BrowserResult } from './browser.js';
 
 const VERIFY_TIMEOUT_MS = 90_000;
@@ -1031,7 +1032,7 @@ export function verifyFlowSchema(): Record<string, unknown> {
   };
 }
 
-export function formatVerifyReport(report: VerifyReport): string[] {
+export function formatVerifyReport(report: VerifyReport, evidencePath?: string): string[] {
   const lines = [report.passed ? green(report.verdict) : red(report.verdict)];
   for (const step of report.steps) {
     lines.push(`step ${step.step} ${step.passed ? green('✓') : red('✗')} [${step.viewport}] ${step.name}${step.error ? ` ${dim(`— ${step.error}`)}` : ''}`);
@@ -1041,8 +1042,9 @@ export function formatVerifyReport(report: VerifyReport): string[] {
   lines.push(`network_health: ${report.health.network.passed ? green('PASS') : red('FAIL')}`);
   for (const shot of report.screenshots) {
     const location = shot.url ?? shot.scratch_url ?? shot.fs_path ?? shot.path ?? shot.error ?? '(missing)';
-    lines.push(`screenshot: [${shot.viewport}] ${teal(location)}`);
-    if (shot.fs_path && (shot.url || shot.scratch_url)) lines.push(`screenshot_file: [${shot.viewport}] ${shot.fs_path}`);
+    const savedLink = evidencePath && (shot.url || shot.scratch_url);
+    lines.push(`screenshot: [${shot.viewport}] ${savedLink ? 'link saved in report' : teal(location)}${shot.error && savedLink ? ` — ${shot.error}` : ''}`);
+    if (shot.fs_path && !savedLink && (shot.url || shot.scratch_url)) lines.push(`screenshot_file: [${shot.viewport}] ${shot.fs_path}`);
   }
   for (const item of report.layout ?? []) lines.push(`layout: [${item.viewport}] ${dim(item.detail)}`);
   for (const item of report.undeclared_statuses ?? []) {
@@ -1054,13 +1056,28 @@ export function formatVerifyReport(report: VerifyReport): string[] {
   return lines;
 }
 
-export function formatVerifyJourneyReport(report: VerifyJourneyReport): string[] {
-  const lines = formatVerifyReport(report);
+export function formatVerifyJourneyReport(report: VerifyJourneyReport, evidencePath?: string): string[] {
+  const lines = formatVerifyReport(report, evidencePath);
   const segmentLines = report.segments.map((segment) => {
     const mark = !segment.ran && !segment.error ? dim('not run') : segment.passed ? green('✓') : red('✗');
     return `segment ${segment.segment} ${mark} ${segment.as} [${segment.viewport}]${segment.path ? ` ${segment.path}` : ''}${segment.error ? ` ${dim(`— ${segment.error.code}`)}` : ''}`;
   });
   return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}`, ...formatJourneyCleanup(report.cleanup, report.cleanup_ms)];
+}
+
+/** Persist before shortening human output; JSON callers keep their original contract. */
+export function formatVerifyOutput(
+  report: VerifyReport | VerifyJourneyReport,
+  save: (value: unknown) => string = saveVerifyReport,
+): string[] {
+  const format = (path?: string) => 'segments' in report
+    ? formatVerifyJourneyReport(report, path) : formatVerifyReport(report, path);
+  try {
+    const path = save(report);
+    return [...format(path), `Full report and screenshot links: ${path}`];
+  } catch {
+    return ['Could not save the verification report; full screenshot links are shown below.', ...format()];
+  }
 }
 
 export function formatJourneyCleanup(cleanup: VerifyJourneyCleanup[], cleanupMs: number): string[] {
@@ -1186,7 +1203,7 @@ projects: a login approved for "Only these projects" cannot open named browsers
             process.removeListener('SIGTERM', onSignal);
           }
           if (opts.json) console.log(JSON.stringify(report, null, 2));
-          else for (const line of formatVerifyJourneyReport(report)) console.log(line);
+          else for (const line of formatVerifyOutput(report)) console.log(line);
           process.exit(report.passed ? 0 : 1);
         }
         const loadedFlow = input.flow;
@@ -1202,7 +1219,7 @@ projects: a login approved for "Only these projects" cannot open named browsers
           client,
         );
         if (opts.json) console.log(JSON.stringify(report, null, 2));
-        else for (const line of formatVerifyReport(report)) console.log(line);
+        else for (const line of formatVerifyOutput(report)) console.log(line);
         process.exit(report.passed ? 0 : 1);
       } catch (cause) {
         if (cause instanceof CliApiError && cause.code === 'VALIDATION_ERROR'
