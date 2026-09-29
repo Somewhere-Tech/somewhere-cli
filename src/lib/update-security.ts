@@ -140,23 +140,23 @@ function findSlsaBundle(body: unknown): { bundle: SigstoreBundle; envelope: Obje
   const bundle = attestation && isObject(attestation.bundle) ? attestation.bundle : undefined;
   const envelope = bundle && isObject(bundle.dsseEnvelope) ? bundle.dsseEnvelope : undefined;
   const material = bundle && isObject(bundle.verificationMaterial) ? bundle.verificationMaterial : undefined;
-  const chain = material && isObject(material.x509CertificateChain) ? material.x509CertificateChain : undefined;
 
   if (
-    bundle?.mediaType !== 'application/vnd.dev.sigstore.bundle+json;version=0.2' ||
+    (bundle?.mediaType !== 'application/vnd.dev.sigstore.bundle+json;version=0.2' &&
+      bundle?.mediaType !== 'application/vnd.dev.sigstore.bundle.v0.3+json') ||
     !envelope ||
     typeof envelope.payload !== 'string' ||
     envelope.payloadType !== 'application/vnd.in-toto+json' ||
     !Array.isArray(envelope.signatures) ||
     envelope.signatures.length === 0 ||
-    !Array.isArray(chain?.certificates) ||
-    chain.certificates.length === 0 ||
     !Array.isArray(material?.tlogEntries) ||
     material.tlogEntries.length === 0
   ) {
     throw new Error('the official release has no signed Sigstore provenance bundle');
   }
 
+  // sigstore.verify owns schema and certificate validation for both formats;
+  // the same pinned identity and transparency policy applies below.
   return { bundle: bundle as unknown as SigstoreBundle, envelope };
 }
 
