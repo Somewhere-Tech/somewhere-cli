@@ -5,13 +5,13 @@ import { SKILLS_DIR, skillNames } from './skills-pack.js';
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
-Signed in: \`somewhere init --name <slug>\` in an empty folder writes a React +
-TypeScript starter that already signs users up, in and out; extend it
+\`somewhere init --name <slug>\` in an empty folder writes a local React +
+TypeScript starter without login. It signs users up, in and out; extend it
 rather than rebuilding sign-in (its README maps pages, routes, views and
 styles; \`init --catalog --json\` lists modules for \`--features\`). No account yet?
 \`npx @somewhere-tech/cli deploy\` publishes a temporary app and prints its live
-URL, claim URL, and expiry; \`init\`, the email test inbox, cron and advisor need
-a signed-in account. On a hosted VM, after consent, \`somewhere login\` prints a
+URL, claim URL, and expiry. Login is needed for account-owned operations,
+the email test inbox, cron and advisor. On a hosted VM, after consent, \`somewhere login\` prints a
 code a human approves in their browser; the machine stays signed in.
 \`somewhere docs <topic>\` (\`--section <id>\`) prints one contract;
 \`somewhere advisor "<question>"\` answers design choices (MCP:
