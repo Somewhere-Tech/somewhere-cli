@@ -61,38 +61,6 @@ access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
 user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
-\`sw.auth.fromRequest(req)\` returns it or \`null\`.
-
-Functions: a bare \`export default async function (req, sw)\` returning a
-\`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
-'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
-}, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
-\`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
-handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
-
-Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
-guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
-access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
-\`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
-changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
-operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
-user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
-\`sw.auth.fromRequest(req)\` returns it or \`null\`.
-
-Functions: a bare \`export default async function (req, sw)\` returning a
-\`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
-'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
-}, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
-\`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
-handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
-
-Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
-guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
-access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
-\`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
-changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
-operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
-user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
 
 export const SKILLS_POINTER = `Skills: \`${SKILLS_DIR}/\` — `
   + skillNames(BUNDLED_SKILLS_PACK).map((name) => `\`${name}\``).join(', ')
