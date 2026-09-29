@@ -6,16 +6,16 @@ import { SKILLS_DIR, skillNames } from './skills-pack.js';
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
 \`somewhere init --name <slug>\` in an empty folder writes a local React +
-TypeScript starter without login. It signs users up, in and out; extend it
-rather than rebuilding sign-in (its README maps pages, routes, views and
-styles; \`init --catalog --json\` lists modules for \`--features\`). No account yet?
+TypeScript starter without login. The default includes working sign-in;
+extend it using the README file map. Minimal/bare starters omit auth.
+\`init --catalog --json\` lists modules for \`--features\`. No account yet?
 \`npx @somewhere-tech/cli deploy\` publishes a temporary app and prints its live
 URL, claim URL, and expiry. Login is needed for account-owned operations,
-the email test inbox, cron and advisor. On a hosted VM, after consent, \`somewhere login\` prints a
+the email test inbox and cron. On a hosted VM, after consent, \`somewhere login\` prints a
 code a human approves in their browser; the machine stays signed in.
-\`somewhere docs <topic>\` (\`--section <id>\`) prints one contract;
-\`somewhere advisor "<question>"\` answers design choices (MCP:
-\`docs({ topic })\`, \`advisor({ question })\`, \`catalog\`).
+Ask \`somewhere advisor "<question>"\` how to build or fix it. For a reference,
+use \`somewhere docs <topic> --section <id>\`
+(MCP: \`advisor({ question })\`, \`docs({ topic })\`, \`catalog\`).
 
 After every change:
 1. \`somewhere typecheck\`, then \`somewhere deploy\` (do not build first). Deploy
@@ -35,16 +35,48 @@ Routes: \`index.html\` loads \`src/main.tsx\`; every extensionless path with no 
 \`api/notes/[id].ts\` is \`/api/notes/:id\`; \`_\`-prefixed names are import-only
 helpers. Avoid names differing only in letter case (\`SignIn.tsx\`, \`signin.tsx\`).
 
-Sign-in: \`api/auth/[...path].ts\` is
+With auth enabled, \`api/auth/[...path].ts\` is
 \`export { somewhereAuth as default } from '@somewhere-tech/sdk/server'\`; pages
 use \`createSomewhereAuth()\` from \`@somewhere-tech/sdk/auth\` (no SDK:
 \`docs({ topic: 'auth-client' })\`). \`auth.signUp({ email, password,
 displayName? })\` / \`auth.signIn({ email, password })\` return the user or throw
 with the message. Gate pages on \`auth.getState().status\` (React:
-\`useAuthState()\`) as the starter's \`src/App.tsx\` does. Sign-up signs the user
+\`useAuthState()\`) as the auth starter's \`src/App.tsx\` does. Sign-up signs the user
 in with \`email_verified: false\`; unverified users can sign in and pass
 \`auth: 'required'\`. \`sw.auth.requireUser(req)\` returns \`{ id, email,
 role, email_verified, … }\` or throws 401 \`AUTH_REQUIRED\`;
+\`sw.auth.fromRequest(req)\` returns it or \`null\`.
+
+Functions: a bare \`export default async function (req, sw)\` returning a
+\`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
+'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
+}, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
+\`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
+handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
+
+Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
+guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
+access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
+\`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
+changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
+operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
+user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
+\`sw.auth.fromRequest(req)\` returns it or \`null\`.
+
+Functions: a bare \`export default async function (req, sw)\` returning a
+\`Response\` is always valid. The optional wrapper \`sw.endpoint({ auth: 'none' |
+'optional' | 'required', body, rateLimit, handler: async ({ body, user, params
+}, sw) => value })\` answers 401/400 itself and sends \`value\` as JSON. Params:
+\`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
+handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
+
+Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
+guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
+access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
+\`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
+changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
+operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
+user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
 \`sw.auth.fromRequest(req)\` returns it or \`null\`.
 
 Functions: a bare \`export default async function (req, sw)\` returning a
