@@ -2,7 +2,7 @@ import { fetchWithProxy as fetch } from '../lib/http.js';
 import { once } from 'node:events';
 import { Command } from 'commander';
 import { loadConfig } from '../lib/config.js';
-import { dim, error, printJson } from '../lib/output.js';
+import { dim, error, printJson, printJsonError } from '../lib/output.js';
 import { callPlatformHelpTool } from './advisor.js';
 
 // Platform docs from the CLI — works with ZERO credentials (tsk_497b7eeb /
@@ -80,7 +80,52 @@ interface RenderedDocs {
   content: string;
   view?: string;
   complete?: boolean;
-  notice?: string;
+  failure?: DocsFailure;
+}
+
+interface DocsFailure {
+  error: 'DOCS_SECTION_INDEX_UNAVAILABLE' | 'DOCS_SECTION_NOT_FOUND' | 'DOCS_TOPIC_NOT_FOUND';
+  message: string;
+  hint: string;
+  matches?: string[];
+}
+
+const DOCS_SECTION_MAX_CHARS = 12000;
+
+/** Edit distance with a lexical tie-break keeps recovery suggestions stable. */
+function closestMatches(wanted: string, candidates: string[]): string[] {
+  const query = wanted.trim().toLowerCase();
+  const distance = (candidate: string): number => {
+    let row = Array.from({ length: query.length + 1 }, (_, index) => index);
+    for (const char of candidate.toLowerCase()) {
+      const next = [row[0] + 1];
+      for (let index = 1; index <= query.length; index++) {
+        next[index] = Math.min(next[index - 1] + 1, row[index] + 1,
+          row[index - 1] + (char === query[index - 1] ? 0 : 1));
+      }
+      row = next;
+    }
+    return row[query.length];
+  };
+  return [...new Set(candidates)].map((id) => ({ id, score: distance(id) }))
+    .sort((a, b) => a.score - b.score || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0))
+    .slice(0, 3).map(({ id }) => id);
+}
+
+function commandArg(value: string): string {
+  return /^[a-zA-Z0-9._-]+$/.test(value) ? value : `'${value.replace(/'/g, "'\\''")}'`;
+}
+
+function reportDocsFailure(failure: DocsFailure, json: boolean, topic: string): void {
+  if (json) {
+    printJsonError(failure.error, failure.message, {
+      topic, hint: failure.hint, ...(failure.matches ? { matches: failure.matches } : {}),
+    });
+  } else {
+    error(failure.message);
+    console.error(failure.hint);
+  }
+  process.exitCode = 1;
 }
 
 function parseSections(value: unknown, bodyLength: number): PublicDocsSection[] | undefined {
@@ -88,7 +133,8 @@ function parseSections(value: unknown, bodyLength: number): PublicDocsSection[] 
   const sections = value.filter((entry): entry is PublicDocsSection => {
     if (!entry || typeof entry !== 'object') return false;
     const candidate = entry as Record<string, unknown>;
-    return typeof candidate.id === 'string' && typeof candidate.heading === 'string'
+    return typeof candidate.id === 'string' && candidate.id.trim().length > 0
+      && typeof candidate.heading === 'string' && candidate.heading.trim().length > 0
       && Number.isInteger(candidate.start) && Number.isInteger(candidate.end)
       && (candidate.start as number) >= 0 && (candidate.start as number) < (candidate.end as number)
       && (candidate.end as number) <= bodyLength;
@@ -96,36 +142,51 @@ function parseSections(value: unknown, bodyLength: number): PublicDocsSection[] 
   return sections.map(({ id, heading, start, end }) => ({ id, heading, start, end }));
 }
 
-/** Public-manifest rendering of the docs views. Older manifests carry only
- *  `body`, so every view falls back to the complete page rather than to less. */
+/** Render indexed public views without expanding a failed section request. */
 export function renderPublicDocsView(page: PublicDocsPage, view: DocsView): RenderedDocs {
-  const full = renderPublicPage(page);
-  if (view.kind === 'full') return { content: full, view: 'full', complete: true };
+  if (view.kind === 'full') return { content: renderPublicPage(page), view: 'full', complete: true };
   if (view.kind === 'default') {
     return page.summary
       ? { content: withNewline(page.summary), view: 'summary', complete: page.summary_complete === true }
-      : { content: full, view: 'full', complete: true };
+      : { content: renderPublicPage(page), view: 'full', complete: true };
   }
-  if (!page.sections) {
-    return {
-      content: full,
-      view: 'full',
-      complete: true,
-      notice: `This docs version has no section index; printed all of "${page.id}".`,
-    };
+  const sections = parseSections(page.sections, page.body.length);
+  const fail = (failure: DocsFailure): RenderedDocs => ({
+    content: '', view: 'section', complete: false, failure,
+  });
+  if (!sections?.length) {
+    return fail({
+      error: 'DOCS_SECTION_INDEX_UNAVAILABLE',
+      message: `No usable section index for "${page.id}".`,
+      hint: `Run: somewhere docs ${commandArg(page.id)} --full`,
+    });
   }
-  const wanted = view.id.trim().toLowerCase();
-  const match = page.sections.find((section) =>
-    section.id.toLowerCase() === wanted || headingText(section).toLowerCase() === wanted);
+  const wanted = view.id.trim().replace(/^#+\s*/, '').toLowerCase();
+  const match = sections.find((section) => section.id.toLowerCase() === wanted)
+    ?? sections.find((section) => headingText(section).toLowerCase() === wanted);
   if (!match) {
-    const index = page.sections.map((section) => `  ${section.id} · ${headingText(section)}`).join('\n');
+    const matches = closestMatches(wanted, sections.map(({ id }) => id));
+    return fail({
+      error: 'DOCS_SECTION_NOT_FOUND',
+      message: `No section "${view.id}" in ${page.id}. Closest sections: ${matches.join(', ')}.`,
+      matches,
+      hint: `Run: somewhere docs ${commandArg(page.id)} --section ${commandArg(matches[0])}`,
+    });
+  }
+  const text = page.body.slice(match.start, match.end);
+  const children = sections.filter((section) => section.start > match.start && section.end <= match.end)
+    .sort((a, b) => a.start - b.start);
+  if (text.trimEnd().length > DOCS_SECTION_MAX_CHARS && children.length > 0) {
+    const kilo = (chars: number): string => chars < 1000 ? `${chars}` : `${(chars / 1000).toFixed(1)}k`;
+    const lead = page.body.slice(match.start, children[0].start).trimEnd();
+    const index = children.map((section) => `- ${section.id} · ${kilo(section.end - section.start)}`).join('\n');
     return {
-      content: `No section "${view.id}" in ${page.id}. Sections:\n${index}\n`,
-      view: 'section',
-      complete: false,
+      content: `${lead}\n\nThis section is ${kilo(text.trimEnd().length)} chars; its subsections (id · size):\n`
+        + `${index}\n\nOne subsection: somewhere docs ${commandArg(page.id)} --section <id>\n`,
+      view: 'section', complete: false,
     };
   }
-  return { content: withNewline(page.body.slice(match.start, match.end)), view: 'section', complete: false };
+  return { content: withNewline(text), view: 'section', complete: false };
 }
 
 /** The platform prefixes docs tool responses with
@@ -293,8 +354,11 @@ export function registerDocs(program: Command) {
         : ALIASES[requestedTopic.toLowerCase()];
       const entry = key ? TOPICS[key] : undefined;
       if (entry && view.kind === 'section') {
-        error(`"${requestedTopic}" is a whole-file quick link without sections. Run: somewhere docs --list`);
-        process.exitCode = 1;
+        reportDocsFailure({
+          error: 'DOCS_SECTION_INDEX_UNAVAILABLE',
+          message: `"${requestedTopic}" is a whole-file quick link without sections.`,
+          hint: `Run: somewhere docs ${commandArg(key ?? requestedTopic)} --full`,
+        }, opts.json === true, requestedTopic);
         return;
       }
       if (!entry) {
@@ -311,8 +375,9 @@ export function registerDocs(program: Command) {
               ...(view.kind === 'section' ? { section: view.id } : {}),
             });
             const status = parseDocsStatusLine(content);
-            if (view.kind === 'section' && !status.view) {
-              console.error(dim(`This platform version does not support sections yet; printed all of "${requestedTopic}".`));
+            if (/^Topic "[^\n]*" not found\./.test(content)
+                || (view.kind === 'section' && (status.view !== 'section' || /(?:^|\n)No section "/.test(content)))) {
+              throw new Error('Authenticated docs did not return the requested view; trying the public index.');
             }
             if (opts.json) printJson({ topic: requestedTopic, ...status, content });
             else process.stdout.write(withNewline(content));
@@ -327,7 +392,10 @@ export function registerDocs(program: Command) {
           const page = pages.find(({ id }) => id.toLowerCase() === requestedTopic.toLowerCase());
           if (page) {
             const rendered = renderPublicDocsView(page, view);
-            if (rendered.notice) console.error(dim(rendered.notice));
+            if (rendered.failure) {
+              reportDocsFailure(rendered.failure, opts.json === true, page.id);
+              return;
+            }
             if (opts.json) {
               printJson({
                 topic: page.id,
@@ -343,13 +411,18 @@ export function registerDocs(program: Command) {
             }
             return;
           }
-          const known = pages.map(({ id }) => id);
-          error(
-            `No documentation topic named "${requestedTopic}".`
-            + (known.length ? ` Topics: ${known.join(', ')}.` : '')
-            + ' Or run: somewhere docs --list',
-          );
-          process.exitCode = 1;
+          const matches = closestMatches(requestedTopic, pages.map(({ id }) => id));
+          const question = /\s|\?/.test(requestedTopic);
+          const advisorQuestion = requestedTopic.replace(/[\\"$`]/g, '\\$&');
+          reportDocsFailure({
+            error: 'DOCS_TOPIC_NOT_FOUND',
+            message: `No documentation topic named "${requestedTopic}".`
+              + (matches.length ? ` Closest topics: ${matches.join(', ')}.` : ''),
+            matches,
+            hint: question
+              ? `For a construction question, run: somewhere advisor "${advisorQuestion}"`
+              : matches.length ? `Run: somewhere docs ${commandArg(matches[0])}` : 'Run: somewhere docs --list',
+          }, opts.json === true, requestedTopic);
         } catch (e) {
           const publicFailure = e instanceof Error ? e.message : String(e);
           error(
