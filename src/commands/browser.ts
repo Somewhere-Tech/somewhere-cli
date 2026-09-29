@@ -39,6 +39,51 @@ interface BrowserStepResult {
   duration_ms?: number;
   /** The platform's own navigation before the caller's first action. */
   phase?: 'start_navigation' | 'session_restore';
+  /** false: this submitted action was never started (the run stopped at its
+   *  execution cap first). It has no verdict; it is not a failure. */
+  ran?: boolean;
+}
+
+/** The run stopped at its own execution cap before starting `next_step`.
+ *  Counts and indexes refer to the actions submitted in this call (0-based),
+ *  never to the platform's own start navigation. `passed` stays false. */
+export interface BrowserIncomplete {
+  reason: 'execution_cap';
+  completed: number;
+  next_step: number;
+  budget_ms: number;
+  elapsed_ms: number;
+}
+
+/** The incomplete block when it is well formed; anything else is ignored and
+ *  the report is judged on its own verdict. */
+export function readBrowserIncomplete(r: BrowserResult): BrowserIncomplete | null {
+  const raw = r.incomplete as unknown;
+  if (!raw || typeof raw !== 'object') return null;
+  const value = raw as Record<string, unknown>;
+  const count = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+  if (value.reason !== 'execution_cap' || !count(value.completed) || !count(value.next_step)
+      || !count(value.budget_ms) || !count(value.elapsed_ms)) return null;
+  return { reason: 'execution_cap', completed: value.completed, next_step: value.next_step, budget_ms: value.budget_ms, elapsed_ms: value.elapsed_ms };
+}
+
+/** Unknown outcome is distinct from a known unstarted execution-cap boundary. */
+export interface BrowserLifecycle {
+  status: 'execution_timeout' | 'evidence_timeout' | 'cleanup_unknown' | 'transport_timeout' | 'transport_error';
+  outcome_unknown: true;
+}
+
+export function readBrowserLifecycle(r: BrowserResult): BrowserLifecycle | null {
+  const value = r.lifecycle;
+  return value?.outcome_unknown === true
+    && ['execution_timeout', 'evidence_timeout', 'cleanup_unknown', 'transport_timeout', 'transport_error'].includes(value.status)
+    ? value : null;
+}
+
+/** Only measured executed steps get a timing; absence is not zero. */
+export function formatStepDuration(durationMs: unknown, ran?: boolean): string {
+  return ran !== false && typeof durationMs === 'number' && Number.isFinite(durationMs) && durationMs >= 0
+    ? ` (${Math.round(durationMs)} ms)` : '';
 }
 
 /** Step actions whose whole purpose is to hand back a value. When one of these
@@ -50,6 +95,8 @@ const VALUE_ACTIONS = new Set(['eval', 'snapshot']);
  *  agent-native browser returns these signals whether or not `steps` ran). */
 export interface BrowserResult {
   passed?: boolean;
+  lifecycle?: BrowserLifecycle;
+  transport_error?: { code: string; message: string; status: number };
   final_url?: string;
   console_errors?: unknown[];
   page_errors?: unknown[];
@@ -96,9 +143,20 @@ export interface BrowserResult {
   markdown?: string;
   /** Persistent session (--session): the handle to reconnect on the next call. */
   session_id?: string;
+  /** When the kept session ends: the earlier of its idle and absolute bounds,
+   *  read by the platform when it released the browser. Absent once closed. */
   session_expires_at?: string;
+  /** The kept session's idle bound (release + the idle keep-alive). */
+  idle_expires_at?: string;
+  /** The kept session's absolute bound (opened + its lifetime cap). */
+  absolute_expires_at?: string;
+  /** The platform closed this session at the end of the run. */
+  session_closed?: true;
   /** Fail-soft note, e.g. "session expired, started fresh". */
   session_note?: string;
+  /** Present when the run reached its execution cap (budget_ms) before
+   *  starting its next action. */
+  incomplete?: BrowserIncomplete;
   /** One non-blocking line: contrast, horizontal overflow, tap-target sizing. */
   accessibility_layout?: string;
   /** The page when the start navigation gave up (document status, ready state, what was loading). */
@@ -198,7 +256,7 @@ export function buildBrowserBody(
  * 404s etc.) and don't fail the gate — they're still printed.
  */
 export function browserExitCode(r: BrowserResult): number {
-  if (r.passed === false) return 1;
+  if (r.passed === false || readBrowserLifecycle(r) || readBrowserIncomplete(r)) return 1;
   if ((r.failed_requests?.length ?? 0) > 0) return 1;
   if ((r.page_errors?.length ?? 0) > 0) return 1;
   if (r.request_expectations?.some((expectation) => !expectation.ok)) return 1;
@@ -291,13 +349,20 @@ export function formatBrowserReport(
   // "0 interactive elements" about a page full of controls (pfb_57c43192d553).
   const dom = Array.isArray(r.dom_outline) ? r.dom_outline : undefined;
 
-  const verdict = r.passed === false ? red('FAIL') : green('PASS');
+  const lifecycle = readBrowserLifecycle(r);
+  const incomplete = readBrowserIncomplete(r);
+  const failed = pe.length > 0 || fr.length > 0 || (r.steps ?? []).some((step) => step.ran !== false && (step.ok ?? step.passed) === false);
+  const verdict = lifecycle || incomplete ? failed ? red('FAIL') : teal('INCOMPLETE') : r.passed === false ? red('FAIL') : green('PASS');
   lines.push(`${verdict} ${teal(r.final_url ?? '(no url)')}`);
   // Persistent session (feature B): surface the handle to reconnect + its expiry.
-  if (r.session_id) {
+  if (lifecycle) lines.push(`Outcome unknown (${lifecycle.status}); do not automatically replay actions.`);
+  if (r.session_id && !lifecycle) {
     const exp = r.session_expires_at ? dim(` (expires ${r.session_expires_at})`) : '';
     lines.push(`session: ${r.session_id}${exp}`);
     if (r.session_note) lines.push(`session_note: ${dim(r.session_note)}`);
+  }
+  if (incomplete) {
+    lines.push(`incomplete: the run reached its ${Math.round(incomplete.budget_ms / 1000)}s execution cap after ${incomplete.completed} action${incomplete.completed === 1 ? '' : 's'}; action ${incomplete.next_step + 1} and later did not run and have no verdict.`);
   }
   lines.push(`console_errors: ${ce.length}`);
   lines.push(`page_errors: ${pe.length}`);
@@ -319,9 +384,9 @@ export function formatBrowserReport(
 
   for (const [i, s] of (r.steps ?? []).entries()) {
     const ok = s.ok ?? s.passed;
-    const mark = ok === false ? red('✗') : green('✓');
+    const mark = s.ran === false ? dim('not run') : ok === false ? red('✗') : green('✓');
     const label = [s.action, s.selector ?? s.path ?? s.script].filter(Boolean).join(' ');
-    let line = `step ${i + 1} ${mark} ${label}`.trimEnd();
+    let line = `step ${i + 1} ${mark} ${label}${formatStepDuration(s.duration_ms, s.ran)}`.trimEnd();
     if (s.error) line += ` ${dim(`— ${s.error}`)}`;
     lines.push(line);
     for (const l of stepResultLines(s)) lines.push(l);

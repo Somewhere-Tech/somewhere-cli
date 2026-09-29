@@ -188,7 +188,7 @@ test('a transport failure still closes the browsers; a close failure is reported
   })(client.call.bind(client));
   const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'r6' }).run();
   assert.equal(result.passed, false);
-  assert.match(result.verdict, /socket hang up \[VERIFY_SEGMENT_FAILED\]$/);
+  assert.match(result.verdict, /socket hang up \[VERIFY_SEGMENT_FAILED\][\s\S]*INCOMPLETE/);
   assert.deepEqual(result.cleanup[0], { actor: 'alice', status: 'closed' });
   assert.equal(result.cleanup[1].status, 'unconfirmed');
   assert.match(result.cleanup[1].reason, /close failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 3 minutes/);
@@ -433,20 +433,28 @@ test('a call still running when the cleanup budget runs out is reported unconfir
   assert.equal(client.runs().length, 2);
 });
 
-test('each segment waits at most the remaining journey budget; a budget-cut wait stops as the deadline and stays unconfirmed', async () => {
+test('each segment asks for an execution cap that fits the remaining journey; a budget-cut wait stops as the deadline and stays unconfirmed', async () => {
   let clock = 0;
   const client = controllableClient({
-    segment: (_body, n, opts) => {
-      if (n === 1) { clock = VERIFY_JOURNEY_LIMITS.deadline_ms - 5_000; return report(); }
-      assert.equal(opts.timeoutMs, 5_000, 'the second segment may wait only what is left of the journey');
-      throw new CliApiError('TIMEOUT', 'No response from POST /browser/test after 5s.', 0);
+    segment: (body, n, opts) => {
+      if (n === 1) {
+        assert.equal(body.budget_ms, 180_000, 'a segment asks for the 180 s execution cap');
+        clock = VERIFY_JOURNEY_LIMITS.deadline_ms - 60_000;
+        return report();
+      }
+      assert.equal(body.budget_ms, 15_000, 'the cap shrinks so cap + transport headroom ends at the journey deadline');
+      assert.equal(opts.timeoutMs, 60_000, 'the wait is the cap plus 45 s of headroom');
+      throw new CliApiError('TIMEOUT', 'No response from POST /browser/test after 60s.', 0);
     },
   });
   const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, {
     runId: 'l4', now: () => clock, recloseAfterAbandonedMs: 10,
   }).run();
   assert.equal(client.runs()[0].timeoutMs, VERIFY_JOURNEY_LIMITS.segment_timeout_ms);
-  assert.match(result.verdict, /^FAIL — segment 2 \(bob, desktop\): The journey reached its 10-minute limit\. Segment 2 was still running\. \[VERIFY_JOURNEY_DEADLINE\]$/);
+  assert.equal(VERIFY_JOURNEY_LIMITS.segment_timeout_ms, 225_000, 'a full segment waits 180 s + 45 s');
+  assert.match(result.verdict, /^INCOMPLETE — Outcome unknown/);
+  assert.equal(result.segments[1].error.code, 'TIMEOUT');
+  assert.equal(result.segments[1].outcome_unknown, true);
   assert.equal(client.runs().length, 2);
   assert.equal(client.closes('bob').length, 2, 'the abandoned actor is closed again later, inside the cleanup budget');
   assert.equal(result.cleanup[1].status, 'unconfirmed');
@@ -454,12 +462,28 @@ test('each segment waits at most the remaining journey budget; a budget-cut wait
   assert.equal(result.cleanup_confirmed, false);
 });
 
+test('a segment that cannot get the minimum cap plus headroom is not started', async () => {
+  let clock = 0;
+  const client = controllableClient({
+    segment: (_body, n) => {
+      if (n === 1) clock = VERIFY_JOURNEY_LIMITS.deadline_ms - 54_999;
+      return report();
+    },
+  });
+  const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l4b', now: () => clock }).run();
+  assert.equal(client.runs().length, 1, 'no call is started that could not answer before the deadline');
+  assert.match(result.verdict, /^FAIL — segment 2 \(bob, desktop\): The journey reached its 10-minute limit\. Segment 2 was not started: 54s were left, less than the 10s minimum run plus 45s for its answer\. \[VERIFY_JOURNEY_DEADLINE\]$/);
+  assert.deepEqual(result.cleanup.map((item) => item.status), ['closed']);
+});
+
 test('a client timeout inside the journey budget keeps its code, and that actor is never reported closed', async () => {
   const client = controllableClient({
     segment: (_body, n) => { if (n === 2) throw new CliApiError('TIMEOUT', 'No response from POST /browser/test after 90s.', 0); return report(); },
   });
   const result = await createVerifyJourneyRun({ project_id: 'club' }, normalizeVerifyJourney(bookclub), client, { runId: 'l5', recloseAfterAbandonedMs: 10 }).run();
-  assert.match(result.verdict, /after 90s\. \[TIMEOUT\]$/);
+  assert.match(result.verdict, /^INCOMPLETE — Outcome unknown/);
+  assert.equal(result.segments[1].error.code, 'TIMEOUT');
+  assert.match(result.segments[1].error.message, /after 90s/);
   assert.deepEqual(result.cleanup.map((item) => item.status), ['closed', 'unconfirmed']);
 });
 

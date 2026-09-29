@@ -324,7 +324,6 @@ export class ApiClient {
         0,
       );
     }
-    const text = await res.text();
     // Every platform reply carries both ids (worker middleware/logging.ts):
     // `X-Request-Id` is the edge ray, `X-Trace-Id` finds the request in our own
     // logs. Read them BEFORE anything can throw, so a failure the CLI cannot
@@ -334,6 +333,20 @@ export class ApiClient {
       requestId: res.headers.get('x-request-id') ?? undefined,
       traceId: res.headers.get('x-trace-id') ?? undefined,
     };
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (cause) {
+      const timeout = cause instanceof Error && (cause.name === 'TimeoutError' || cause.name === 'AbortError')
+        || (cause as { cause?: { code?: string } })?.cause?.code === 'UND_ERR_BODY_TIMEOUT';
+      // Headers alone do not establish the operation's outcome. Keep their
+      // status so callers can distinguish a partial success from an HTTP refusal.
+      throw new CliApiError(
+        timeout ? 'RESPONSE_BODY_TIMEOUT' : 'RESPONSE_BODY_ERROR',
+        `Response body from ${method} ${url.split('?')[0]} was not fully received (HTTP ${res.status}): ${cause instanceof Error ? cause.message : String(cause)}`,
+        res.status, undefined, undefined, { ...meta, responseBodyIncomplete: true },
+      );
+    }
     let parsed: ApiResponse<T>;
 
     try {
@@ -457,6 +470,8 @@ export interface CliApiErrorMeta {
   retry?: boolean;
   /** How long the platform asked us to wait first, when it said. */
   retryAfterMs?: number;
+  /** Headers arrived but no complete response body was read; never an automatic retry. */
+  responseBodyIncomplete?: true;
 }
 
 export class CliApiError extends Error {

@@ -1,3 +1,4 @@
+import { withVerifyProgress } from '../lib/verify-progress.js';
 import { Command } from 'commander';
 import { basename, resolve } from 'node:path';
 import prompts from 'prompts';
@@ -827,10 +828,10 @@ export function registerDeploy(program: Command) {
         let verification: VerifyReport | undefined;
         if (opts.verify && !hasFunctionErrors) {
           const flow = loadVerifyFlow(typeof opts.verify === 'string' ? opts.verify : undefined, targetDir);
-          verification = await runVerification({
+          verification = await withVerifyProgress(() => runVerification({
             project_id: projectId,
             ...(formatted.liveUrl ? { url: formatted.liveUrl } : {}),
-          }, flow, client);
+          }, flow, client), !opts.json);
         }
         if (opts.json) {
           const output = tempSession

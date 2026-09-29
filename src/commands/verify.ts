@@ -12,10 +12,22 @@ import {
 } from '../lib/browser-actions.js';
 import { isLoopbackUrl, runLocalBrowser } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
+import { withVerifyProgress } from '../lib/verify-progress.js';
 import { saveVerifyReport } from '../lib/verify-report.js';
-import type { BrowserResult } from './browser.js';
+import { readBrowserIncomplete, readBrowserLifecycle, formatStepDuration, type BrowserLifecycle, type BrowserResult } from './browser.js';
 
+/** The local browser's own bound (no platform execution cap applies). */
 const VERIFY_TIMEOUT_MS = 90_000;
+/** The execution cap a hosted verify run asks for: one connected run, long
+ *  enough for a 30-action segment at a slow but progressing pace. */
+const VERIFY_BUDGET_MS = 180_000;
+/** The platform's accepted execution-cap range. */
+const VERIFY_MIN_BUDGET_MS = 10_000;
+/** Beyond the execution cap, the wait covers slot admission, launch and first
+ *  navigation, the final capture and release. */
+const VERIFY_TRANSPORT_HEADROOM_MS = 45_000;
+/** How long the client waits for a hosted run's answer. */
+const VERIFY_TRANSPORT_TIMEOUT_MS = VERIFY_BUDGET_MS + VERIFY_TRANSPORT_HEADROOM_MS;
 const DEFAULT_VIEWPORTS = ['desktop', 'mobile'] as const;
 
 export type VerifyViewportInput =
@@ -42,6 +54,25 @@ export interface VerifyStepReport {
   error?: string;
   duration_ms?: number;
   value?: unknown;
+  /** false: never started (the run stopped at its execution cap first). No
+   *  verdict either way. */
+  ran?: false;
+}
+
+/** A run that reached its execution cap before starting its next action, in
+ *  the caller's own action numbering. */
+export interface VerifyIncomplete {
+  reason: 'execution_cap';
+  /** The caller's actions that ran (an inserted goto is not counted). */
+  completed: number;
+  /** 1-based number of the first action that did not run, in the caller's own
+   *  actions for this run; 0 = the goto a continued segment's path inserted. */
+  next_step: number;
+  next_action: string;
+  /** The caller's actions that did not run, including next_step. */
+  not_run: number;
+  budget_ms: number;
+  elapsed_ms: number;
 }
 
 export interface VerifyScreenshotReport {
@@ -88,6 +119,11 @@ export interface VerifyReport {
    *  response observed while the page was still blank, before any action).
    *  Reported, never hidden; says nothing about the cause. */
   navigation_retries: Array<VerifySignal<{ phase: string; error: string; elapsed_ms?: number }>>;
+  /** Runs that stopped at their execution cap with nothing failed before it.
+   *  Never a pass: the actions not run have no verdict. */
+  incomplete: Array<VerifySignal<VerifyIncomplete>>;
+  lifecycle?: Array<VerifySignal<BrowserLifecycle>>;
+  transport_errors?: Array<VerifySignal<NonNullable<BrowserResult['transport_error']>>>;
 }
 
 export interface VerifyUndeclaredStatus {
@@ -347,7 +383,7 @@ function reportPassed(report: BrowserResult): boolean {
     if (typeof shot === 'string') return shot.length > 0;
     return !shot.error && !!(shot.path ?? shot.url ?? shot.fs_path ?? shot.scratch_url);
   });
-  return report.passed !== false
+  return report.passed !== false && !readBrowserLifecycle(report)
     && (report.page_errors?.length ?? 0) === 0
     && (report.console_errors?.length ?? 0) === 0
     && (report.failed_requests?.length ?? 0) === 0
@@ -355,10 +391,65 @@ function reportPassed(report: BrowserResult): boolean {
     && screenshotHealthy;
 }
 
+/** Something genuinely went wrong in the part of the run that executed: a step
+ *  that ran and failed, a page error, a console error, or a failed request.
+ *  An expected request that was not seen is not in this list: on a capped run
+ *  it may belong to an action that never started. */
+function executedPartFailed(report: BrowserResult): boolean {
+  return (report.steps ?? []).some((step) => step.ran !== false && (step.ok ?? step.passed) === false)
+    || (report.page_errors?.length ?? 0) > 0
+    || (report.console_errors?.length ?? 0) > 0
+    || (report.failed_requests?.length ?? 0) > 0;
+}
+
+/**
+ * The run's execution-cap stop in the caller's numbering, or null when there
+ * is none or when anything failed before it (then it is judged as a failure:
+ * an incomplete never hides an earlier genuine failure). `offset` is 1 when the
+ * CLI inserted a leading goto the caller did not write.
+ */
+export function mapIncomplete(report: BrowserResult, sent: BrowserSequenceAction[], offset: 0 | 1): VerifyIncomplete | null {
+  const incomplete = readBrowserIncomplete(report);
+  if (!incomplete || report.passed === true || executedPartFailed(report)) return null;
+  if (incomplete.next_step >= sent.length || incomplete.completed > incomplete.next_step) return null;
+  const callerTotal = sent.length - offset;
+  const callerNext = Math.max(0, incomplete.next_step - offset);
+  return {
+    reason: 'execution_cap',
+    completed: Math.max(0, incomplete.completed - offset),
+    next_step: incomplete.next_step - offset + 1,
+    next_action: actionName(sent[incomplete.next_step], `action ${incomplete.next_step + 1}`),
+    not_run: callerTotal - callerNext,
+    budget_ms: incomplete.budget_ms,
+    elapsed_ms: incomplete.elapsed_ms,
+  };
+}
+
+function incompleteSentence(item: VerifyIncomplete, where: string): string {
+  const next = item.next_step === 0 ? `the goto for its path (${item.next_action})` : `step ${item.next_step} (${item.next_action})`;
+  return `${where} reached its ${Math.round(item.budget_ms / 1000)}s execution cap after ${item.completed} action${item.completed === 1 ? '' : 's'}; ${next} and every later action did not run and have no verdict. Nothing failed before the cap.`;
+}
+
+function transportUnknown(cause: unknown): BrowserResult | null {
+  if (!(cause instanceof CliApiError)) return null;
+  const noResponse = cause.statusCode === 0 && ['TIMEOUT', 'NETWORK_ERROR', 'SERVER_SLOW'].includes(cause.code);
+  const partialSuccess = cause.statusCode >= 200 && cause.statusCode < 300 && cause.meta.responseBodyIncomplete === true;
+  if (!noResponse && !partialSuccess) return null;
+  return {
+    passed: false,
+    lifecycle: { status: ['TIMEOUT', 'SERVER_SLOW', 'RESPONSE_BODY_TIMEOUT'].includes(cause.code) ? 'transport_timeout' : 'transport_error', outcome_unknown: true },
+    transport_error: { code: cause.code, message: cause.message, status: cause.statusCode },
+  };
+}
+
+function unknownNote(items: Array<VerifySignal<BrowserLifecycle>>): string {
+  return `Outcome unknown at ${items.map((item) => `${item.viewport} (${item.detail.status})`).join(', ')}. In-flight actions or cleanup may have completed; do not automatically replay actions.`;
+}
+
 function shapeVerificationReport(
   target: string,
   flow: Pick<VerifyFlow, 'actions'>,
-  runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions?: BrowserSequenceAction[] }>,
+  runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions?: BrowserSequenceAction[]; offset?: 0 | 1 }>,
 ): VerifyReport {
   const steps: VerifyStepReport[] = [];
   const pageErrors: Array<VerifySignal<unknown>> = [];
@@ -368,9 +459,25 @@ function shapeVerificationReport(
   const screenshots: VerifyScreenshotReport[] = [];
   const layout: Array<VerifySignal<string>> = [];
   const navigationRetries: VerifyReport['navigation_retries'] = [];
+  const incomplete: VerifyReport['incomplete'] = [];
+  const cappedViewports = new Set<string>();
+  const lifecycle: Array<VerifySignal<BrowserLifecycle>> = [];
+  const transportErrors: NonNullable<VerifyReport['transport_errors']> = [];
+  const unknownViewports = new Set<string>();
 
-  for (const { viewport, report, actions: runActions } of runs) {
+  for (const { viewport, report, actions: runActions, offset } of runs) {
+    const unknown = readBrowserLifecycle(report);
+    if (unknown) {
+      lifecycle.push({ viewport: viewport.label, detail: unknown });
+      unknownViewports.add(viewport.label);
+    }
+    if (report.transport_error) transportErrors.push({ viewport: viewport.label, detail: report.transport_error });
     const actions = runActions ?? flow.actions;
+    const capped = mapIncomplete(report, actions, offset ?? 0);
+    if (capped) {
+      incomplete.push({ viewport: viewport.label, detail: capped });
+      cappedViewports.add(viewport.label);
+    }
     if (typeof report.accessibility_layout === 'string' && report.accessibility_layout) {
       layout.push({ viewport: viewport.label, detail: report.accessibility_layout });
     }
@@ -387,6 +494,7 @@ function shapeVerificationReport(
           name: step.phase === 'start_navigation' ? 'open the start page (before any action)' : 'restore the session page (before any action)',
           passed: (step.ok ?? step.passed) !== false,
           ...(step.error ? { error: step.error } : {}),
+          ...(typeof step.duration_ms === 'number' && Number.isFinite(step.duration_ms) && step.duration_ms >= 0 ? { duration_ms: step.duration_ms } : {}),
         });
         continue;
       }
@@ -395,14 +503,16 @@ function shapeVerificationReport(
       // screenshot step. Hosted capture_after does not, so keep the public
       // verification steps limited to the caller's flow on both halves.
       if (sourceIndex >= actions.length && step.action === 'screenshot') continue;
-      const passed = (step.ok ?? step.passed) !== false;
+      const notRun = step.ran === false;
+      const passed = !notRun && (step.ok ?? step.passed) !== false;
       steps.push({
         viewport: viewport.label,
         step: sourceIndex + 1,
         name: actionName(actions[sourceIndex], step.action ?? 'page load'),
         passed,
+        ...(notRun ? { ran: false as const } : {}),
         ...(step.error ? { error: step.error } : {}),
-        ...(typeof step.duration_ms === 'number' ? { duration_ms: step.duration_ms } : {}),
+        ...(typeof step.duration_ms === 'number' && Number.isFinite(step.duration_ms) && step.duration_ms >= 0 ? { duration_ms: step.duration_ms } : {}),
         ...(step.value !== undefined ? { value: step.value } : step.result !== undefined ? { value: step.result } : {}),
       });
     }
@@ -419,8 +529,12 @@ function shapeVerificationReport(
     }
   }
 
-  const failingStep = steps.find((step) => !step.passed);
-  const failedExpectation = expectations.find((item) => !item.detail.ok);
+  // A step that did not run is unjudged only inside a clean execution-cap stop;
+  // anywhere else the run did not do what it was asked.
+  const failingStep = steps.find((step) => !step.passed && (step.ran !== false || (!cappedViewports.has(step.viewport) && !unknownViewports.has(step.viewport))));
+  // A declared request not seen on a capped run may belong to an action that
+  // never started: unobserved, not failed.
+  const failedExpectation = expectations.find((item) => !item.detail.ok && !cappedViewports.has(item.viewport) && !unknownViewports.has(item.viewport));
   const undeclared = failedRequests
     .map((item) => undeclaredStatusOf(item.viewport, item.detail))
     .filter((item): item is VerifyUndeclaredStatus => item !== null);
@@ -432,14 +546,16 @@ function shapeVerificationReport(
     return !match || !undeclared.some((u) => u.viewport === item.viewport && String(u.status) === match[1]);
   });
   const retryNote = navigationRetryNote(navigationRetries);
-  const failedScreenshot = runs.find(({ report }) => !report.screenshots?.some((shot) => {
+  const failedScreenshot = runs.find(({ viewport, report }) => !cappedViewports.has(viewport.label) && !unknownViewports.has(viewport.label) && !report.screenshots?.some((shot) => {
     if (typeof shot === 'string') return shot.length > 0;
     return !shot.error && !!(shot.path ?? shot.url ?? shot.fs_path ?? shot.scratch_url);
   }));
   const passed = runs.every(({ report }) => reportPassed(report));
   let verdict: string;
   if (failingStep) {
-    verdict = `FAIL — step ${failingStep.step} (${failingStep.name}) failed at ${failingStep.viewport}${failingStep.error ? `: ${failingStep.error}` : '.'}`;
+    verdict = failingStep.ran === false
+      ? `FAIL — step ${failingStep.step} (${failingStep.name}) did not run at ${failingStep.viewport}, and the run reported no valid execution-cap stop.`
+      : `FAIL — step ${failingStep.step} (${failingStep.name}) failed at ${failingStep.viewport}${failingStep.error ? `: ${failingStep.error}` : '.'}`;
   } else if (pageErrors.length) {
     verdict = `FAIL — page error at ${pageErrors[0].viewport}: ${String(pageErrors[0].detail)}`;
   } else if (unexplainedConsole) {
@@ -452,11 +568,21 @@ function shapeVerificationReport(
     verdict = `FAIL — expected request ${failedExpectation.detail.path}:${failedExpectation.detail.status} was not observed at ${failedExpectation.viewport}.`;
   } else if (failedScreenshot) {
     verdict = `FAIL — screenshot capture failed at ${failedScreenshot.viewport.label}.`;
+  } else if (lifecycle.length) {
+    verdict = `INCOMPLETE — ${unknownNote(lifecycle)}`;
+  } else if (incomplete.length) {
+    verdict = `INCOMPLETE — ${incomplete.map((item) => incompleteSentence(item.detail, `the run at ${item.viewport}`)).join(' ')} Split the flow into shorter runs to check the rest; nothing was continued automatically.`;
   } else {
     verdict = flow.actions.length
       ? `PASS — ${flow.actions.length} step${flow.actions.length === 1 ? '' : 's'} passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`
       : `PASS — default page check passed at ${runs.map((run) => run.viewport.label).join(' and ')}; page, console, and network healthy.`;
   }
+  // Never print a pass for a run the platform did not pass.
+  if (!passed && verdict.startsWith('PASS')) {
+    const failedRun = runs.find(({ report }) => !reportPassed(report));
+    verdict = `FAIL — the platform reported the run at ${failedRun?.viewport.label ?? 'one viewport'} as not passed.`;
+  }
+  if (lifecycle.length && !verdict.startsWith('INCOMPLETE')) verdict += ` INCOMPLETE — ${unknownNote(lifecycle)}`;
   verdict += retryNote;
 
   return {
@@ -472,10 +598,10 @@ function shapeVerificationReport(
     })),
     steps,
     health: {
-      page: { passed: pageErrors.length === 0, errors: pageErrors },
-      console: { passed: consoleErrors.length === 0, errors: consoleErrors },
+      page: { passed: lifecycle.length === 0 && pageErrors.length === 0, errors: pageErrors },
+      console: { passed: lifecycle.length === 0 && consoleErrors.length === 0, errors: consoleErrors },
       network: {
-        passed: failedRequests.length === 0 && expectations.every((item) => item.detail.ok),
+        passed: lifecycle.length === 0 && failedRequests.length === 0 && expectations.every((item) => item.detail.ok),
         failed_requests: failedRequests,
         expectations,
       },
@@ -484,6 +610,9 @@ function shapeVerificationReport(
     layout,
     undeclared_statuses: undeclared,
     navigation_retries: navigationRetries,
+    incomplete,
+    ...(lifecycle.length ? { lifecycle } : {}),
+    ...(transportErrors.length ? { transport_errors: transportErrors } : {}),
   };
 }
 
@@ -539,7 +668,12 @@ export async function runVerification(
       capture_after: true,
       inline: false,
       ...(!target.project_id ? { store: true } : {}),
-    }, undefined, { timeoutMs: VERIFY_TIMEOUT_MS });
+      budget_ms: VERIFY_BUDGET_MS,
+    }, undefined, { timeoutMs: VERIFY_TRANSPORT_TIMEOUT_MS }).catch((cause: unknown) => {
+      const unknown = transportUnknown(cause);
+      if (unknown) return unknown;
+      throw cause;
+    });
     return { viewport, report };
   }));
   return shapeVerificationReport(targetLabel, flow, runs);
@@ -560,7 +694,13 @@ export const VERIFY_JOURNEY_LIMITS = {
   actions_per_segment: 30,
   total_actions: 120,
   deadline_ms: 10 * 60 * 1000,
-  segment_timeout_ms: VERIFY_TIMEOUT_MS,
+  /** The execution cap each segment asks for (budget_ms): one connected run. */
+  segment_budget_ms: VERIFY_BUDGET_MS,
+  /** A segment is not started with a smaller cap than this. */
+  min_segment_budget_ms: VERIFY_MIN_BUDGET_MS,
+  /** Added to the cap for the client's wait: admission, launch, capture, release. */
+  transport_headroom_ms: VERIFY_TRANSPORT_HEADROOM_MS,
+  segment_timeout_ms: VERIFY_TRANSPORT_TIMEOUT_MS,
   /** Separate from the journey budget: how long closing the actors' browsers
    *  may take once the run stops, including waiting for a call in flight. */
   cleanup_budget_ms: 20_000,
@@ -593,9 +733,30 @@ export interface VerifyJourneySegmentReport {
   viewport: string;
   path?: string;
   ran: boolean;
+  /** Request sent, but browser execution is unconfirmed. */
+  outcome_unknown?: true;
+  session_closed?: true;
+  lifecycle?: BrowserLifecycle;
   passed: boolean;
   final_url?: string;
   error?: { code: string; message: string };
+  /** The segment reached its execution cap with nothing failed before it. */
+  incomplete?: VerifyIncomplete;
+}
+
+/** An actor's browser deliberately left open after an execution-cap stop, so
+ *  its page can still be inspected. It is the caller's to close; otherwise the
+ *  platform closes it at its idle or absolute bound, whichever comes first.
+ *  Every time here is the platform's, read when it released the browser; the
+ *  CLI never estimates one. */
+export interface VerifyKeptSession {
+  actor: string;
+  session_id: string;
+  /** When the platform will close it: the earlier of the two bounds below. */
+  session_expires_at?: string;
+  idle_expires_at?: string;
+  absolute_expires_at?: string;
+  close: string;
 }
 
 /**
@@ -609,7 +770,7 @@ export interface VerifyJourneySegmentReport {
  */
 export interface VerifyJourneyCleanup {
   actor: string;
-  status: 'closed' | 'already_closed' | 'unconfirmed';
+  status: 'closed' | 'already_closed' | 'unconfirmed' | 'kept_open';
   reason?: string;
 }
 
@@ -622,6 +783,8 @@ export interface VerifyJourneyReport extends VerifyReport {
   cleanup: VerifyJourneyCleanup[];
   cleanup_ms: number;
   cleanup_confirmed: boolean;
+  /** Browsers left open on purpose after an execution-cap stop. */
+  kept_sessions: VerifyKeptSession[];
 }
 
 const ACTOR_NAME = /^[a-z][a-z0-9_-]{0,15}$/;
@@ -767,11 +930,14 @@ export function createVerifyJourneyRun(
   const opened = new Set<string>();
   // Actors whose last call ended without a platform answer (client timeout or
   // lost connection): the platform may still be running it.
-  const abandoned = new Set<string>();
+  const abandoned = new Map<string, string>();
   // The one segment call in flight, if any.
   let inFlight: { actor: string; settled: Promise<unknown> } | null = null;
   let stopReason: { code: string; message: string } | null = null;
   let closing: Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }> | null = null;
+  // Actors whose healthy browser is kept after an execution-cap stop. Cleanup
+  // reports them and never closes them.
+  const kept = new Map<string, VerifyKeptSession>();
 
   const stop = (code: string, message: string): void => {
     stopReason ??= { code, message };
@@ -796,7 +962,7 @@ export function createVerifyJourneyRun(
       const startedAt = now();
       const budgetEnd = startedAt + cleanupBudgetMs;
       const pending = inFlight;
-      const actors = [...opened];
+      const actors = [...opened].filter((actor) => !kept.has(actor));
       // One concurrent pass: every opened browser at once, one shared budget.
       const first = await Promise.all(actors.map(async (actor) => [actor, await closeOne(actor, budgetEnd)] as const));
       const outcome = new Map<string, VerifyJourneyCleanup>();
@@ -819,8 +985,8 @@ export function createVerifyJourneyRun(
             : { actor: pending.actor, status: again.closed || earlier?.status === 'closed' ? 'closed' : 'already_closed' });
         }
       }
-      // A call the client gave up on has no answer to wait for. Close once more
-      // a little later (inside the budget) and say plainly it is unconfirmed.
+      // A transport or lifecycle outcome can settle after this close. Close once
+      // more inside the budget, but do not claim it proves final cleanup.
       for (const actor of actors.filter((name) => abandoned.has(name))) {
         const waitMs = Math.min(recloseAfterAbandonedMs, budgetEnd - now());
         if (waitMs > 0) await new Promise((resolveWait) => setTimeout(resolveWait, waitMs));
@@ -828,10 +994,11 @@ export function createVerifyJourneyRun(
         outcome.set(actor, {
           actor,
           status: 'unconfirmed',
-          reason: `its call got no answer, so the platform may still start it${'error' in again ? ` (the second close failed: ${again.error})` : ''}; ${UNCONFIRMED_BACKSTOP}`,
+          reason: `${abandoned.get(actor)}${'error' in again ? ` (the second close failed: ${again.error})` : ''}; ${UNCONFIRMED_BACKSTOP}`,
         });
       }
-      return { cleanup: actors.map((actor) => outcome.get(actor)!), cleanup_ms: now() - startedAt };
+      const keptCleanup = [...kept.values()].map((item): VerifyJourneyCleanup => ({ actor: item.actor, status: 'kept_open', reason: item.close }));
+      return { cleanup: [...actors.map((actor) => outcome.get(actor)!), ...keptCleanup], cleanup_ms: now() - startedAt };
     })();
     return closing;
   };
@@ -846,11 +1013,12 @@ export function createVerifyJourneyRun(
     const startedAt = now();
     const deadlineAt = startedAt + VERIFY_JOURNEY_LIMITS.deadline_ms;
     const segments: VerifyJourneySegmentReport[] = [];
-    const runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions: BrowserSequenceAction[] }> = [];
+    const runs: Array<{ viewport: ResolvedViewport; report: BrowserResult; actions: BrowserSequenceAction[]; offset: 0 | 1 }> = [];
     const started = new Set<string>();
     // 'report': the segment ran and its own report failed (the step verdict
     // says why). 'error': the segment could not run or could not continue.
-    let stopped: { kind: 'report' | 'error'; segment: number; as: string; viewport: string; code: string; message: string } | null = null;
+    // 'incomplete': the segment reached its execution cap with nothing failed.
+    let stopped: { kind: 'report' | 'error' | 'incomplete'; segment: number; as: string; viewport: string; code: string; message: string } | null = null;
     const deadlineMessage = `The journey reached its ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000}-minute limit.`;
     try {
       for (const [index, segment] of journey.journey.entries()) {
@@ -873,7 +1041,20 @@ export function createVerifyJourneyRun(
         }
         const actor = journey.actors[segment.as];
         const first = !started.has(segment.as);
-        const actions = !first && segment.path ? [{ goto: segment.path } as BrowserSequenceAction, ...segment.actions] : segment.actions;
+        const offset: 0 | 1 = !first && segment.path ? 1 : 0;
+        const actions = offset ? [{ goto: segment.path } as BrowserSequenceAction, ...segment.actions] : segment.actions;
+        // One connected run per segment, capped so its answer (cap plus
+        // transport headroom) still arrives inside the journey's deadline. A
+        // segment that cannot get the minimum cap is not started at all.
+        const remaining = deadlineAt - now();
+        const budgetMs = Math.min(VERIFY_JOURNEY_LIMITS.segment_budget_ms, remaining - VERIFY_JOURNEY_LIMITS.transport_headroom_ms);
+        if (budgetMs < VERIFY_JOURNEY_LIMITS.min_segment_budget_ms) {
+          const message = `${deadlineMessage} Segment ${index + 1} was not started: ${Math.max(0, Math.floor(remaining / 1000))}s were left, less than the ${VERIFY_JOURNEY_LIMITS.min_segment_budget_ms / 1000}s minimum run plus ${VERIFY_JOURNEY_LIMITS.transport_headroom_ms / 1000}s for its answer.`;
+          stop('VERIFY_JOURNEY_DEADLINE', message);
+          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_JOURNEY_DEADLINE', message };
+          segments.push({ ...base, error: { code: 'VERIFY_JOURNEY_DEADLINE', message } });
+          continue;
+        }
         const hasSeeds = actor.local_storage !== undefined || actor.cookies !== undefined || actor.headers !== undefined;
         const url = first ? (segment.path ?? target.url ?? (hasSeeds ? '/' : undefined)) : undefined;
         const body: Record<string, unknown> = {
@@ -886,14 +1067,15 @@ export function createVerifyJourneyRun(
           viewport: viewport.wire,
           capture_after: true,
           inline: false,
+          budget_ms: budgetMs,
+          // A continued actor must be the same browser and page, or nothing runs.
+          ...(!first ? { require_existing_session: true } : {}),
           ...(first && actor.auth ? { auth: actor.auth } : {}),
           ...(first && actor.local_storage ? { local_storage: actor.local_storage } : {}),
           ...(first && actor.cookies ? { cookies: actor.cookies } : {}),
           ...(first && actor.headers ? { headers: actor.headers } : {}),
         };
-        // Each wait is capped by what is left of the journey budget.
-        const remaining = deadlineAt - now();
-        const waitMs = Math.min(VERIFY_JOURNEY_LIMITS.segment_timeout_ms, remaining);
+        const waitMs = budgetMs + VERIFY_JOURNEY_LIMITS.transport_headroom_ms;
         opened.add(segment.as);
         started.add(segment.as);
         abandoned.delete(segment.as);
@@ -905,24 +1087,56 @@ export function createVerifyJourneyRun(
         } catch (cause) {
           const code = cause instanceof CliApiError ? cause.code : 'VERIFY_SEGMENT_FAILED';
           const message = cause instanceof Error ? cause.message : String(cause);
-          if (code === 'TIMEOUT' || code === 'NETWORK_ERROR') abandoned.add(segment.as);
-          const budgetCut = code === 'TIMEOUT' && waitMs < VERIFY_JOURNEY_LIMITS.segment_timeout_ms;
-          const reported = budgetCut ? { code: 'VERIFY_JOURNEY_DEADLINE', message: `${deadlineMessage} Segment ${index + 1} was still running.` } : { code, message };
-          if (budgetCut) stop(reported.code, reported.message);
-          stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, ...reported };
-          // A refusal (limit, authority, validation) happens before a browser runs.
-          segments.push({ ...base, error: reported });
-          continue;
+          const unknown = transportUnknown(cause);
+          if (unknown) {
+            abandoned.set(segment.as, 'its call got no answer, so the platform may still start it');
+            report = unknown;
+          } else {
+            const refusedMessage = !first && (code === 'SESSION_EXPIRED' || code === 'SESSION_TARGET_LOST')
+              ? `${segment.as}'s ${code === 'SESSION_EXPIRED' ? 'browser ended' : 'page could not be identified'} between segments, so segment ${index + 1} did not run (nothing was started, seeded or navigated). ${message}`
+              : message;
+            stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code, message: refusedMessage };
+            segments.push({ ...base, error: { code, message: refusedMessage } });
+            continue;
+          }
         } finally {
           inFlight = null;
         }
-        runs.push({ viewport: { ...viewport, label }, report, actions });
+        runs.push({ viewport: { ...viewport, label }, report, actions, offset });
+        const unknown = readBrowserLifecycle(report);
+        if (unknown) {
+          if (!abandoned.has(segment.as)) abandoned.set(segment.as, `the platform reported ${unknown.status}; late allocation or cleanup may still settle`);
+          segments.push({ ...base, ran: !report.transport_error, outcome_unknown: true, lifecycle: unknown,
+            ...(report.transport_error ? { error: report.transport_error } : {}) });
+          stopped = { kind: 'report', segment: index + 1, as: segment.as, viewport: viewport.label, code: '', message: '' };
+          continue;
+        }
         // A continued actor whose browser was reaped would carry on signed out
         // in a fresh browser; that is a different person, so the journey stops.
         if (!first && report.session_note) {
           const message = `${segment.as}'s browser ended between segments (${report.session_note}), so ${segment.as} is no longer the same signed-in user. Keep each actor's gap between segments under 3 minutes and run the journey again.`;
           stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_ACTOR_SESSION_ENDED', message };
           segments.push({ ...base, ran: true, final_url: report.final_url, error: { code: stopped.code, message } });
+          continue;
+        }
+        const capped = mapIncomplete(report, actions, offset);
+        if (capped) {
+          // The browser is healthy and the platform kept it: leave it open for
+          // the caller rather than erasing the evidence in cleanup. A browser
+          // the platform reports closed is not claimed as kept.
+          const sessionId = sessions[segment.as];
+          if (report.session_closed !== true && report.idle_expires_at && report.absolute_expires_at) {
+            kept.set(segment.as, {
+              actor: segment.as,
+              session_id: sessionId,
+              ...(report.session_expires_at ? { session_expires_at: report.session_expires_at } : {}),
+              ...(report.idle_expires_at ? { idle_expires_at: report.idle_expires_at } : {}),
+              ...(report.absolute_expires_at ? { absolute_expires_at: report.absolute_expires_at } : {}),
+              close: `somewhere call browser '${JSON.stringify({ session_id: sessionId })}'`,
+            });
+          }
+          segments.push({ ...base, ran: true, passed: false, incomplete: capped, ...(report.session_closed === true ? { session_closed: true as const } : {}), ...(report.final_url ? { final_url: report.final_url } : {}) });
+          stopped = { kind: 'incomplete', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_EXECUTION_CAP', message: '' };
           continue;
         }
         const passed = reportPassed(report);
@@ -934,10 +1148,26 @@ export function createVerifyJourneyRun(
     }
     const shaped = shapeVerificationReport(target.url ?? target.project_id, { actions: [] }, runs);
     const names = Object.keys(journey.actors);
-    const passed = !stopped && runs.length === journey.journey.length && shaped.passed;
+    let passed = !stopped && runs.length === journey.journey.length && shaped.passed;
     let verdict: string;
+    const cappedSegment = stopped?.kind === 'incomplete' ? segments.find((item) => item.segment === stopped?.segment) : undefined;
+    const keptSession = stopped?.kind === 'incomplete' ? kept.get(stopped.as) : undefined;
     if (stopped?.kind === 'error') {
       verdict = `FAIL — segment ${stopped.segment} (${stopped.as}, ${stopped.viewport}): ${stopped.message} [${stopped.code}]`;
+    } else if (stopped?.kind === 'incomplete' && cappedSegment?.incomplete) {
+      const later = journey.journey.length - stopped.segment;
+      verdict = `INCOMPLETE — ${incompleteSentence(cappedSegment.incomplete, `segment ${stopped.segment} (${stopped.as}, ${stopped.viewport})`)}`
+        + (later ? ` Segment${later === 1 ? '' : 's'} ${stopped.segment + 1}${later > 1 ? `–${journey.journey.length}` : ''} did not run.` : '')
+        + (keptSession
+          ? ` ${stopped.as}'s browser is kept open as session "${keptSession.session_id}" so its page can be inspected; `
+            + (keptSession.session_expires_at
+              ? `the platform closes it at ${keptSession.session_expires_at} unless it is closed first.`
+              : 'the platform did not report when it closes it.')
+            + ` Close it with: ${keptSession.close}`
+          : cappedSegment.session_closed === true
+            ? ` The platform closed ${stopped.as}'s browser, so there is no page left to inspect.`
+            : ` No kept browser is confirmed; see the cleanup result below.`)
+        + ' Nothing was continued automatically; split the segment to check the rest. [VERIFY_EXECUTION_CAP]';
     } else if (!passed) {
       verdict = shaped.verdict.replace(/^FAIL — /, `FAIL — segment ${stopped?.segment ?? '?'} — `);
     } else {
@@ -945,6 +1175,14 @@ export function createVerifyJourneyRun(
         + navigationRetryNote(shaped.navigation_retries);
     }
     const { cleanup, cleanup_ms } = await closeAll();
+    if (cleanup.some((item) => item.status === 'unconfirmed')) {
+      passed = false;
+      const lifecycle: Array<VerifySignal<BrowserLifecycle>> = cleanup.filter((item) => item.status === 'unconfirmed')
+        .map((item) => ({ viewport: item.actor, detail: { status: 'cleanup_unknown', outcome_unknown: true } }));
+      shaped.lifecycle = [...(shaped.lifecycle ?? []), ...lifecycle];
+      const note = `INCOMPLETE — ${unknownNote(lifecycle)}`;
+      verdict = verdict.startsWith('PASS') ? note : `${verdict} ${note}`;
+    }
     return {
       ...shaped,
       passed,
@@ -957,6 +1195,7 @@ export function createVerifyJourneyRun(
       cleanup,
       cleanup_ms,
       cleanup_confirmed: cleanup.every((item) => item.status !== 'unconfirmed'),
+      kept_sessions: [...kept.values()],
     };
   };
 
@@ -1033,13 +1272,13 @@ export function verifyFlowSchema(): Record<string, unknown> {
 }
 
 export function formatVerifyReport(report: VerifyReport, evidencePath?: string): string[] {
-  const lines = [report.passed ? green(report.verdict) : red(report.verdict)];
+  const lines = [report.passed ? green(report.verdict) : report.verdict.startsWith('INCOMPLETE') ? teal(report.verdict) : red(report.verdict)];
   for (const step of report.steps) {
-    lines.push(`step ${step.step} ${step.passed ? green('✓') : red('✗')} [${step.viewport}] ${step.name}${step.error ? ` ${dim(`— ${step.error}`)}` : ''}`);
+    lines.push(`step ${step.step} ${step.ran === false ? dim('not run') : step.passed ? green('✓') : red('✗')} [${step.viewport}] ${step.name}${formatStepDuration(step.duration_ms, step.ran)}${step.error ? ` ${dim(`— ${step.error}`)}` : ''}`);
   }
-  lines.push(`page_health: ${report.health.page.passed ? green('PASS') : red('FAIL')}`);
-  lines.push(`console_health: ${report.health.console.passed ? green('PASS') : red('FAIL')}`);
-  lines.push(`network_health: ${report.health.network.passed ? green('PASS') : red('FAIL')}`);
+  lines.push(`page_health: ${report.health.page.errors?.length ? red('FAIL') : report.lifecycle?.length ? teal('UNKNOWN') : report.health.page.passed ? green('PASS') : red('FAIL')}`);
+  lines.push(`console_health: ${report.health.console.errors?.length ? red('FAIL') : report.lifecycle?.length ? teal('UNKNOWN') : report.health.console.passed ? green('PASS') : red('FAIL')}`);
+  lines.push(`network_health: ${report.health.network.failed_requests?.length ? red('FAIL') : report.lifecycle?.length ? teal('UNKNOWN') : report.health.network.passed ? green('PASS') : red('FAIL')}`);
   for (const shot of report.screenshots) {
     const location = shot.url ?? shot.scratch_url ?? shot.fs_path ?? shot.path ?? shot.error ?? '(missing)';
     const savedLink = evidencePath && (shot.url || shot.scratch_url);
@@ -1059,10 +1298,10 @@ export function formatVerifyReport(report: VerifyReport, evidencePath?: string):
 export function formatVerifyJourneyReport(report: VerifyJourneyReport, evidencePath?: string): string[] {
   const lines = formatVerifyReport(report, evidencePath);
   const segmentLines = report.segments.map((segment) => {
-    const mark = !segment.ran && !segment.error ? dim('not run') : segment.passed ? green('✓') : red('✗');
+    const mark = segment.outcome_unknown ? teal('outcome unknown') : !segment.ran && !segment.error ? dim('not run') : segment.incomplete ? teal('incomplete') : segment.passed ? green('✓') : red('✗');
     return `segment ${segment.segment} ${mark} ${segment.as} [${segment.viewport}]${segment.path ? ` ${segment.path}` : ''}${segment.error ? ` ${dim(`— ${segment.error.code}`)}` : ''}`;
   });
-  return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}`, ...formatJourneyCleanup(report.cleanup, report.cleanup_ms)];
+  return [lines[0], ...segmentLines, ...lines.slice(1), `browser runs used: ${report.browser_runs}${report.segments.some((segment) => segment.outcome_unknown && !segment.ran) ? '; additional browser execution is unconfirmed' : ''}`, ...formatJourneyCleanup(report.cleanup, report.cleanup_ms)];
 }
 
 /** Persist before shortening human output; JSON callers keep their original contract. */
@@ -1083,7 +1322,10 @@ export function formatVerifyOutput(
 export function formatJourneyCleanup(cleanup: VerifyJourneyCleanup[], cleanupMs: number): string[] {
   if (!cleanup.length) return ['browsers: none were opened'];
   const lines = [`browsers (cleanup ${Math.round(cleanupMs / 100) / 10}s of ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000}s budget): ${cleanup.map((item) => `${item.actor} ${item.status.replace('_', ' ')}`).join(', ')}`];
-  for (const item of cleanup) if (item.status === 'unconfirmed' && item.reason) lines.push(`  ${item.actor}: ${item.reason}`);
+  for (const item of cleanup) {
+    if (item.status === 'unconfirmed' && item.reason) lines.push(`  ${item.actor}: ${item.reason}`);
+    if (item.status === 'kept_open' && item.reason) lines.push(`  ${item.actor}: kept open after the execution cap; close it with: ${item.reason}`);
+  }
   return lines;
 }
 
@@ -1197,7 +1439,7 @@ projects: a login approved for "Only these projects" cannot open named browsers
           process.once('SIGTERM', onSignal);
           let report: VerifyJourneyReport;
           try {
-            report = await journeyRun.run();
+            report = await withVerifyProgress(() => journeyRun.run(), !opts.json);
           } finally {
             process.removeListener('SIGINT', onSignal);
             process.removeListener('SIGTERM', onSignal);
@@ -1213,11 +1455,11 @@ projects: a login approved for "Only these projects" cannot open named browsers
           ...(cliCookies.length ? { cookies: [...(loadedFlow.cookies ?? []), ...cliCookies] } : {}),
         };
         assertSessionSeedSize(flow);
-        const report = await runVerification(
+        const report = await withVerifyProgress(() => runVerification(
           { ...(project ? { project_id: project } : {}), ...(url ? { url } : {}) },
           flow,
           client,
-        );
+        ), !opts.json);
         if (opts.json) console.log(JSON.stringify(report, null, 2));
         else for (const line of formatVerifyOutput(report)) console.log(line);
         process.exit(report.passed ? 0 : 1);
