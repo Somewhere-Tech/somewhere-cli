@@ -38,6 +38,7 @@ import { registerUsage } from './commands/usage.js';
 import { registerGit } from './commands/git.js';
 import { registerCron } from './commands/cron.js';
 import { registerEmail } from './commands/email.js';
+import { registerSkills } from './commands/skills.js';
 import { collectNotices } from './lib/notify/index.js';
 import { startupNotice } from './lib/startup-notice.js';
 import { error, info, printJsonError, setJsonOutputMode, stripAnsi } from './lib/output.js';
@@ -106,6 +107,7 @@ registerUsage(program);
 registerGit(program);
 registerCron(program);
 registerEmail(program);
+registerSkills(program);
 
 // User-notification pipeline (update-available, advisories, announcements…).
 // Centrally gated to interactive, non-CI, non-pass-through commands and emitted to

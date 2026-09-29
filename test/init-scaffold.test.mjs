@@ -22,7 +22,7 @@ const { createGreenTemplate } =
   await import(`${moduleRoot}/lib/init-green-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createFeatureTemplate } =
   await import(`${moduleRoot}/lib/init-feature-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
-const { AGENT_WORKFLOW } =
+const { AGENT_WORKFLOW, SKILLS_POINTER } =
   await import(`${moduleRoot}/lib/init-agent-guide.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
 const { createHappyPathTemplate } =
   await import(`${moduleRoot}/lib/init-template.${process.env.SOMEWHERE_TEST_SOURCE ? 'ts' : 'js'}`);
@@ -131,7 +131,7 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
 
   const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
-  assert.equal(agents, `# somewhere.tech project contract\n\n${AGENT_WORKFLOW}\n`);
+  assert.equal(agents, `# somewhere.tech project contract\n${SKILLS_POINTER}\n${AGENT_WORKFLOW}\n`);
   assert.ok(agents.trimEnd().split('\n').length <= 60, 'AGENTS.md must stay within 60 lines');
   assert.equal(claude, 'Read AGENTS.md for project instructions.\n');
   assert.equal(claude.trimEnd().split('\n').length, 1);

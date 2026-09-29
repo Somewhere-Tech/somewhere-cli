@@ -23,6 +23,9 @@ import {
 } from '../lib/init-scaffold.js';
 import { INIT_AGENTS_MD, INIT_CLAUDE_MD } from '../lib/init-agent-guide.js';
 import { createGreenTemplate } from '../lib/init-green-template.js';
+import { BUNDLED_SKILLS_PACK } from '../lib/skills-pack.generated.js';
+import { CLAUDE_SKILLS_DIR, SKILLS_DIR, SKILLS_LOCK, installSkills, readLock, skillNames } from '../lib/skills-pack.js';
+import { CLI_VERSION } from '../lib/version.js';
 import { createFeatureTemplate, extensionPoints } from '../lib/init-feature-template.js';
 import {
   describeSelection,
@@ -83,6 +86,7 @@ export function registerInit(program: Command) {
         + 'the SDK client in src/services/auth.ts, hooks in src/auth/, pages in src/pages/,\n'
         + 'replaceable views in src/ui/ and styles in src/styles/, plus an AGENTS.md workflow\n'
         + '(typecheck, deploy, verify). `--template minimal` writes an app without sign-in.\n'
+        + 'New starters and --bare also install six agent skills in .agents/skills, pinned by skills-lock.json.\n'
         + '\nA directory that already has files is linked and left untouched. Use --bare\n'
         + 'only to bring your own layout; existing AGENTS.md/CLAUDE.md are never replaced.\n'
         + '\nPick modules instead of a template (agents: no questions asked):\n'
@@ -169,12 +173,14 @@ export function registerInit(program: Command) {
         }
         try {
           const scaffold = writeInitScaffold(dir, scaffoldFiles(localName));
+          const skills = writeInitSkills(dir);
           const next = ['somewhere deploy', 'somewhere docs start'];
           if (opts.json) {
-            printJson({ local: true, linked: false, name: localName, files: scaffold.created, dependencies_installed: false,
+            printJson({ local: true, linked: false, name: localName, files: scaffold.created, dependencies_installed: false, skills,
               ...(plan ? { selection: plan.selection, extension_points: extensionPoints(plan.selection) } : {}), next });
           } else {
             success(`Local starter written (${scaffold.created.length} files); no account or project was created.`);
+            reportSkills(skills);
             info('Dependencies are not installed. Run npm install if you want to run it locally.');
             info('Next: somewhere deploy — publish with a temporary workspace, no login needed.');
             info('Quickstart: somewhere docs start');
@@ -263,9 +269,11 @@ export function registerInit(program: Command) {
           if (!hasGlobalMcpConfig()) saveGlobalMcpConfig();
           if (shouldScaffold) {
             writeInitScaffold(dir, scaffoldFiles(project.name));
+            writeInitSkills(dir);
             await installInitDependencies({ cwd: dir, quiet: true });
           } else if (opts.bare) {
             writeBareGuide(dir);
+            writeInitSkills(dir);
           }
           printJson(plan
             ? { ...project, selection: plan.selection, extension_points: extensionPoints(plan.selection) }
@@ -286,6 +294,7 @@ export function registerInit(program: Command) {
         if (shouldScaffold) {
           const scaffold = writeInitScaffold(dir, scaffoldFiles(project.name));
           success(`Full-stack starter written (${scaffold.created.length} files)`);
+          reportSkills(writeInitSkills(dir));
           if (template !== 'minimal' || plan) {
             const selection = plan?.selection ?? DEFAULT_AUTH_SELECTION;
             info(`Modules: ${describeSelection(selection)}`);
@@ -297,6 +306,7 @@ export function registerInit(program: Command) {
         } else if (opts.bare) {
           info('Bare project: no starter source or dependencies were added.');
           const guide = writeBareGuide(dir);
+          reportSkills(writeInitSkills(dir));
           if (guide.created.length) success(`Agent workflow guide written (${guide.created.join(', ')})`);
           if (guide.kept.length) info(`Existing ${guide.kept.join(', ')} kept unchanged.`);
         } else {
@@ -468,6 +478,20 @@ export async function linkExisting(
 
   console.log('');
   printNext({ stage: 'init', scaffolded: false });
+}
+
+/** Existing installations and same-name project skills remain unchanged during init. */
+export function writeInitSkills(dir: string): { version: string } | { kept: string } {
+  if (readLock(dir)) return { kept: `${SKILLS_LOCK} already present` };
+  const taken = skillNames(BUNDLED_SKILLS_PACK).filter((name) =>
+    existsSync(join(dir, SKILLS_DIR, name)) || existsSync(join(dir, CLAUDE_SKILLS_DIR, name)));
+  if (taken.length) return { kept: `Project skills ${taken.join(', ')} already exist` };
+  return installSkills(dir, BUNDLED_SKILLS_PACK, { cli: CLI_VERSION, source: 'bundled' });
+}
+
+function reportSkills(result: ReturnType<typeof writeInitSkills>): void {
+  if ('version' in result) success(`Agent skills ${teal(result.version)} written to ${SKILLS_DIR}`);
+  else info(`Agent skills kept unchanged: ${result.kept}. Run somewhere skills status to inspect them.`);
 }
 
 function writeBareGuide(dir: string) {

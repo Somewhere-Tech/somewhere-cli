@@ -1,3 +1,6 @@
+import { BUNDLED_SKILLS_PACK } from './skills-pack.generated.js';
+import { SKILLS_DIR, skillNames } from './skills-pack.js';
+
 // Generated mirror of somewhere.tech/docs/agent-workflow.md. The platform
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
@@ -59,5 +62,9 @@ changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
 user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
 
-export const INIT_AGENTS_MD = `# somewhere.tech project contract\n\n${AGENT_WORKFLOW}\n`;
+export const SKILLS_POINTER = `Skills: \`${SKILLS_DIR}/\` — `
+  + skillNames(BUNDLED_SKILLS_PACK).map((name) => `\`${name}\``).join(', ')
+  + '. Read the skill that matches the task. `somewhere skills status` inspects the installed pack; `somewhere skills update` updates unmodified files.';
+
+export const INIT_AGENTS_MD = `# somewhere.tech project contract\n${SKILLS_POINTER}\n${AGENT_WORKFLOW}\n`;
 export const INIT_CLAUDE_MD = 'Read AGENTS.md for project instructions.\n';
