@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
 import { mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parsePublicDocsManifest, renderPublicDocsView } from '../dist/commands/docs.js';
@@ -210,7 +211,7 @@ test('docs --list discovers public topics and keeps quick links separate', async
 
 /** A HOME with no ~/.somewhere/config.json — the blind-run starting state. */
 function emptyCredentialHome() {
-  return mkdtempSync(join(repoRoot, 'temporary-release-evidence', 'sw-docs-nocreds-home-'));
+  return mkdtempSync(join(tmpdir(), 'sw-docs-nocreds-home-'));
 }
 
 test('docs <topic> returns exact manifest pages with NO credential present', async () => {

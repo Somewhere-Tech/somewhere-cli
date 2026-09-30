@@ -138,10 +138,10 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
 
   const workflowOrder = [
     'somewhere init --name <slug>',
-    'rather than rebuilding sign-in',
+    'extend it using the README file map. Minimal/bare starters omit auth.',
     'npx @somewhere-tech/cli deploy',
-    'somewhere docs <topic>',
     'somewhere advisor "<question>"',
+    'somewhere docs <topic> --section <id>',
     'somewhere typecheck',
     'somewhere deploy',
     'somewhere verify',

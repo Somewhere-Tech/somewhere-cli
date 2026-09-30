@@ -170,6 +170,8 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
   const home = mkdtempSync(join(tmpdir(), 'sw-platform-help-home-'));
   writeConfig(home);
   const calls = [];
+  const publicRequests = [];
+  const recoveredBody = '# sw.db\n\n## Legacy\n\nRecovered current section.\n\n## Other\n\nUnrelated full-body evidence.\n';
   const catalog = {
     categories: {
       db: { summary: 'Database tools', aliases: ['sql'], tools: ['db_query', 'db_migrate'] },
@@ -195,6 +197,17 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
   };
 
   const server = createServer((req, res) => {
+    if (req.method === 'GET' && req.url === '/docs-manifest.json') {
+      publicRequests.push(req.url);
+      assert.equal(req.headers.authorization, undefined);
+      sendJson(res, { version: 1, pages: [{
+        id: 'sw.db', title: 'Database', section: 'data-identity', body: recoveredBody,
+        anchors: [], provenance: { authored: 'hand' },
+        sections: [{ id: 'legacy', heading: '## Legacy', level: 2,
+          start: recoveredBody.indexOf('## Legacy'), end: recoveredBody.indexOf('## Other') }],
+      }] });
+      return;
+    }
     if (req.method === 'GET' && req.url === '/health?cached=1') {
       assert.equal(req.headers.authorization, undefined);
       sendJson(res, { advisor: { status: 'unknown' } });
@@ -233,7 +246,7 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
             ? rpc.params.arguments.detail === 'full'
               ? '[docs] topic=sw.db view=full complete=true shown=27 full=27\n# sw.db\n\nDatabase reference.'
               : rpc.params.arguments.section
-                ? rpc.params.arguments.section === 'legacy'
+                ? ['legacy', 'unknown'].includes(rpc.params.arguments.section)
                   ? '# sw.db\n\nDatabase reference.'
                   : '[docs] topic=sw.db view=section complete=false shown=9 full=27\n## Where\n'
                 : '# sw.db\n\nDatabase reference.'
@@ -267,6 +280,7 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     HOME: home,
     USERPROFILE: home,
     SOMEWHERE_MCP_URL: `http://127.0.0.1:${port}/mcp`,
+    SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
   };
 
   try {
@@ -321,8 +335,15 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
     assert.equal(docsSection.stderr, '');
     const docsOldSection = await run(['docs', 'sw.db', '--section', 'legacy'], env);
     assert.equal(docsOldSection.status, 0, docsOldSection.stderr);
-    assert.equal(docsOldSection.stdout, '# sw.db\n\nDatabase reference.\n');
-    assert.match(docsOldSection.stderr, /does not support sections yet/);
+    assert.equal(docsOldSection.stdout, '## Legacy\n\nRecovered current section.\n\n');
+    assert.match(docsOldSection.stdout, /Recovered current section/);
+    assert.doesNotMatch(docsOldSection.stdout, /Unrelated full-body evidence|Database reference/);
+    assert.equal(docsOldSection.stderr, '');
+    const unknownSection = await run(['docs', 'sw.db', '--section', 'unknown', '--json'], env);
+    assert.equal(unknownSection.status, 1);
+    assert.equal(JSON.parse(unknownSection.stdout).error, 'DOCS_SECTION_NOT_FOUND');
+    assert.doesNotMatch(unknownSection.stdout, /Recovered current section|Unrelated full-body evidence/);
+    assert.deepEqual(publicRequests, ['/docs-manifest.json', '/docs-manifest.json']);
     const docsBoth = await run(['docs', 'sw.db', '--full', '--section', 'where'], env);
     assert.equal(docsBoth.status, 1);
     assert.match(docsBoth.stderr, /--full or --section/);
@@ -368,6 +389,7 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
       ['docs', { topic: 'sw.db', detail: 'full' }],
       ['docs', { topic: 'sw.db', section: 'where' }],
       ['docs', { topic: 'sw.db', section: 'legacy' }],
+      ['docs', { topic: 'sw.db', section: 'unknown' }],
       ['catalog', {}],
       ['catalog', { load: 'all' }],
       ['catalog', { search: 'cron_create' }],
