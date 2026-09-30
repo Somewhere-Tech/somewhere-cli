@@ -1,4 +1,4 @@
-import {callAdvisorRun} from '../lib/advisor-runs.js';
+import {callAdvisorRun,consumeAdvisorRun} from '../lib/advisor-runs.js';
 import { Command } from 'commander';
 import { error, printJson } from '../lib/output.js';
 import { callPlatformHelpTool } from '../lib/platform-tools.js';
@@ -35,7 +35,7 @@ interface PublicAdvisorResponse {
   ok?: boolean;
   error?: string;
   message?: string;
-  data?: { answer?: string };
+  data?: { answer?: string;run_id?:string;status?:string;anonymous_capability?:string };
 }
 
 export async function callAnonymousAdvisor(
@@ -62,6 +62,7 @@ export async function callAnonymousAdvisor(
     throw new Error(`${message}${detail ? ` [${detail}]` : ''}`);
   }
   const answer = payload.data?.answer;
+  if(!answer&&payload.data?.run_id){const run=await consumeAdvisorRun(JSON.stringify(payload.data),message=>process.stderr.write(message+'\n'));if(run?.incomplete)process.exitCode=1;if(run?.answer)return run.answer;throw new Error('Advisor run remains incomplete. Resume the saved request.');}
   if (!answer) throw new Error('Advisor returned an empty response.');
   return answer;
 }
@@ -97,12 +98,13 @@ export function registerAdvisor(program: Command): void {
         // Only permanent credentials authorize the authenticated MCP path.
         // Temporary deploy credentials use the public advisor's IP gate, while
         // an expired or rejected permanent credential still fails closed here.
-        const answer = permanentCredential
+        let answer = permanentCredential
           ? await callPlatformHelpTool('advisor', {
             question,
             ...(context ? { context } : {}),
           })
           : await callAnonymousAdvisor(question, context);
+        if(permanentCredential){const run=await consumeAdvisorRun(answer,message=>process.stderr.write(message+'\n'));if(run){if(run.incomplete)process.exitCode=1;answer=run.answer??JSON.stringify(run);}}
         if (opts.json) {
           printJson({ question, answer });
         } else {

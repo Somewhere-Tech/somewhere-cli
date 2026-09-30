@@ -29,8 +29,18 @@ export async function callAdvisorRun(args:{question?:string;context?:AdvisorCont
     if(args.operation==='cancel'&&!record.run_id)throw Error('Start acknowledgment is unavailable; no cancellation or replacement dispatch was attempted. Recover only this original request.');
     let result=await request(record,record.run_id?(args.operation??'resume'):'start');
     if(args.wait===false||args.operation==='status'||args.operation==='cancel')return result;
-    args.progress?.('Advisor is working. To reconnect: somewhere advisor --resume '+record.request_id);
+    if(result.status!=='settled'&&!result.answer)args.progress?.('Advisor is working. To reconnect: somewhere advisor --resume '+record.request_id);
     while(result.status!=='settled'&&!result.answer){await new Promise(resolve=>setTimeout(resolve,Math.min(10000,Math.max(1000,(result.retry_after_seconds??2)*1000))));result=await request(record,result.next_step==='resume'?'resume':'status');}
     return result;
   }catch(error){throw Error((error instanceof Error?error.message:String(error))+' Resume only this request: somewhere advisor --resume '+record.request_id);}
+}
+
+/** Adopt an unpaid legacy/native prepared handle before its first billable resume. */
+export async function consumeAdvisorRun(text:string,progress?:(message:string)=>void):Promise<AdvisorRunResult|null>{
+  let parsed:Record<string,unknown>;try{parsed=JSON.parse(text) as Record<string,unknown>;}catch{return null;}
+  if(typeof parsed.run_id!=='string'||typeof parsed.status!=='string')return null;
+  const config=loadConfig(),anonymous=typeof parsed.anonymous_capability==='string',id=randomUUID();
+  if(!anonymous&&(!config?.token||config.temporary===true))throw Error('Sign in to the account that owns this Advisor run.');
+  const record:LocalRun={owner_mode:anonymous?'anonymous':'account',request_id:id,request_created_at:Date.now(),capability:anonymous?String(parsed.anonymous_capability):randomBytes(32).toString('hex'),run_id:parsed.run_id};save(record);
+  return callAdvisorRun({requestId:id,operation:'resume',progress});
 }
