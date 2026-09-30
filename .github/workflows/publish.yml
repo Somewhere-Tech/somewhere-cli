@@ -1,47 +1,100 @@
-# Publish @somewhere-tech/cli to npm WITH PROVENANCE.
-#
-# Provenance (the signed attestation that links the published tarball to this
-# exact repo + commit + CI run) can ONLY be produced from CI with OIDC — a local
-# `npm publish` produces none. That's why the first attested release goes through
-# here. After this, `swpx check @somewhere-tech/cli` passes its own provenance bar.
-#
-# Setup (one time):
-#   1. Repo → Settings → Secrets → Actions → add NPM_TOKEN (an npm automation
-#      token for the @somewhere-tech org, publish scope).
-#   2. The repo must be public for the provenance attestation to be public.
-# Release:
-#   bump version in package.json, commit, then:
-#   git tag v0.14.0 && git push origin v0.14.0   (or run this workflow manually)
+# Sole CLI publisher. Tags are not publication triggers.
 name: Publish to npm
 
 on:
-  push:
-    tags: ['v*.*.*']
+  workflow_run:
+    workflows: ['Version guard']
+    types: [completed]
+    branches: [master]
   workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact current master commit (40 lowercase hex characters)
+        required: true
+        type: string
+      expected_version:
+        description: Exact package version (canonical SemVer)
+        required: true
+        type: string
 
 permissions:
   contents: read
-  id-token: write # OIDC token — REQUIRED for npm provenance
+  id-token: write # Existing canonical npm provenance identity.
+
+concurrency:
+  group: somewhere-cli-publish
+  cancel-in-progress: false
 
 jobs:
   publish:
     runs-on: ubuntu-latest
     steps:
+      # Inline trusted workflow code runs before any candidate checkout.
+      - name: Authenticate trigger and immutable source
+        id: trigger
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const official = 'Somewhere-Tech/somewhere-cli';
+            if (`${context.repo.owner}/${context.repo.repo}` !== official) throw new Error('untrusted repository');
+            let source;
+            let version = '';
+            if (context.eventName === 'workflow_run') {
+              const run = context.payload.workflow_run;
+              if (run.conclusion !== 'success' || run.event !== 'push' || run.head_branch !== 'master' ||
+                  run.head_repository?.full_name !== official || run.repository?.full_name !== official ||
+                  run.path !== '.github/workflows/version-guard.yml') throw new Error('untrusted or unsuccessful guard run');
+              source = run.head_sha;
+            } else if (context.eventName === 'workflow_dispatch' && context.ref === 'refs/heads/master') {
+              source = context.payload.inputs.source_sha;
+              version = context.payload.inputs.expected_version;
+              if (!/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?![\s\S])/.test(version)) throw new Error('invalid expected version');
+            } else throw new Error('untrusted trigger');
+            if (!/^[0-9a-f]{40}(?![\s\S])/.test(source)) throw new Error('invalid source SHA');
+            if (context.sha !== source) throw new Error('workflow OIDC source differs from candidate');
+            const master = await github.rest.repos.getBranch({ ...context.repo, branch: 'master' });
+            if (master.data.commit.sha !== source) throw new Error('stale source');
+            core.setOutput('source', source);
+            core.setOutput('version', version);
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.trigger.outputs.source }}
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
           registry-url: 'https://registry.npmjs.org'
-      # Trusted publishing (OIDC) needs npm >= 11.5, but npm 12 REMOVED
-      # npm-shrinkwrap.json support from `npm ci` — this repo ships a
-      # shrinkwrap and no package-lock, so `npm@latest` fails the next step
-      # with EUSAGE and nothing publishes. Reproduced on 2026-09-21: npm
-      # 12.0.2 errors on this tree, 11.19.0 installs it. Pinned rather than
-      # floating, so a future npm major cannot silently break releases again.
       - run: npm install -g npm@11.19.0
+      - name: Pin automatic expected version
+        id: candidate
+        env:
+          SOURCE_SHA: ${{ steps.trigger.outputs.source }}
+          EXPECTED_VERSION: ${{ steps.trigger.outputs.version }}
+        run: |
+          node --input-type=module -e 'import fs from "node:fs"; import { validateCandidate } from "./scripts/publish-release.mjs"; const version = process.env.EXPECTED_VERSION || JSON.parse(fs.readFileSync("package.json", "utf8")).version; validateCandidate(process.env.SOURCE_SHA, version); fs.appendFileSync(process.env.GITHUB_OUTPUT, `version=${version}\n`);'
+      - name: Check identity before gates
+        id: before
+        env:
+          SOURCE_SHA: ${{ steps.trigger.outputs.source }}
+          EXPECTED_VERSION: ${{ steps.candidate.outputs.version }}
+        run: node scripts/publish-release.mjs check "$SOURCE_SHA" "$EXPECTED_VERSION"
       - run: npm ci
       - run: npm run build
       - run: npm test
-      - run: npm publish --provenance --access public
+      - name: Recheck identity immediately before publication
+        id: final
+        env:
+          SOURCE_SHA: ${{ steps.trigger.outputs.source }}
+          EXPECTED_VERSION: ${{ steps.candidate.outputs.version }}
+        run: node scripts/publish-release.mjs check "$SOURCE_SHA" "$EXPECTED_VERSION"
+      - name: Publish once with provenance
+        id: publication
+        if: steps.final.outputs.mode == 'release'
+        run: npm publish --provenance --access public
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Verify published registry source, SRI and Sigstore
+        if: always() && steps.final.outcome == 'success' && (steps.final.outputs.mode == 'in-sync' || steps.publication.outcome == 'success' || steps.publication.outcome == 'failure')
+        env:
+          SOURCE_SHA: ${{ steps.final.outputs.published_head }}
+          EXPECTED_VERSION: ${{ steps.candidate.outputs.version }}
+        run: node scripts/publish-release.mjs verify "$SOURCE_SHA" "$EXPECTED_VERSION"

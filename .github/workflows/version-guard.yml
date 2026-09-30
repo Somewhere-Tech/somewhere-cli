@@ -1,25 +1,4 @@
-# Version guard + auto-publish — keeps npm and master in lockstep.
-#
-# The failure mode this kills: we ship CLI changes to master but forget the
-# release ritual, so npm `latest` drifts behind source (or worse, releases get
-# cut from side branches and master lags npm). Observed drift 2026-07-02:
-# master was 0.18.3 while npm latest was 0.19.1.
-#
-# Rules, evaluated on every master push that touches src/bin/package.json:
-#   0. package.json and npm-shrinkwrap.json must authenticate the same package
-#      name/version at both lock roots. A stale release lock fails immediately.
-#   1. package.json version NOT on npm  → this push IS the release: gate
-#      (build + tests) then publish with provenance and push the v<version>
-#      tag. Merging a bump to master = releasing. No separate ritual.
-#   2. Version already on npm AND the guarded release inputs match npm's
-#      gitHead → in sync (unrelated server-only descendants are allowed). Green.
-#   3. Version already on npm AND guarded release inputs differ → source
-#      changed but nobody bumped. RED. Bump package.json (patch at minimum)
-#      and re-push.
-#
-# The tag push here uses GITHUB_TOKEN, which deliberately does NOT trigger
-# publish.yml (GitHub suppresses workflow cascade from GITHUB_TOKEN pushes) —
-# so the two workflows can coexist without double-publishing.
+# Validate release candidates; the canonical publisher handles successful master runs.
 name: Version guard
 
 on:
@@ -37,12 +16,13 @@ on:
       - 'scripts/extract-runtime.mjs'
       - 'scripts/version-guard.mjs'
       - '.github/workflows/version-guard.yml'
+      - '.github/workflows/publish.yml'
+      - 'scripts/publish-release.mjs'
 
 permissions:
-  contents: write # tag push on auto-release
-  id-token: write # OIDC — npm provenance
+  contents: read
 
-# Never run two guards at once — a rapid double-push could race npm publish.
+# Serialize validation runs. Publication belongs exclusively to publish.yml.
 concurrency:
   group: version-guard
   cancel-in-progress: false
@@ -74,15 +54,3 @@ jobs:
         run: |
           npm ci
           npm test
-
-      - name: Publish to npm (provenance)
-        if: steps.compare.outputs.mode == 'release'
-        run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Tag the release commit
-        if: steps.compare.outputs.mode == 'release'
-        run: |
-          git tag "v${{ steps.compare.outputs.version }}"
-          git push origin "v${{ steps.compare.outputs.version }}"

@@ -83,27 +83,29 @@ function writeOutput(name, value) {
   if (output) appendFileSync(output, `${name}=${value}\n`);
 }
 
-function main() {
-  const cwd = process.cwd();
+export async function readPublishedVersion(name, version, fetcher = fetch) {
+  const response = await fetcher(`https://registry.npmjs.org/${encodeURIComponent(name)}/${encodeURIComponent(version)}`, {
+    signal: AbortSignal.timeout(15_000),
+  });
+  if (response.status === 404) return undefined;
+  if (!response.ok) throw new Error(`registry lookup failed: HTTP ${response.status}`);
+  const body = await response.json();
+  if (body.name !== name || body.version !== version || !/^[0-9a-f]{40}(?![\s\S])/.test(body.gitHead)) {
+    throw new Error('registry returned ambiguous package/version/gitHead identity');
+  }
+  return body;
+}
+
+export async function inspectVersion(cwd = process.cwd(), expectedVersion) {
   const manifest = JSON.parse(readFileSync(resolve(cwd, 'package.json'), 'utf8'));
   const shrinkwrap = JSON.parse(readFileSync(resolve(cwd, 'npm-shrinkwrap.json'), 'utf8'));
   validateReleaseShrinkwrap(manifest, shrinkwrap);
-  const currentHead = process.env.GITHUB_SHA ??
-    execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
-  const published = spawnSync(
-    'npm',
-    ['view', `${manifest.name}@${manifest.version}`, 'gitHead'],
-    { cwd, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] },
-  );
-
-  let publishedHead;
-  if (published.status === 0) {
-    publishedHead = published.stdout.trim();
-    if (!/^[0-9a-f]{40}$/.test(publishedHead)) {
-      throw new Error(`npm returned an invalid gitHead for ${manifest.name}@${manifest.version}`);
-    }
+  if (manifest.name !== '@somewhere-tech/cli' || (expectedVersion && manifest.version !== expectedVersion)) {
+    throw new Error('candidate package/version identity mismatch');
   }
-
+  const currentHead = execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+  const published = await readPublishedVersion(manifest.name, manifest.version);
+  const publishedHead = published?.gitHead;
   let hasReleaseInputDrift = false;
   if (publishedHead !== undefined && publishedHead !== currentHead) {
     ensureCommit(publishedHead, cwd);
@@ -111,14 +113,15 @@ function main() {
   }
   const mode = classifyPublishedVersion(publishedHead, currentHead, hasReleaseInputDrift);
 
-  writeOutput('version', manifest.version);
+  return { version: manifest.version, mode, publishedHead, currentHead };
+}
+
+async function main() {
+  const { version, mode, publishedHead } = await inspectVersion();
+  writeOutput('version', version);
   writeOutput('mode', mode);
-  if (mode === 'release') {
-    console.log(`▲ ${manifest.name}@${manifest.version} is not on npm — this push releases it.`);
-  } else if (mode === 'in-sync') {
-    console.log(`✓ ${manifest.name}@${manifest.version} release inputs match the published commit.`);
-  }
+  console.log(JSON.stringify({ version, mode, publishedHead }));
 }
 
 const entrypoint = process.argv[1] ? resolve(process.argv[1]) : undefined;
-if (entrypoint === fileURLToPath(import.meta.url)) main();
+if (entrypoint === fileURLToPath(import.meta.url)) await main();

@@ -3,7 +3,6 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import {
   mkdirSync,
   mkdtempSync,
-  readFileSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -13,6 +12,7 @@ import { fileURLToPath } from 'node:url';
 import test from 'node:test';
 import {
   classifyPublishedVersion,
+  inspectVersion,
   releaseInputsDiffer,
   validateReleaseShrinkwrap,
 } from '../scripts/version-guard.mjs';
@@ -21,25 +21,8 @@ function git(cwd, ...args) {
   return execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
 }
 
-test('both CLI publishers pin the same npm before release gates and keep provenance', () => {
-  const workflows = ['publish.yml', 'version-guard.yml'].map((file) =>
-    readFileSync(fileURLToPath(new URL(`../.github/workflows/${file}`, import.meta.url)), 'utf8')
-  );
-  const pins = workflows.map((workflow) => workflow.match(/^\s+- run: npm install -g npm@(\d+\.\d+\.\d+)$/m));
-  assert.ok(pins.every(Boolean), 'each publisher must pin npm');
-  assert.equal(pins[0][1], pins[1][1]);
-  for (const [index, workflow] of workflows.entries()) {
-    assert.ok(pins[index].index < workflow.search(/^\s+(?:- run: )?npm ci$/m));
-    assert.ok(pins[index].index < workflow.indexOf('npm publish --provenance --access public'));
-    assert.match(workflow, /^  id-token: write\b/m);
-  }
-  const guard = workflows[1];
-  assert.ok(guard.indexOf('node scripts/version-guard.mjs') < guard.indexOf('npm ci'));
-  assert.match(guard, /- name: Gate \(build \+ tests\)\n\s+if: steps\.compare\.outputs\.mode == 'release'/);
-  assert.match(guard, /- name: Publish to npm \(provenance\)\n\s+if: steps\.compare\.outputs\.mode == 'release'/);
-});
-
-test('version guard accepts unrelated descendants and rejects release-input drift', () => {
+test('version guard accepts unrelated descendants and rejects release-input drift', async () => {
+  const originalFetch = globalThis.fetch;
   const root = mkdtempSync(join(tmpdir(), 'somewhere-version-guard-'));
   try {
     git(root, 'init', '--quiet', '--initial-branch=master');
@@ -48,13 +31,17 @@ test('version guard accepts unrelated descendants and rejects release-input drif
     git(root, 'config', 'commit.gpgsign', 'false');
     mkdirSync(join(root, 'src'));
     mkdirSync(join(root, 'server'));
-    writeFileSync(join(root, 'package.json'), '{"version":"1.0.0"}\n');
-    writeFileSync(join(root, 'npm-shrinkwrap.json'), '{"version":"1.0.0"}\n');
+    writeFileSync(join(root, 'package.json'), '{"name":"@somewhere-tech/cli","version":"1.0.0"}\n');
+    writeFileSync(join(root, 'npm-shrinkwrap.json'), '{"name":"@somewhere-tech/cli","version":"1.0.0","packages":{"":{"name":"@somewhere-tech/cli","version":"1.0.0"}}}\n');
     writeFileSync(join(root, 'src', 'index.ts'), 'export const value = 1;\n');
     writeFileSync(join(root, 'server', 'index.mjs'), 'export const server = 1;\n');
     git(root, 'add', '.');
     git(root, 'commit', '-m', 'published release');
     const publishedHead = git(root, 'rev-parse', 'HEAD');
+
+    globalThis.fetch = async () => ({ status: 200, ok: true, json: async () => ({ name: '@somewhere-tech/cli', version: '1.0.0', gitHead: publishedHead }) });
+    assert.equal((await inspectVersion(root, '1.0.0')).mode, 'in-sync');
+    await assert.rejects(inspectVersion(root, '2.0.0'), /identity mismatch/);
 
     writeFileSync(join(root, 'server', 'index.mjs'), 'export const server = 2;\n');
     git(root, 'add', 'server/index.mjs');
@@ -62,6 +49,10 @@ test('version guard accepts unrelated descendants and rejects release-input drif
     const serverHead = git(root, 'rev-parse', 'HEAD');
     assert.equal(releaseInputsDiffer(publishedHead, serverHead, root), false);
     assert.equal(classifyPublishedVersion(publishedHead, serverHead, false), 'in-sync');
+    const state = await inspectVersion(root, '1.0.0');
+    assert.equal(state.mode, 'in-sync');
+    assert.equal(state.publishedHead, publishedHead);
+    assert.notEqual(state.publishedHead, state.currentHead);
 
     writeFileSync(join(root, 'src', 'index.ts'), 'export const value = 2;\n');
     git(root, 'add', 'src/index.ts');
@@ -69,7 +60,11 @@ test('version guard accepts unrelated descendants and rejects release-input drif
     const cliHead = git(root, 'rev-parse', 'HEAD');
     assert.equal(releaseInputsDiffer(publishedHead, cliHead, root), true);
     assert.equal(classifyPublishedVersion(publishedHead, cliHead, true), 'drift');
+    assert.equal((await inspectVersion(root, '1.0.0')).mode, 'drift');
+    globalThis.fetch = async () => ({ status: 404 });
+    assert.equal((await inspectVersion(root, '1.0.0')).mode, 'release');
   } finally {
+    globalThis.fetch = originalFetch;
     rmSync(root, { recursive: true, force: true });
   }
 });
