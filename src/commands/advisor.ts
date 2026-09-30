@@ -1,3 +1,4 @@
+import {callAdvisorRun} from '../lib/advisor-runs.js';
 import { Command } from 'commander';
 import { error, printJson } from '../lib/output.js';
 import { callPlatformHelpTool } from '../lib/platform-tools.js';
@@ -67,13 +68,27 @@ export async function callAnonymousAdvisor(
 
 export function registerAdvisor(program: Command): void {
   program
-    .command('advisor <question>')
+    .command('advisor [question]')
     .description('Ask the somewhere.tech platform advisor; login adds linked-project context')
+    .option('--async', 'Use the durable Advisor candidate when enabled by the server')
+    .option('--resume <request-id>', 'Reconnect to the same saved Advisor request')
+    .option('--status <request-id>', 'Read one saved Advisor request status')
+    .option('--cancel <request-id>', 'Request cancellation of a saved Advisor run')
     .option('--json', 'Print the advisor response in a JSON envelope')
     .option('--file <path>', 'Attach a trimmed, redacted local file as context')
     .option('--no-context', 'Do not attach the linked project, previous run, or file')
-    .action(async (question: string, opts: { json?: boolean; file?: string; context?: boolean }) => {
+    .action(async (question: string, opts: { json?: boolean; file?: string; context?: boolean; async?:boolean;resume?:string;status?:string;cancel?:string }) => {
       try {
+        if(opts.async||opts.resume||opts.status||opts.cancel){
+          if([opts.resume,opts.status,opts.cancel].filter(Boolean).length>1)throw new Error('Use one resume, status or cancel operation.');
+          if(opts.file)throw new Error('File excerpts are not retained by the durable Advisor candidate. Supply the question and command diagnostics.');
+          const config=loadConfig(),localContext=opts.context===false?undefined:buildAdvisorContext(),context=config?.token&&config.temporary!==true?localContext:anonymousAdvisorContext(localContext);
+          const result=await callAdvisorRun({question,context,requestId:opts.resume??opts.status??opts.cancel,operation:opts.cancel?'cancel':opts.status?'status':'resume',wait:!opts.cancel&&!opts.status,progress:message=>process.stderr.write(message+'\n')});
+          if(opts.json)printJson(result);else process.stdout.write((result.answer??JSON.stringify(result))+'\n');
+          if(result.incomplete)process.exitCode=1;
+          return;
+        }
+        if(!question)throw new Error('Supply a question or a saved request to resume.');
         const config = loadConfig();
         const permanentCredential = !!config?.token && config.temporary !== true;
         const localContext = opts.context === false ? undefined : buildAdvisorContext(opts.file);
