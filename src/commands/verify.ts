@@ -1,3 +1,4 @@
+import { preflightBrowserActions } from '../lib/browser-flow-preflight.js';
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -622,6 +623,7 @@ export async function runVerification(
   client?: ApiClient,
 ): Promise<VerifyReport> {
   if (!target.url && !target.project_id) throw new Error('Verification needs a URL or project.');
+  preflightBrowserActions(flow.actions);
   const hasSessionSeed = flow.auth !== undefined || flow.local_storage !== undefined
     || flow.cookies !== undefined || flow.headers !== undefined;
   if (hasSessionSeed && !target.project_id && !(target.url && isLoopbackUrl(target.url))) {
@@ -1004,6 +1006,9 @@ export function createVerifyJourneyRun(
   };
 
   const run = async (): Promise<VerifyJourneyReport> => {
+    for (const [index, segment] of journey.journey.entries()) {
+      preflightBrowserActions(segment.actions, `journey[${index}].actions`);
+    }
     if (!target.project_id) {
       throw new Error('Multi-user verification needs --project <project>: every actor signs in to that project, and its browsers stay on its addresses.');
     }
