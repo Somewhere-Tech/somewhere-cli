@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.37.3
+
+### Added
+
+- Advisor requests can reconnect to the same saved request after a terminal closes or a connection fails. Use `somewhere advisor --resume <request-id>`, `--status <request-id>`, or `--cancel <request-id>`. The CLI saves the receipt before starting paid work and keeps account and anonymous request ownership separate.
+- When the platform enables durable Advisor requests, the ordinary `somewhere advisor` command adopts the returned request automatically and waits for its result. Earlier platform responses continue to work. Ctrl-C leaves the request available to resume.
+
+### Fixed
+
+- Retrying a durable request uses its original receipt instead of creating another paid request. Cancellation records intent; an unknown dispatch remains an unknown outcome.
+
 ## 0.31.12
 
 ### Fixed
