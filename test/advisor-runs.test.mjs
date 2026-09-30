@@ -3,6 +3,7 @@ import {test} from 'node:test';
 import {mkdtempSync,readdirSync,readFileSync,rmSync,statSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import {join} from 'node:path';
+import {spawn} from 'node:child_process';
 import {createServer} from 'node:http';
 
 test('durable Advisor CLI persists identity before POST, resumes lost acknowledgment and never starts a substitute run',async()=>{
@@ -32,6 +33,11 @@ test('durable Advisor CLI persists identity before POST, resumes lost acknowledg
     for(let i=0;i<31;i++){const status=await callAdvisorRun({requestId:id,operation:'status',wait:false});assert.equal(status.status,'in_progress');}
     assert.equal(billed,1);assert.equal(requests.filter(r=>r.path==='/advisor/runs').length,2);
     await callAdvisorRun({requestId:id,operation:'cancel',wait:false});assert.equal(billed,1);
+    const {saveConfig,clearConfig}=await import('../dist/lib/config.js');saveConfig({token:'smt_new_fixture',user:{email:'fixture@example.invalid'}});
+    await callAdvisorRun({requestId:id,operation:'status',wait:false});assert.equal(requests.at(-1).auth,undefined,'Signing in does not change anonymous run ownership');clearConfig();
     completed=true;const final=await callAdvisorRun({requestId:id,operation:'status',wait:false});assert.equal(final.answer,'Captured same response.');assert.equal(JSON.parse(readFileSync(join(dir,'advisor-runs',file),'utf8')).body,undefined,'Terminal local receipt drops retained question/context');
+    const command=spawn(process.execPath,['--input-type=module','-e',"import {Command} from 'commander';import {registerAdvisor} from './dist/commands/advisor.js';const program=new Command();registerAdvisor(program);await program.parseAsync(['node','somewhere','advisor','Explain a generic contract','--async','--json','--no-context']);"],{cwd:new URL('..',import.meta.url),env:{...process.env},stdio:['ignore','pipe','pipe']});
+    let stdout='',stderr='';command.stdout.on('data',data=>{stdout+=data;});command.stderr.on('data',data=>{stderr+=data;});const code=await new Promise(resolve=>command.on('close',resolve));assert.equal(code,0,stderr);assert.equal(JSON.parse(stdout).answer,'Captured same response.');assert.match(stderr,/To reconnect/);assert.ok(requests.every(r=>!r.path.startsWith('/health')));
+    saveConfig({token:'smt_account_fixture',user:{email:'fixture@example.invalid'}});const account=await callAdvisorRun({question:'Account question',wait:false});assert.equal(requests.at(-1).auth,'Bearer smt_account_fixture');const accountRecord=readFileSync(join(dir,'advisor-runs',account.request_id+'.json'),'utf8');assert.equal(accountRecord.includes('smt_account_fixture'),false,'Run receipt never duplicates bearer');clearConfig();const count=requests.length;await assert.rejects(callAdvisorRun({requestId:account.request_id,operation:'status',wait:false}),/Sign in to the account/);assert.equal(requests.length,count,'Account run cannot downgrade to anonymous after logout');
   }finally{server.closeAllConnections();await new Promise(resolve=>server.close(resolve));rmSync(dir,{recursive:true,force:true});}
 });
