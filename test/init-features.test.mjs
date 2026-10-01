@@ -34,6 +34,9 @@ const COMBINATIONS = [
   ['auth', 'headless'],
   ['auth,private-data', 'styled'],
   ['auth,private-data', 'headless'],
+  ['agent', 'styled'],
+  ['agent', 'headless'],
+  ['auth,private-data,agent', 'styled'],
 ];
 
 function tempDir(prefix = 'somewhere-init-features-') {
@@ -77,7 +80,7 @@ test('unknown modules, unoffered modules and unknown UI modes are usage errors',
 test('catalog is machine-readable and lists module files from the generator', () => {
   const catalog = initCatalog((selection) => createFeatureTemplate(selection, { appName: 'x' }));
   assert.equal(catalog.version, 1);
-  assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['private-data', ['auth']]]);
+  assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['private-data', ['auth']], ['agent', ['auth']]]);
   assert.ok(catalog.modules[0].files.includes('api/auth/[...path].ts'));
   assert.deepEqual(catalog.modules[1].files, [
     'db/schema.ts',
@@ -86,12 +89,24 @@ test('catalog is machine-readable and lists module files from the generator', ()
     'src/ui/NotesBoard.tsx',
     'types/notes.ts',
   ]);
+  assert.deepEqual(catalog.modules[2].files, [
+    'api/chat.ts',
+    'api/proposals.ts',
+    'db/schema.ts',
+    'flows/assistant-fixtures.json',
+    'src/data/useAssistant.ts',
+    'src/fixtures/assistant.ts',
+    'src/pages/AssistantFixturesPage.tsx',
+    'src/services/assistant.ts',
+    'src/ui/AssistantPanel.tsx',
+    'types/assistant.ts',
+  ]);
   assert.deepEqual(catalog.ui.map((u) => u.id), ['styled', 'headless']);
   assert.ok(catalog.ui[0].files.includes('src/styles/tokens.css'));
-  assert.deepEqual(catalog.ui[1].files, ['src/ui/AppShell.tsx', 'src/ui/AuthCard.tsx', 'src/ui/NotesBoard.tsx', 'src/ui/feedback.tsx']);
+  assert.deepEqual(catalog.ui[1].files, ['src/ui/AppShell.tsx', 'src/ui/AssistantPanel.tsx', 'src/ui/AuthCard.tsx', 'src/ui/NotesBoard.tsx', 'src/ui/feedback.tsx']);
   assert.ok(!catalog.ui[0].files.some((path) => path.startsWith('src/pages/')), 'pages are shared by both modes');
   assert.equal(catalog.defaults.ui, 'styled');
-  for (const id of ['private-files', 'payments', 'teams', 'public-sharing', 'password-reset', 'oauth', 'mfa']) {
+  for (const id of ['private-files', 'payments', 'teams', 'public-sharing', 'password-reset', 'oauth', 'mfa', 'agent-durable']) {
     assert.ok(catalog.not_offered.some((entry) => entry.id === id), id);
   }
   assert.deepEqual(JSON.parse(JSON.stringify(catalog)), catalog);
@@ -115,7 +130,7 @@ test('every combination separates types, services, hooks, pages and presentation
       'src/pages/HomePage.tsx',
       'src/ui/AuthCard.tsx',
     ]) assert.ok(files.includes(path), `${label}: ${path}`);
-    assert.equal(files.includes('db/schema.ts'), features.includes('private-data'), label);
+    assert.equal(files.includes('db/schema.ts'), features.includes('private-data') || features.includes('agent'), label);
     assert.equal(files.some((path) => path.startsWith('src/styles/')), ui === 'styled', label);
 
     // The packaged SDK route, byte-identical to the default starter's.
@@ -134,14 +149,14 @@ test('every combination separates types, services, hooks, pages and presentation
     assert.doesNotMatch(all, /fonts\.googleapis|@import url|https?:\/\/[^\s'"`]*\.(woff2?|ttf)/, `${label}: no remote fonts`);
     const pkg = JSON.parse(read('package.json'));
     assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@somewhere-tech/sdk', 'react', 'react-dom']);
-    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.2');
+    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.3');
     assert.equal(pkg.scripts.build, undefined);
   }
 });
 
 test('views take props only, and both UI modes share pages, hooks and view signatures', () => {
-  const styled = generate('auth,private-data', 'styled');
-  const plain = generate('auth,private-data', 'headless');
+  const styled = generate('auth,private-data,agent', 'styled');
+  const plain = generate('auth,private-data,agent', 'headless');
   for (const path of styled.result.created.filter((p) => /^(src\/(pages|auth|data|services)\/|types\/|src\/App|src\/routes)/.test(p))) {
     assert.equal(plain.read(path), styled.read(path), `${path} is shared`);
   }
@@ -151,18 +166,18 @@ test('views take props only, and both UI modes share pages, hooks and view signa
   }
   const { dir, result } = styled;
   const uiFiles = [...result.created.filter((path) => path.startsWith('src/ui/'))];
-  assert.equal(uiFiles.length, 4);
+  assert.equal(uiFiles.length, 5);
   for (const [root, path] of [...uiFiles.map((p) => [dir, p]), ...uiFiles.map((p) => [plain.dir, p])]) {
     const content = readFileSync(join(root, path), 'utf8');
     const imports = [...content.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
     for (const specifier of imports) {
-      assert.match(specifier, /^(react|\.\/[A-Za-z]+|\.\.\/routes|\.\.\/\.\.\/types\/(auth|notes))$/, `${path} imports ${specifier}`);
+      assert.match(specifier, /^(react|\.\/[A-Za-z]+|\.\.\/routes|\.\.\/\.\.\/types\/(auth|notes|assistant))$/, `${path} imports ${specifier}`);
     }
     assert.doesNotMatch(content, /import (?!type)[^;]*\.\.\/\.\.\/types/, `${path}: types are type-only imports`);
-    assert.doesNotMatch(content, /\buse(Auth|User|Notes|SignOut|CredentialsForm)\b|fetch\(/, path);
+    assert.doesNotMatch(content, /\buse(Auth|User|Notes|Assistant|SignOut|CredentialsForm)\b|fetch\(/, path);
   }
   // Deleting the look leaves behaviour intact: services/hooks never import ui or styles.
-  for (const path of ['src/services/auth.ts', 'src/services/notes.ts', 'src/auth/hooks.ts', 'src/data/useNotes.ts']) {
+  for (const path of ['src/services/auth.ts', 'src/services/notes.ts', 'src/services/assistant.ts', 'src/auth/hooks.ts', 'src/data/useNotes.ts', 'src/data/useAssistant.ts']) {
     assert.doesNotMatch(readFileSync(join(dir, path), 'utf8'), /\/ui\/|\.css'/, path);
   }
 });
@@ -338,6 +353,15 @@ test('every combination typechecks against the SDK and the generated somewhere:d
     // Runtime types are always generated; somewhere:data only with a schema.
     assert.equal(/declare module "somewhere:data"/.test(readFileSync(join(dir, 'src/__somewhere_data.d.ts'), 'utf8')), features.includes('private-data'));
 
+    if (features === 'agent') {
+      // Control: the declared tables type the handlers (an undeclared table fails).
+      const handler = join(dir, 'api/proposals.ts');
+      writeFileSync(handler, readFileSync(handler, 'utf8').replace("await sw.db.insert('tasks',", "await sw.db.insert('task',"));
+      const broken = await runTypecheck(dir);
+      assert.equal(broken.ok, false, 'undeclared table must fail');
+      assert.deepEqual([...new Set(broken.errors.map((e) => e.file))], ['api/proposals.ts']);
+    }
+
     if (features.includes('private-data')) {
       // Control: the generated declaration is what types the service.
       const service = join(dir, 'src/services/notes.ts');
@@ -384,7 +408,7 @@ test('--catalog --json needs no login, makes no request and writes nothing', asy
   const run = await cli(['--catalog', '--json'], dir, { signedIn: false });
   assert.equal(run.status, 0, run.stderr);
   const catalog = JSON.parse(run.stdout);
-  assert.deepEqual(catalog.modules.map((m) => m.id), ['auth', 'private-data']);
+  assert.deepEqual(catalog.modules.map((m) => m.id), ['auth', 'private-data', 'agent']);
   assert.deepEqual(readdirSync(dir), []);
   assert.deepEqual(requests, []);
 });

@@ -73,7 +73,7 @@ export function registerInit(program: Command) {
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
     .option('--bare', 'Create and link only: no starter source or dependencies (AGENTS.md/CLAUDE.md are still added when absent)')
     .option('--template <name>', 'Starter to write: auth (default, cookie sign-in) or minimal (no sign-in)', 'auth')
-    .option('--features <ids>', 'Generate selected modules into an empty directory, comma-separated: auth, private-data (see --catalog)')
+    .option('--features <ids>', 'Generate selected modules into an empty directory, comma-separated: auth, private-data, agent (see --catalog)')
     .option('--ui <mode>', 'With --features: styled (default; src/ui + design tokens) or headless (hooks and plain markup)')
     .option('--catalog', 'Print the module catalog for --features and exit; no login, project or files')
     .option('--dry-run', 'With --features: validate the selection and print the file plan; nothing is created')
@@ -93,7 +93,7 @@ export function registerInit(program: Command) {
         + '  somewhere init --catalog --json\n'
         + '  somewhere init --name my-app --features private-data --dry-run --json\n'
         + '  somewhere init --name my-app --features auth,private-data --ui styled\n'
-        + 'Requirements are added and reported (private-data adds auth). --features only\n'
+        + 'Requirements are added and reported (private-data and agent add auth). --features only\n'
         + 'writes into an empty directory and is checked before the project is created.\n',
     )
     .action(async (opts: InitOptions, command: Command) => {

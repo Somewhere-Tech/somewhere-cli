@@ -21,7 +21,7 @@ const PACKAGE_JSON = `{
     "typecheck": "somewhere typecheck"
   },
   "dependencies": {
-    "@somewhere-tech/sdk": "0.11.2",
+    "@somewhere-tech/sdk": "0.11.3",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -344,8 +344,9 @@ function PrivateRoutes({ user }: { user: User }) {
 }
 `;
 
-function mainTsx(styled: boolean): string {
+function mainTsx(styled: boolean, agent: boolean): string {
   const styles = styled ? `import './styles/tokens.css';\nimport './styles/app.css';\n` : '';
+  if (agent) return mainTsxWithFixtures(styles);
   return `import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { SomewhereAuthProvider } from '@somewhere-tech/sdk/react';
@@ -357,6 +358,35 @@ createRoot(document.getElementById('root')!).render(
     <SomewhereAuthProvider client={auth}>
       <App />
     </SomewhereAuthProvider>
+  </StrictMode>,
+);
+`;
+}
+
+// /fixtures is decided before the sign-in provider mounts: the provider checks
+// the session on mount, and a fixture preview must send no request at all.
+function mainTsxWithFixtures(styles: string): string {
+  return `import { StrictMode } from 'react';
+import { createRoot } from 'react-dom/client';
+import { SomewhereAuthProvider } from '@somewhere-tech/sdk/react';
+import { App } from './App';
+import { FIXTURES_PATH } from './fixtures/assistant';
+import { AssistantFixturesPage } from './pages/AssistantFixturesPage';
+import { auth } from './services/auth';
+${styles}
+// /fixtures renders declared preview states from static data, outside the
+// sign-in provider, so it sends no request. Everything else is the app.
+const preview = window.location.pathname === FIXTURES_PATH;
+
+createRoot(document.getElementById('root')!).render(
+  <StrictMode>
+    {preview ? (
+      <AssistantFixturesPage />
+    ) : (
+      <SomewhereAuthProvider client={auth}>
+        <App />
+      </SomewhereAuthProvider>
+    )}
   </StrictMode>,
 );
 `;
@@ -683,6 +713,780 @@ export function useNotes(): NotesController {
 }
 `;
 
+// -------------------------------------------------------------- agent: backend
+
+const AGENT_TABLES = `  // The effect. Only api/proposals.ts writes tasks, after the owner approves.
+  tasks: table(
+    { id: id(), title: text(), created_at: timestamp({ default: 'now' }) },
+    { scope: owner() },
+  ),
+  // What the assistant may do instead: draft and wait. tool_call_id is unique,
+  // so a repeated tool call with the same id leaves one proposal.
+  proposals: table(
+    {
+      id: id(),
+      tool_call_id: text({ unique: true }),
+      title: text(),
+      status: text({ default: 'pending' }), // pending | approved | rejected
+      created_at: timestamp({ default: 'now' }),
+    },
+    { scope: owner(), indexes: [['status']] },
+  ),
+`;
+
+const AGENT_SCHEMA_NOTE = `// tasks, proposals: owner() scopes every structured call in api/chat.ts and
+// api/proposals.ts to the signed-in caller. They have no client block, so the
+// browser reaches them only through those two functions.
+`;
+
+function schemaTs(privateData: boolean, agent: boolean): string {
+  if (!agent) return SCHEMA;
+  const imports = `import { id, owner, schema, table, text, timestamp } from 'somewhere/db';\n\n`;
+  if (!privateData) return imports + AGENT_SCHEMA_NOTE + 'export default schema({\n' + AGENT_TABLES + '});\n';
+  const notes = SCHEMA.slice(SCHEMA.indexOf('// notes:'));
+  return imports + AGENT_SCHEMA_NOTE + notes.replace(/\n\}\);\n$/, '\n' + AGENT_TABLES + '});\n');
+}
+
+const CHAT_API = `// api/chat.ts — one assistant conversation per signed-in person.
+//
+//   GET  /api/chat   → { messages: [{ role, text }] }   the saved transcript
+//   POST /api/chat   { message } → { reply, completion_reason, activity, spent_cents }
+//
+// The run is inline (sw.agent.run): it finishes inside this request, bounded by
+// maxSteps and maxSpendCents. There is no agent id and nothing to cancel; see
+// README.md before turning it into a durable sw.agent.start run.
+
+// Every signed-in person gets their own conversation under this one name: the
+// platform keys stored history by the verified user, so two people sending the
+// same id never see each other's turns.
+const CONVERSATION = 'assistant';
+
+const SYSTEM = [
+  'You help one person keep a short task list.',
+  'Call list_tasks before answering questions about their tasks.',
+  'You cannot add tasks. To suggest one, call propose_task; the person approves or rejects it in the page.',
+  'After proposing, say plainly that it is waiting for their approval.',
+].join(' ');
+
+type Activity = { tool: string; tool_call_id: string; ok: boolean; detail: string };
+
+function textOf(content: unknown): string {
+  if (typeof content === 'string') return content;
+  if (!Array.isArray(content)) return '';
+  return content
+    .map((block) => (block && typeof block === 'object' && 'type' in block && block.type === 'text'
+      && 'text' in block && typeof block.text === 'string' ? block.text : ''))
+    .join('');
+}
+
+async function transcript(sw: SomewhereRuntimeContext): Promise<Response> {
+  // Stored conversations are listed by their own id; ours is the one whose
+  // client id is CONVERSATION. Both calls are scoped to the signed-in caller.
+  const { conversations } = await sw.ai.conversations.list({ limit: 20 });
+  const mine = conversations.find((c) => c.client_conversation_id === CONVERSATION);
+  if (!mine) return Response.json({ messages: [] });
+  const conversation = await sw.ai.conversations.get(mine.id);
+  const messages = conversation.messages
+    .filter((m) => m.role === 'user' || m.role === 'assistant')
+    .map((m) => ({ role: m.role, text: textOf(m.content) }))
+    .filter((m) => m.text.trim() !== ''); // tool calls and results carry no text
+  return Response.json({ messages });
+}
+
+export default async (req: Request, sw: SomewhereRuntimeContext): Promise<Response> => {
+  await sw.auth.requireUser(req); // 401 AUTH_REQUIRED before a model call or read
+  if (req.method === 'GET') return transcript(sw);
+  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+
+  let body: unknown;
+  try { body = await req.json(); } catch { return Response.json({ error: 'INVALID_JSON' }, { status: 400 }); }
+  const message = body && typeof body === 'object' && 'message' in body && typeof body.message === 'string'
+    ? body.message.trim() : '';
+  if (!message || message.length > 2000) {
+    return Response.json({ error: 'VALIDATION_ERROR', message: 'Send a message of 1–2000 characters.' }, { status: 400 });
+  }
+
+  const activity: Activity[] = [];
+  try {
+    const result = await sw.agent.run({
+      conversation_id: CONVERSATION,
+      messages: [{ role: 'user', content: message }],
+      system: SYSTEM,
+      maxSteps: 4,
+      // Checked between billed calls: one call can cross it, and a step whose
+      // cost is still unknown ends the run with completion_reason 'cost_pending'.
+      maxSpendCents: 10,
+      tools: {
+        list_tasks: {
+          description: 'List this person’s tasks, newest first.',
+          inputSchema: { type: 'object', properties: {} },
+          execute: async (_input, { toolCallId }) => {
+            // owner(): returns only the signed-in caller's rows.
+            const { data } = await sw.db.from('tasks', {
+              columns: ['id', 'title'], order: [['created_at', 'desc']], limit: 50,
+            });
+            activity.push({ tool: 'list_tasks', tool_call_id: toolCallId, ok: true, detail: \`\${data.length} task(s)\` });
+            return data;
+          },
+        },
+        propose_task: {
+          description: 'Suggest one new task. It is NOT added until the person approves it.',
+          inputSchema: {
+            type: 'object',
+            properties: { title: { type: 'string', description: 'Short task title' } },
+            required: ['title'],
+          },
+          execute: async (input, { toolCallId }) => {
+            const title = typeof input.title === 'string' ? input.title.trim().slice(0, 200) : '';
+            if (!title) {
+              activity.push({ tool: 'propose_task', tool_call_id: toolCallId, ok: false, detail: 'missing title' });
+              throw new Error('title is required');
+            }
+            // Drafting is the only write the model can cause. toolCallId is the
+            // dedupe key: the same call id twice leaves one proposal.
+            await sw.db.insert('proposals', { tool_call_id: toolCallId, title }, { onConflict: 'ignore' });
+            activity.push({ tool: 'propose_task', tool_call_id: toolCallId, ok: true, detail: title });
+            return { status: 'waiting_for_approval', title };
+          },
+        },
+      },
+    });
+    return Response.json({
+      reply: result.text ?? '',
+      completion_reason: result.completion_reason,
+      activity,
+      // Non-enumerable on the result, so read it directly. null = not known yet.
+      spent_cents: result.total_cost_cents,
+    });
+  } catch (error) {
+    const code = error && typeof error === 'object' && 'code' in error ? String(error.code) : '';
+    if (code === 'AI_SPEND_CAP_EXCEEDED') {
+      return Response.json({
+        error: code,
+        message: 'This reply hit its spending limit and stopped. Anything listed under activity already happened.',
+        activity,
+      }, { status: 402 });
+    }
+    throw error;
+  }
+};
+`;
+
+const PROPOSALS_API = `// api/proposals.ts — the human approval step, and the only path to the effect.
+//
+//   GET  /api/proposals   → { proposals: pending[], tasks: [] }
+//   POST /api/proposals   { id, decision: 'approve' | 'reject' } → { proposal, task? }
+//
+// The assistant can only draft (api/chat.ts). A task row exists because the
+// signed-in owner sent this POST, never because a model said so.
+//
+// Approving and creating the task are two writes, not one transaction. The
+// approval is claimed first and is never reopened: if the task write fails or
+// its outcome is unknown, the answer is 500 TASK_CREATION_UNCONFIRMED and the
+// person checks their task list instead of approving again.
+
+export default async (req: Request, sw: SomewhereRuntimeContext): Promise<Response> => {
+  await sw.auth.requireUser(req);
+
+  if (req.method === 'GET') {
+    const [proposals, tasks] = await Promise.all([
+      sw.db.from('proposals', {
+        columns: ['id', 'title', 'created_at'], where: { status: 'pending' },
+        order: [['created_at', 'asc']], limit: 20,
+      }),
+      sw.db.from('tasks', { columns: ['id', 'title'], order: [['created_at', 'desc']], limit: 50 }),
+    ]);
+    return Response.json({ proposals: proposals.data, tasks: tasks.data });
+  }
+  if (req.method !== 'POST') return new Response('Method not allowed', { status: 405 });
+
+  let body: unknown;
+  try { body = await req.json(); } catch { return Response.json({ error: 'INVALID_JSON' }, { status: 400 }); }
+  const id = body && typeof body === 'object' && 'id' in body ? Number(body.id) : NaN;
+  const decision = body && typeof body === 'object' && 'decision' in body ? body.decision : null;
+  if (!Number.isInteger(id) || (decision !== 'approve' && decision !== 'reject')) {
+    return Response.json({ error: 'VALIDATION_ERROR', message: 'Send { id, decision: "approve" | "reject" }.' }, { status: 400 });
+  }
+
+  // Claim the decision first. The status guard makes a double click, a second
+  // tab, a retry, or another person's id (owner scope) a zero-change 409, so
+  // the task below is attempted at most once per proposal.
+  const claimed = await sw.db.update('proposals', {
+    set: { status: decision === 'approve' ? 'approved' : 'rejected' },
+    where: { id, status: 'pending' },
+  });
+  const proposal = claimed.data[0];
+  if (claimed.changes === 0 || !proposal) {
+    return Response.json({ error: 'NOT_PENDING', message: 'That proposal is gone or already decided.' }, { status: 409 });
+  }
+  if (decision === 'reject') return Response.json({ proposal });
+
+  try {
+    const made = await sw.db.insert('tasks', { title: String(proposal.title) });
+    return Response.json({ proposal, task: made.data[0] ?? null });
+  } catch {
+    // The write may have committed before the error reached us, so the
+    // proposal stays approved: reopening it could create the task twice.
+    return Response.json({
+      error: 'TASK_CREATION_UNCONFIRMED',
+      message: 'Your approval was recorded, but the task could not be confirmed. Refresh your task list; if it is missing, ask the assistant to propose it again.',
+      proposal,
+    }, { status: 500 });
+  }
+};
+`;
+
+// ------------------------------------------------------------- agent: frontend
+
+const ASSISTANT_TYPES = `export type ChatRole = 'user' | 'assistant';
+
+export interface ChatMessage {
+  role: ChatRole;
+  text: string;
+}
+
+/** One tool call from the last reply, as api/chat.ts reports it. */
+export interface ToolActivity {
+  tool: string;
+  tool_call_id: string;
+  ok: boolean;
+  detail: string;
+}
+
+/** A task the assistant drafted; it becomes a task only after approval. */
+export interface Proposal {
+  id: number | string;
+  title: string;
+}
+
+export interface AgentTask {
+  id: number | string;
+  title: string;
+}
+
+export type ProposalDecision = 'approve' | 'reject';
+
+/** api/chat.ts POST answer. \`spent_cents\` is null while the cost is not known yet. */
+export interface ChatReply {
+  reply: string;
+  completion_reason: string;
+  activity: ToolActivity[];
+  spent_cents: number | null;
+}
+
+export type AssistantStatus = 'loading' | 'ready' | 'error';
+
+/** Everything the panel draws. Real data and the fixtures both produce it. */
+export interface AssistantView {
+  status: AssistantStatus;
+  messages: ChatMessage[];
+  activity: ToolActivity[];
+  proposals: Proposal[];
+  tasks: AgentTask[];
+  error: string | null;
+}
+
+export interface AssistantController {
+  view: AssistantView;
+  draft: string;
+  limit: number;
+  /** True for fixture previews: every control is disabled and nothing is sent. */
+  readOnly: boolean;
+  setDraft(next: string): void;
+  canSend: boolean;
+  sending: boolean;
+  send(): Promise<void>;
+  /** The proposal whose decision is being saved, if one is. */
+  deciding: Proposal['id'] | null;
+  decide(id: Proposal['id'], decision: ProposalDecision): Promise<void>;
+  reload(): void;
+}
+`;
+
+const ASSISTANT_SERVICE = `import type { AgentTask, ChatMessage, ChatReply, Proposal, ProposalDecision, ToolActivity } from '../../types/assistant';
+
+// Calls to this app's own functions, api/chat.ts and api/proposals.ts. The
+// session cookie rides along; the server decides whose rows these are.
+
+export const MESSAGE_LIMIT = 2000;
+
+export class AssistantRequestError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+    /** Tool calls that already ran before the request failed (spend cap). */
+    readonly activity: ToolActivity[] = [],
+  ) {
+    super(message);
+    this.name = 'AssistantRequestError';
+  }
+}
+
+interface FailureBody {
+  message?: unknown;
+  activity?: unknown;
+}
+
+async function call<T>(path: string, init?: RequestInit): Promise<T> {
+  const response = await fetch(path, {
+    ...init,
+    credentials: 'include',
+    headers: { 'Content-Type': 'application/json' },
+  });
+  const body: unknown = await response.json().catch(() => null);
+  if (!response.ok) {
+    const failure: FailureBody = body && typeof body === 'object' ? body : {};
+    throw new AssistantRequestError(
+      typeof failure.message === 'string' ? failure.message : 'The request failed (' + response.status + ').',
+      response.status,
+      Array.isArray(failure.activity) ? (failure.activity as ToolActivity[]) : [],
+    );
+  }
+  return body as T;
+}
+
+export async function loadTranscript(): Promise<ChatMessage[]> {
+  return (await call<{ messages: ChatMessage[] }>('/api/chat')).messages;
+}
+
+export function loadLists(): Promise<{ proposals: Proposal[]; tasks: AgentTask[] }> {
+  return call('/api/proposals');
+}
+
+export function sendMessage(message: string): Promise<ChatReply> {
+  return call('/api/chat', { method: 'POST', body: JSON.stringify({ message }) });
+}
+
+export async function decideProposal(id: Proposal['id'], decision: ProposalDecision): Promise<void> {
+  await call('/api/proposals', { method: 'POST', body: JSON.stringify({ id, decision }) });
+}
+
+/** The reply as shown: a run that stopped early says why. */
+export function replyText(reply: ChatReply): string {
+  if (reply.completion_reason === 'model_done') return reply.reply;
+  return ((reply.reply ? reply.reply + ' ' : '') + '(stopped: ' + reply.completion_reason + ')');
+}
+
+export function isSessionEnded(reason: unknown): boolean {
+  return reason instanceof AssistantRequestError && reason.status === 401;
+}
+
+export function assistantErrorMessage(reason: unknown): string {
+  if (isSessionEnded(reason)) return 'Your session ended. Sign in again.';
+  if (reason instanceof TypeError) return 'Could not reach the server. Check your connection and try again.';
+  if (reason instanceof Error && reason.message) return reason.message;
+  return 'Something went wrong. Try again.';
+}
+`;
+
+const USE_ASSISTANT = `import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '@somewhere-tech/sdk/react';
+import type { AssistantController, AssistantView, Proposal, ProposalDecision } from '../../types/assistant';
+import {
+  AssistantRequestError,
+  assistantErrorMessage,
+  decideProposal,
+  isSessionEnded,
+  loadLists,
+  loadTranscript,
+  MESSAGE_LIMIT,
+  replyText,
+  sendMessage,
+} from '../services/assistant';
+
+const INITIAL: AssistantView = { status: 'loading', messages: [], activity: [], proposals: [], tasks: [], error: null };
+
+// Mounted inside App's per-user boundary, so a new account starts fresh.
+// Results that arrive after this view unmounted are dropped.
+export function useAssistant(): AssistantController {
+  const auth = useAuth();
+  const mounted = useRef(true);
+  const [view, setView] = useState<AssistantView>(INITIAL);
+  const [draft, setDraft] = useState('');
+  const [sending, setSending] = useState(false);
+  const [deciding, setDeciding] = useState<Proposal['id'] | null>(null);
+  const [reloadKey, setReloadKey] = useState(0);
+
+  useEffect(() => {
+    mounted.current = true;
+    return () => {
+      mounted.current = false;
+    };
+  }, []);
+
+  useEffect(() => {
+    let current = true;
+    setView((previous) => ({ ...previous, status: 'loading', error: null }));
+    Promise.all([loadTranscript(), loadLists()])
+      .then(([messages, lists]) => {
+        if (current) setView((previous) => ({ ...previous, status: 'ready', messages, ...lists }));
+      })
+      .catch((reason: unknown) => {
+        if (!current) return;
+        setView((previous) => ({ ...previous, status: 'error', error: assistantErrorMessage(reason) }));
+        if (isSessionEnded(reason)) void auth.getUser();
+      });
+    return () => {
+      current = false;
+    };
+  }, [reloadKey, auth]);
+
+  async function refreshLists() {
+    const lists = await loadLists();
+    if (mounted.current) setView((previous) => ({ ...previous, ...lists }));
+  }
+
+  function fail(reason: unknown) {
+    const ran = reason instanceof AssistantRequestError ? reason.activity : [];
+    setView((previous) => ({ ...previous, error: assistantErrorMessage(reason), activity: ran.length ? ran : previous.activity }));
+    if (isSessionEnded(reason)) void auth.getUser();
+  }
+
+  const message = draft.trim();
+  const canSend = view.status === 'ready' && !sending && message.length > 0 && message.length <= MESSAGE_LIMIT;
+
+  async function send() {
+    if (!canSend) return;
+    setSending(true);
+    setDraft('');
+    setView((previous) => ({ ...previous, error: null, activity: [], messages: [...previous.messages, { role: 'user', text: message }] }));
+    try {
+      const reply = await sendMessage(message);
+      if (!mounted.current) return;
+      setView((previous) => ({
+        ...previous,
+        activity: reply.activity,
+        messages: [...previous.messages, { role: 'assistant', text: replyText(reply) }],
+      }));
+      await refreshLists();
+    } catch (reason: unknown) {
+      if (mounted.current) fail(reason);
+    } finally {
+      if (mounted.current) setSending(false);
+    }
+  }
+
+  async function decide(id: Proposal['id'], decision: ProposalDecision) {
+    if (deciding !== null) return;
+    setDeciding(id);
+    setView((previous) => ({ ...previous, error: null }));
+    try {
+      await decideProposal(id, decision);
+      await refreshLists();
+    } catch (reason: unknown) {
+      if (!mounted.current) return;
+      fail(reason);
+      // A 409 means it was already decided elsewhere; show the current list.
+      await refreshLists().catch(() => undefined);
+    } finally {
+      if (mounted.current) setDeciding(null);
+    }
+  }
+
+  return {
+    view,
+    draft,
+    limit: MESSAGE_LIMIT,
+    readOnly: false,
+    setDraft,
+    canSend,
+    sending,
+    send,
+    deciding,
+    decide,
+    reload: () => setReloadKey((key) => key + 1),
+  };
+}
+`;
+
+const ASSISTANT_FIXTURES = `import type { AssistantController, AssistantView, ChatMessage } from '../../types/assistant';
+import { MESSAGE_LIMIT } from '../services/assistant';
+
+// Declared preview states for the assistant panel. /fixtures?state=<name>
+// renders one from this static data: no sign-in check, no API call, nothing
+// read or written. flows/assistant-fixtures.json screenshots each of them.
+// Add a state here and a goto/expect/screenshot triple to that flow.
+
+export const FIXTURES_PATH = '/fixtures';
+
+const longWord = 'Supercalifragilisticexpialidocious'.repeat(4);
+
+export const ASSISTANT_FIXTURES = {
+  loading: { status: 'loading', messages: [], activity: [], proposals: [], tasks: [], error: null },
+  empty: { status: 'ready', messages: [], activity: [], proposals: [], tasks: [], error: null },
+  error: {
+    status: 'ready',
+    messages: [{ role: 'user', text: 'Plan my week and add everything.' }],
+    activity: [{ tool: 'list_tasks', tool_call_id: 'toolu_fixture_1', ok: true, detail: '2 task(s)' }],
+    proposals: [],
+    tasks: [{ id: 1, title: 'Renew passport' }, { id: 2, title: 'Book dentist' }],
+    error: 'This reply hit its spending limit and stopped. Anything listed under activity already happened.',
+  },
+  populated: {
+    status: 'ready',
+    messages: [
+      { role: 'user', text: 'What is on my list, and should I add something for the trip?' },
+      { role: 'assistant', text: 'You have 2 tasks. I proposed “Pack chargers”; it is waiting for your approval.' },
+    ],
+    activity: [
+      { tool: 'list_tasks', tool_call_id: 'toolu_fixture_1', ok: true, detail: '2 task(s)' },
+      { tool: 'propose_task', tool_call_id: 'toolu_fixture_2', ok: true, detail: 'Pack chargers' },
+    ],
+    proposals: [{ id: 7, title: 'Pack chargers' }],
+    tasks: [{ id: 1, title: 'Renew passport' }, { id: 2, title: 'Book dentist' }],
+    error: null,
+  },
+  long: {
+    status: 'ready',
+    messages: Array.from({ length: 12 }, (_, i): ChatMessage => ({
+      role: i % 2 ? 'assistant' : 'user',
+      text: i === 5
+        ? 'An unbroken word: ' + longWord
+        : 'Turn ' + (i + 1) + '. ' + 'A longer message that wraps across several lines on a phone. '.repeat(3),
+    })),
+    activity: Array.from({ length: 4 }, (_, i) => ({
+      tool: 'propose_task',
+      tool_call_id: 'toolu_fixture_long_' + i,
+      ok: i !== 3,
+      detail: i === 3 ? 'missing title' : 'Step ' + (i + 1),
+    })),
+    proposals: Array.from({ length: 5 }, (_, i) => ({ id: 20 + i, title: i === 0 ? longWord : 'Proposed task number ' + (i + 1) + ' with a fairly long title' })),
+    tasks: Array.from({ length: 15 }, (_, i) => ({ id: 100 + i, title: 'Existing task ' + (i + 1) })),
+    error: null,
+  },
+} satisfies Record<string, AssistantView>;
+
+export type AssistantFixtureName = keyof typeof ASSISTANT_FIXTURES;
+
+export function assistantFixture(name: string): AssistantView | null {
+  return Object.hasOwn(ASSISTANT_FIXTURES, name) ? ASSISTANT_FIXTURES[name as AssistantFixtureName] : null;
+}
+
+/** A controller that renders the view and does nothing: every control is disabled. */
+export function fixtureController(view: AssistantView): AssistantController {
+  return {
+    view,
+    draft: '',
+    limit: MESSAGE_LIMIT,
+    readOnly: true,
+    setDraft: () => undefined,
+    canSend: false,
+    sending: false,
+    send: async () => undefined,
+    deciding: null,
+    decide: async () => undefined,
+    reload: () => undefined,
+  };
+}
+`;
+
+const ASSISTANT_FIXTURES_PAGE = `import { ASSISTANT_FIXTURES, assistantFixture, fixtureController } from '../fixtures/assistant';
+import { AssistantPanel } from '../ui/AssistantPanel';
+import { EmptyState } from '../ui/feedback';
+
+// /fixtures?state=<name>: the real panel drawn from static data. main.tsx
+// mounts this page outside the sign-in provider, so it sends no request.
+export function AssistantFixturesPage() {
+  const name = new URLSearchParams(window.location.search).get('state') ?? '';
+  const view = assistantFixture(name);
+  return (
+    <div className="content" data-fixture={view ? name : 'unknown'}>
+      <p className="hint" role="status">
+        {view ? 'Fixture: ' + name + '. Static preview data; nothing is sent.' : 'Unknown fixture.'}
+      </p>
+      {view ? (
+        <AssistantPanel assistant={fixtureController(view)} />
+      ) : (
+        <EmptyState title="Pick a declared state.">{Object.keys(ASSISTANT_FIXTURES).map((n) => '?state=' + n).join(', ')}</EmptyState>
+      )}
+    </div>
+  );
+}
+`;
+
+const ASSISTANT_FIXTURES_FLOW = `{
+  "actions": [
+    { "goto": "/fixtures?state=loading" },
+    { "expect": { "selector": "[data-fixture=\\"loading\\"] [data-status=\\"loading\\"]", "visible": true } },
+    { "screenshot": "fixture-loading" },
+    { "goto": "/fixtures?state=empty" },
+    { "expect": { "selector": "[data-fixture=\\"empty\\"] [data-status=\\"ready\\"]", "visible": true } },
+    { "screenshot": "fixture-empty" },
+    { "goto": "/fixtures?state=error" },
+    { "expect": { "selector": "[data-fixture=\\"error\\"] [role=\\"alert\\"]", "text": "spending limit" } },
+    { "screenshot": "fixture-error" },
+    { "goto": "/fixtures?state=populated" },
+    { "expect": { "selector": "[data-fixture=\\"populated\\"] [aria-label=\\"Waiting for your approval\\"]", "text": "Pack chargers" } },
+    { "screenshot": "fixture-populated" },
+    { "goto": "/fixtures?state=long" },
+    { "expect": { "selector": "[data-fixture=\\"long\\"] [data-role=\\"message\\"]", "count": 12 } },
+    { "screenshot": "fixture-long" }
+  ],
+  "viewports": ["desktop", "mobile"]
+}
+`;
+
+const STYLED_ASSISTANT_PANEL = `import type { FormEvent } from 'react';
+import type { AssistantController } from '../../types/assistant';
+
+export function AssistantPanel({ assistant }: { assistant: AssistantController }) {
+  const { view } = assistant;
+  const loading = view.status === 'loading';
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void assistant.send();
+  }
+
+  return (
+    <div className="assistant" data-status={view.status}>
+      <section className="panel assistant__chat" aria-label="Conversation">
+        <p className="panel__title">Assistant</p>
+        <p className="hint">It reads your tasks and drafts new ones. Nothing is added until you approve it.</p>
+        {loading ? <p className="muted" role="status">Loading your conversation…</p> : null}
+        {view.status === 'ready' && view.messages.length === 0 ? (
+          <p className="muted">No messages yet. Ask about your tasks, or ask for a plan.</p>
+        ) : null}
+        <ol className="transcript">
+          {view.messages.map((message, index) => (
+            <li key={index} data-role="message" className={'message message--' + message.role}>{message.text}</li>
+          ))}
+        </ol>
+        {view.error ? (
+          <div className="alert" role="alert">
+            <p>{view.error}</p>
+            {view.status === 'error' ? <button type="button" className="button button--quiet" onClick={assistant.reload}>Try again</button> : null}
+          </div>
+        ) : null}
+        <form className="composer" onSubmit={onSubmit} aria-label="Send a message">
+          <div className="field">
+            <label htmlFor="assistant-message">Message</label>
+            <textarea id="assistant-message" rows={2} maxLength={assistant.limit} disabled={loading || assistant.readOnly}
+              placeholder="What should I do this week?" value={assistant.draft}
+              onChange={(event) => assistant.setDraft(event.target.value)} />
+          </div>
+          <button type="submit" className="button" disabled={!assistant.canSend} aria-busy={assistant.sending}>
+            {assistant.sending ? 'Thinking…' : 'Send'}
+          </button>
+        </form>
+        {view.activity.length ? (
+          <details className="activity" open>
+            <summary>Tool activity for the last reply</summary>
+            <ol>
+              {view.activity.map((item, index) => (
+                <li key={item.tool_call_id + index} className={item.ok ? 'activity__item' : 'activity__item activity__item--failed'}>
+                  <strong>{item.tool}</strong> <span>{item.detail}</span> <code>{item.tool_call_id}</code>
+                </li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
+      </section>
+
+      <aside className="assistant__side">
+        {view.proposals.length ? (
+          <section className="panel" aria-label="Waiting for your approval">
+            <p className="section-title">Waiting for your approval</p>
+            <ul className="proposals">
+              {view.proposals.map((proposal) => (
+                <li key={proposal.id} className="proposal">
+                  <span className="proposal__title">{proposal.title}</span>
+                  <span className="actions">
+                    <button type="button" className="button" disabled={assistant.deciding !== null || assistant.readOnly}
+                      aria-busy={assistant.deciding === proposal.id} onClick={() => void assistant.decide(proposal.id, 'approve')}>Approve</button>
+                    <button type="button" className="button button--quiet" disabled={assistant.deciding !== null || assistant.readOnly}
+                      onClick={() => void assistant.decide(proposal.id, 'reject')}>Reject</button>
+                  </span>
+                </li>
+              ))}
+            </ul>
+          </section>
+        ) : null}
+        <section className="panel" aria-label="Your tasks">
+          <p className="section-title">Your tasks</p>
+          {view.status === 'ready' && view.tasks.length === 0 ? <p className="muted">No tasks yet.</p> : null}
+          <ul className="agent-tasks">
+            {view.tasks.map((task) => <li key={task.id}>{task.title}</li>)}
+          </ul>
+        </section>
+      </aside>
+    </div>
+  );
+}
+`;
+
+const PLAIN_ASSISTANT_PANEL = `import type { FormEvent } from 'react';
+import type { AssistantController } from '../../types/assistant';
+
+export function AssistantPanel({ assistant }: { assistant: AssistantController }) {
+  const { view } = assistant;
+  const loading = view.status === 'loading';
+  const locked = assistant.deciding !== null || assistant.readOnly;
+
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void assistant.send();
+  }
+
+  return (
+    <div data-status={view.status}>
+      <section aria-label="Conversation">
+        <h2>Assistant</h2>
+        <p>It reads your tasks and drafts new ones. Nothing is added until you approve it.</p>
+        {loading ? <p role="status">Loading your conversation…</p> : null}
+        {view.status === 'ready' && view.messages.length === 0 ? <p>No messages yet.</p> : null}
+        <ol>
+          {view.messages.map((message, index) => (
+            <li key={index} data-role="message"><strong>{message.role === 'user' ? 'You' : 'Assistant'}:</strong> {message.text}</li>
+          ))}
+        </ol>
+        {view.error ? (
+          <div role="alert">
+            <p>{view.error}</p>
+            {view.status === 'error' ? <button type="button" onClick={assistant.reload}>Try again</button> : null}
+          </div>
+        ) : null}
+        <form onSubmit={onSubmit} aria-label="Send a message">
+          <label htmlFor="assistant-message">Message</label>
+          <textarea id="assistant-message" rows={2} maxLength={assistant.limit} disabled={loading || assistant.readOnly}
+            value={assistant.draft} onChange={(event) => assistant.setDraft(event.target.value)} />
+          <button type="submit" disabled={!assistant.canSend} aria-busy={assistant.sending}>{assistant.sending ? 'Thinking…' : 'Send'}</button>
+        </form>
+        {view.activity.length ? (
+          <details open>
+            <summary>Tool activity for the last reply</summary>
+            <ol>
+              {view.activity.map((item, index) => (
+                <li key={item.tool_call_id + index}>{item.tool} {item.ok ? 'ok' : 'failed'}: {item.detail} ({item.tool_call_id})</li>
+              ))}
+            </ol>
+          </details>
+        ) : null}
+      </section>
+      {view.proposals.length ? (
+        <section aria-label="Waiting for your approval">
+          <h2>Waiting for your approval</h2>
+          <ul>
+            {view.proposals.map((proposal) => (
+              <li key={proposal.id}>
+                {proposal.title}{' '}
+                <button type="button" disabled={locked} onClick={() => void assistant.decide(proposal.id, 'approve')}>Approve</button>{' '}
+                <button type="button" disabled={locked} onClick={() => void assistant.decide(proposal.id, 'reject')}>Reject</button>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+      <section aria-label="Your tasks">
+        <h2>Your tasks</h2>
+        {view.status === 'ready' && view.tasks.length === 0 ? <p>No tasks yet.</p> : null}
+        <ul>{view.tasks.map((task) => <li key={task.id}>{task.title}</li>)}</ul>
+      </section>
+    </div>
+  );
+}
+`;
+
 // ---------------------------------------------------------------------- pages
 // One set of pages for both UI modes: hooks in, typed values and callbacks out.
 
@@ -730,7 +1534,28 @@ export function SignedInLayout({ user, children }: { user: User; children: React
 }
 `;
 
-function homePage(privateData: boolean): string {
+function homePage(privateData: boolean, agent: boolean): string {
+  if (agent) {
+    const notes = privateData;
+    return `import type { User } from '../../types/auth';
+import { useAssistant } from '../data/useAssistant';
+${notes ? "import { useNotes } from '../data/useNotes';\n" : ''}import { AssistantPanel } from '../ui/AssistantPanel';
+${notes ? "import { NotesBoard } from '../ui/NotesBoard';\n" : ''}import { SignedInLayout } from './SignedInLayout';
+
+// The assistant example is removable: delete it here, AssistantPanel,
+// useAssistant, services/assistant.ts, types/assistant.ts, src/fixtures/,
+// AssistantFixturesPage, the /fixtures branch in main.tsx, api/chat.ts,
+// api/proposals.ts and the tasks/proposals tables in db/schema.ts.
+export function HomePage({ user }: { user: User }) {
+  const assistant = useAssistant();
+${notes ? '  const notes = useNotes();\n' : ''}  return (
+    <SignedInLayout user={user}>
+${notes ? '      <NotesBoard notes={notes} />\n' : ''}      <AssistantPanel assistant={assistant} />
+    </SignedInLayout>
+  );
+}
+`;
+  }
   if (privateData) {
     return `import type { User } from '../../types/auth';
 import { useNotes } from '../data/useNotes';
@@ -1374,11 +2199,41 @@ const NOTES_CSS = `/* Notes example: delete with src/ui/NotesBoard.tsx. */
 }
 `;
 
+// The notes CSS already defines these; the assistant adds them when notes is absent.
+const ASSISTANT_SHARED_CSS = `.alert { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; justify-content: space-between; padding: var(--space-3) var(--space-4); border: 1px solid var(--color-danger); border-radius: var(--radius-control); color: var(--color-danger); background: var(--color-surface); }
+.alert p { margin: 0; }
+.section-title { margin: 0 0 var(--space-3); font-size: var(--text-sm); font-weight: 600; letter-spacing: 0.06em; text-transform: uppercase; color: var(--color-muted); }
+`;
+
+const ASSISTANT_CSS = `/* Assistant example: delete with src/ui/AssistantPanel.tsx. */
+.assistant { display: grid; grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr); gap: var(--space-6); align-items: start; margin-top: var(--space-8); }
+.assistant__side { display: grid; gap: var(--space-6); }
+.transcript { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
+.message { max-width: 85%; padding: var(--space-2) var(--space-3); border-radius: var(--radius-control); white-space: pre-wrap; overflow-wrap: anywhere; }
+.message--user { justify-self: end; background: var(--color-bg); }
+.message--assistant { justify-self: start; border: 1px solid var(--color-border); }
+.composer { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: var(--space-2); align-items: end; }
+.activity { color: var(--color-muted); font-size: var(--text-sm); }
+.activity ol { margin: var(--space-2) 0 0; padding-left: var(--space-6); }
+.activity code { overflow-wrap: anywhere; }
+.activity__item--failed strong { color: var(--color-danger); }
+.proposals, .agent-tasks { display: grid; gap: var(--space-3); margin: 0; padding: 0; list-style: none; }
+.proposal { display: grid; gap: var(--space-2); }
+.proposal__title, .agent-tasks li { overflow-wrap: anywhere; }
+.agent-tasks li { padding-bottom: var(--space-2); border-bottom: 1px solid var(--color-border); }
+
+@media (max-width: 760px) {
+  .assistant { grid-template-columns: 1fr; }
+  .composer { grid-template-columns: 1fr; }
+}
+`;
+
 // --------------------------------------------------------------------- readme
 
 function readme(selection: InitSelection): string {
   const styled = selection.ui === 'styled';
   const privateData = selection.modules.includes('private-data');
+  const agent = selection.modules.includes('agent');
   const lines = [
     '# somewhere.tech app',
     '',
@@ -1392,6 +2247,9 @@ function readme(selection: InitSelection): string {
   ];
   if (privateData) {
     lines.push('- Data: `db/schema.ts` (tables and browser permissions), `src/services/notes.ts` (calls), `src/data/useNotes.ts` (state). The notes example is removable.');
+  }
+  if (agent) {
+    lines.push('- Assistant: `api/chat.ts` (the agent run and its tools), `api/proposals.ts` (approve/reject), `src/services/assistant.ts`, `src/data/useAssistant.ts`, `src/ui/AssistantPanel.tsx`. Preview states: `src/fixtures/assistant.ts`.');
   }
   lines.push(
     '',
@@ -1419,6 +2277,54 @@ function readme(selection: InitSelection): string {
       'length limits are form checks only. Contract: `somewhere docs declared-data`.',
     );
   }
+  if (agent) {
+    lines.push(
+      '',
+      '## Assistant',
+      '',
+      '`api/chat.ts` runs `sw.agent.run` inline inside the request: no agent id, nothing',
+      'to cancel, no streaming. The reply and its tool activity arrive together.',
+      '',
+      '- Reads: `list_tasks` uses `sw.db.from`. `tasks` and `proposals` are `owner()`,',
+      '  so every structured call is scoped to the person who sent the message. Keep',
+      '  tools on these calls; do not switch them to server-authority reads.',
+      '- Effects need a person. `propose_task` only inserts a pending proposal.',
+      '  `POST /api/proposals` writes the task after the owner clicks Approve; its',
+      '  guarded update makes a double click, a second tab or another user\'s id a',
+      '  409 that writes nothing.',
+      '- Approval and task creation are two writes, not one transaction. The approval',
+      '  is claimed first and never reopened. If the task write fails or its outcome',
+      '  is unknown, the answer is 500 `TASK_CREATION_UNCONFIRMED`: refresh the task',
+      '  list, and if the task is missing ask the assistant to propose it again.',
+      '- `toolCallId` is a dedupe key, not exactly-once. Proposals are unique on it,',
+      '  so the same call id twice leaves one row. Inline it is the model\'s tool-use',
+      '  id; durable runs use `agentId:turn:index`.',
+      '- Spend is bounded, not priced in advance: `maxSteps: 4`, `maxSpendCents: 10`,',
+      '  checked between billed calls, so one call can cross it. Then the turn answers',
+      '  402 `AI_SPEND_CAP_EXCEEDED` and lists the tools that already ran. A step whose',
+      '  cost is unknown ends with `completion_reason: \'cost_pending\'`; the page shows',
+      '  every reason other than `model_done`.',
+      '- History is saved by the platform under `conversation_id: \'assistant\'`, keyed',
+      '  to the verified user. `GET /api/chat` reads it back.',
+      '- No `model` is set, so the run uses the `sw.ai.chat` default; add `provider`',
+      '  and `model` from `ai_catalog` to choose another.',
+      '',
+      'Making it durable (`sw.agent.start`, `sw.agent.cancel`) is a separate design:',
+      'step callbacks run without the original request, so the owner-scoped tools',
+      'above would have no signed-in user. Cancel stops later steps; it does not undo',
+      'a tool that already ran. `somewhere docs sw.agent`',
+      '',
+      '### Preview states',
+      '',
+      '`/fixtures?state=loading|empty|error|populated|long` draws the real panel from',
+      '`src/fixtures/assistant.ts`. `src/main.tsx` mounts it outside the sign-in',
+      'provider, so it sends no request and reads or writes nothing; controls are',
+      'disabled. `somewhere verify --url <app-url> --flow flows/assistant-fixtures.json`',
+      'screenshots each state on desktop and mobile. It reports page errors; it does',
+      'not map them to a line in `src/`. Fixtures render your own source; they are',
+      'not a sandbox for code you did not write.',
+    );
+  }
   lines.push(
     '',
     '## Run',
@@ -1444,6 +2350,7 @@ export function extensionPoints(selection: InitSelection): Record<string, string
     auth: 'src/auth/hooks.ts',
   };
   if (selection.modules.includes('private-data')) points.data = 'db/schema.ts, src/services/notes.ts, src/data/useNotes.ts';
+  if (selection.modules.includes('agent')) points.assistant = 'api/chat.ts, api/proposals.ts, src/data/useAssistant.ts, src/fixtures/assistant.ts';
   return points;
 }
 
@@ -1455,6 +2362,7 @@ export function createFeatureTemplate(
 ): InitScaffoldFile[] {
   const styled = selection.ui === 'styled';
   const privateData = selection.modules.includes('private-data');
+  const agent = selection.modules.includes('agent');
   const files: InitScaffoldFile[] = [
     { path: '.gitignore', content: 'node_modules\ndist\nbuild\n.env\n' },
     { path: 'AGENTS.md', content: INIT_AGENTS_MD },
@@ -1465,7 +2373,7 @@ export function createFeatureTemplate(
     { path: 'index.html', content: indexHtml(options.appName) },
     { path: 'api/auth/[...path].ts', content: AUTH_API },
     { path: 'types/auth.ts', content: AUTH_TYPES },
-    { path: 'src/main.tsx', content: mainTsx(styled) },
+    { path: 'src/main.tsx', content: mainTsx(styled, agent) },
     { path: 'src/App.tsx', content: APP },
     { path: 'src/config.ts', content: configTs(options.appName) },
     { path: 'src/routes.ts', content: ROUTES },
@@ -1473,7 +2381,7 @@ export function createFeatureTemplate(
     { path: 'src/auth/hooks.ts', content: AUTH_HOOKS },
     { path: 'src/pages/SignInPage.tsx', content: SIGN_IN_PAGE },
     { path: 'src/pages/SignedInLayout.tsx', content: SIGNED_IN_LAYOUT },
-    { path: 'src/pages/HomePage.tsx', content: homePage(privateData) },
+    { path: 'src/pages/HomePage.tsx', content: homePage(privateData, agent) },
     { path: 'src/pages/NotFoundPage.tsx', content: NOT_FOUND_PAGE },
     { path: 'src/ui/feedback.tsx', content: styled ? STYLED_FEEDBACK : PLAIN_FEEDBACK },
     { path: 'src/ui/AuthCard.tsx', content: styled ? STYLED_AUTH_CARD : PLAIN_AUTH_CARD },
@@ -1482,16 +2390,29 @@ export function createFeatureTemplate(
   if (styled) {
     files.push(
       { path: 'src/styles/tokens.css', content: TOKENS_CSS },
-      { path: 'src/styles/app.css', content: privateData ? APP_CSS + '\n' + NOTES_CSS : APP_CSS },
+      { path: 'src/styles/app.css', content: [APP_CSS, ...(privateData ? [NOTES_CSS] : []), ...(agent ? [privateData ? ASSISTANT_CSS : ASSISTANT_SHARED_CSS + ASSISTANT_CSS] : [])].join('\n') },
     );
   }
+  if (privateData || agent) files.push({ path: 'db/schema.ts', content: schemaTs(privateData, agent) });
   if (privateData) {
     files.push(
-      { path: 'db/schema.ts', content: SCHEMA },
       { path: 'types/notes.ts', content: NOTES_TYPES },
       { path: 'src/services/notes.ts', content: NOTES_SERVICE },
       { path: 'src/data/useNotes.ts', content: USE_NOTES },
       { path: 'src/ui/NotesBoard.tsx', content: styled ? STYLED_NOTES_BOARD : PLAIN_NOTES_BOARD },
+    );
+  }
+  if (agent) {
+    files.push(
+      { path: 'api/chat.ts', content: CHAT_API },
+      { path: 'api/proposals.ts', content: PROPOSALS_API },
+      { path: 'types/assistant.ts', content: ASSISTANT_TYPES },
+      { path: 'src/services/assistant.ts', content: ASSISTANT_SERVICE },
+      { path: 'src/data/useAssistant.ts', content: USE_ASSISTANT },
+      { path: 'src/fixtures/assistant.ts', content: ASSISTANT_FIXTURES },
+      { path: 'src/pages/AssistantFixturesPage.tsx', content: ASSISTANT_FIXTURES_PAGE },
+      { path: 'src/ui/AssistantPanel.tsx', content: styled ? STYLED_ASSISTANT_PANEL : PLAIN_ASSISTANT_PANEL },
+      { path: 'flows/assistant-fixtures.json', content: ASSISTANT_FIXTURES_FLOW },
     );
   }
   return files;

@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.37.6
+
+### Added
+
+- `somewhere init --features agent` adds a signed-in assistant to the auth starter. It runs inline `sw.agent.run` with at most 4 steps and 10 cents per reply, and the conversation is saved on the server. It shows the tools each reply used. The assistant can read the user's tasks but only proposes new ones; a task is written when the user approves it. Approval and task creation are two writes, not one transaction: a task write that fails or whose outcome is unknown answers `TASK_CREATION_UNCONFIRMED` and never reopens the approval, so approving again cannot create a duplicate. Owner-scoped `tasks`/`proposals` tables are reached only through `api/chat.ts` and `api/proposals.ts`. `/fixtures?state=loading|empty|error|populated|long` renders preview states from static data without a request, and `flows/assistant-fixtures.json` screenshots them with `somewhere verify`. Durable runs, cancel, streaming and memory are not generated (`agent-durable` in `--catalog`).
+
+### Changed
+
+- The default auth starter and `--features` starters pin `@somewhere-tech/sdk` 0.11.3. Its auth code is identical to 0.11.2.
+
 ## 0.37.3
 
 ### Added

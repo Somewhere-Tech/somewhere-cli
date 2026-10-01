@@ -2,7 +2,7 @@
 // plugin system: each module names what it requires, and the resolver adds
 // those requirements and reports them. Files come from init-feature-template.ts.
 
-export const INIT_MODULE_IDS = ['auth', 'private-data'] as const;
+export const INIT_MODULE_IDS = ['auth', 'private-data', 'agent'] as const;
 export type InitModuleId = (typeof INIT_MODULE_IDS)[number];
 
 export const INIT_UI_MODES = ['styled', 'headless'] as const;
@@ -25,6 +25,11 @@ const MODULES: readonly InitModuleDefinition[] = [
     summary: 'A notes table each signed-in user owns (db/schema.ts owner()), read and written from the browser through the generated somewhere:data client, with form validation, error mapping, no-change results, and a per-user reset on sign-out or account switch.',
     requires: ['auth'],
   },
+  {
+    id: 'agent',
+    summary: 'A signed-in assistant on sw.agent.run (inline, at most 4 steps and 10 cents per reply): server-saved conversation, tool activity, and task proposals the user approves or rejects before anything is written. Owner-scoped tasks/proposals tables in db/schema.ts, reached only through api/chat.ts and api/proposals.ts. Static preview states at /fixtures?state=loading|empty|error|populated|long send no requests; flows/assistant-fixtures.json screenshots them with somewhere verify.',
+    requires: ['auth'],
+  },
 ];
 
 const UI_MODES: readonly { id: InitUiMode; summary: string }[] = [
@@ -41,6 +46,7 @@ const NOT_OFFERED: readonly { id: string; reason: string }[] = [
   { id: 'payments', reason: 'Not generated. See `somewhere docs payments`.' },
   { id: 'teams', reason: 'Not generated. See member() scopes in `somewhere docs declared-data`.' },
   { id: 'public-sharing', reason: 'Not generated. See publicRead in `somewhere docs declared-data`.' },
+  { id: 'agent-durable', reason: 'Not generated. The agent module runs inline; durable runs, cancel, streaming, memory and external tools need their own design. See `somewhere docs sw.agent`.' },
 ];
 
 export interface InitSelection {
