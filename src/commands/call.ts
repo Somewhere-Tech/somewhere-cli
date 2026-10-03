@@ -33,7 +33,7 @@ export type CallScope =
 /** Decide which project a generic tool call runs against (tsk_0a027a93).
  *  An explicit `project_id` always wins. In a linked directory, a tool that
  *  takes `project_id` runs against the linked project, as the first-class
- *  commands do; results spanning every project need `--all-projects`.
+ *  commands do; `--all-projects` omits that default, leaving scope to the tool.
  *  `tool` is the catalog entry, looked up only when injection is possible. */
 export function chooseCallScope(
   args: Record<string, unknown>,
@@ -53,7 +53,7 @@ export function chooseCallScope(
     kind: 'linked',
     args: { ...args, project_id: linked.project_id },
     note: `Using the linked project ${label} (.somewhere.json). `
-      + 'Pass "project_id" to choose another, or --all-projects for every project.',
+      + 'Pass "project_id" to choose another, or --all-projects to omit the default; the tool\'s own scope applies.',
   };
 }
 
@@ -65,7 +65,7 @@ export function registerCall(program: Command): void {
     .option('--all-projects', 'In a linked directory, do not default project_id to the linked project')
     .option('--json', 'Print stable JSON output')
     .addHelpText('after', '\nIn a directory linked with .somewhere.json, a tool that takes project_id runs against the\n'
-      + 'linked project unless the JSON names one. Use --all-projects for account-wide results.\n')
+      + 'linked project unless the JSON names one. Use --all-projects to omit the default; the tool decides its scope.\n')
     .action(async (
       tool: string | undefined,
       jsonArgs: string | undefined,

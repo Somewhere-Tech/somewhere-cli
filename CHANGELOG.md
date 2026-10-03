@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.37.7
+
+### Fixed
+
+- Self-update verifies the published provenance correctly. A refused update exits with an error and prints the npm installation fallback; versions at least one minor release behind get a daily warning.
+- `somewhere call` uses the linked project for tools that take `project_id`. An explicit ID wins; `--all-projects` omits the default and leaves scope to the tool.
+- `somewhere docs` opens the index instead of the entire manual. Use `docs search`, `--section`, or `--full` to read more.
+- Text output from `verify` includes eval results.
+- Browser commands support closing a named session and selecting an app user. User selection refuses an incomplete search rather than guessing.
+- `preview --once` syncs and exits; `preview link` produces a fresh link for an open preview.
+
 ## 0.37.6
 
 ### Added
