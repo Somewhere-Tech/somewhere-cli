@@ -196,7 +196,7 @@ export function registerEnv(program: Command) {
         if (result.server_reference) info(`Server: ${result.server_reference}`);
         if (result.browser_reference) info(`Browser: ${result.browser_reference}`);
         if (result.browser_guidance) info(dim(result.browser_guidance));
-        if (result.requires_deploy) info(dim('Deploy again for this change to reach your app.'));
+        if (result.requires_deploy) info(dim('This value reaches your app on its next deploy.'));
         const warnings = Array.isArray(result?.warnings) ? result.warnings : [];
         for (const w of warnings) if (typeof w === 'string') warn(w);
       } catch (err) {

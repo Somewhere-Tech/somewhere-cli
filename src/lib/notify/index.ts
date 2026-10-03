@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import type { NoticeContext, NoticeProvider } from './types.js';
-import { updateProvider } from './providers/update.js';
+import { getOutdatedWarning, updateProvider } from './providers/update.js';
 
 /** Registered notice sources. Add a provider here to surface a new kind of notice;
  *  it inherits the gate + stderr emission below, so it can never reach stdout,
@@ -36,20 +36,35 @@ function currentVersion(): string {
 /** The one gate every provider inherits. If this returns false, NO provider runs,
  *  so notices can never appear on non-interactive output, in CI, during a
  *  safety/pass-through command, or when the user opted out. */
-function notificationsAllowed(argv: string[]): boolean {
-  if (!process.stderr.isTTY) return false; // agents, pipes, redirects, files
+function notificationsAllowed(argv: string[], isTTY: boolean): boolean {
+  if (!isTTY) return false; // agents, pipes, redirects, files
   if (process.env.CI) return false; // CI logs
   if (process.env.SOMEWHERE_NO_NOTIFICATIONS) return false; // global opt-out
   if (subcommandSuppressesNotifications(argv)) return false;
   return true;
 }
 
+export interface CollectNoticesOptions {
+  isTTY?: boolean;
+  outdatedWarning?: (currentVersion: string) => Promise<string | null>;
+}
+
 /** Run every provider (gated, in parallel, fail-open) and return the notices to
  *  display. Print these to STDERR after the command (e.g. via process.on('exit'))
- *  so they never touch stdout and land as a parting line. */
-export async function collectNotices(argv: string[]): Promise<string[]> {
+ *  so they never touch stdout and land as a parting line.
+ *
+ *  Non-interactive callers (agents, pipes) get no providers, only the
+ *  once-a-day outdated warning (CI and the opt-out get nothing): a CLI a minor release or more behind is the
+ *  one notice an agent must see, because current docs describe commands it
+ *  does not have yet. */
+export async function collectNotices(argv: string[], options: CollectNoticesOptions = {}): Promise<string[]> {
   try {
-    if (!notificationsAllowed(argv)) return [];
+    const isTTY = options.isTTY ?? Boolean(process.stderr.isTTY);
+    if (!notificationsAllowed(argv, isTTY)) {
+      if (isTTY || process.env.CI || process.env.SOMEWHERE_NO_NOTIFICATIONS || subcommandSuppressesNotifications(argv)) return [];
+      const warning = await (options.outdatedWarning ?? getOutdatedWarning)(currentVersion()).catch(() => null);
+      return warning ? [warning] : [];
+    }
     const ctx: NoticeContext = { argv, currentVersion: currentVersion() };
     const results = await Promise.all(PROVIDERS.map((p) => p.getNotice(ctx).catch(() => null)));
     return results.filter((n): n is string => typeof n === 'string' && n.length > 0);

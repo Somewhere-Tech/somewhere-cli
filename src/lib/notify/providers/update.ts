@@ -84,6 +84,82 @@ export async function getUpdateNotice(
   return `${teal('▲ somewhere CLI update available')}  ${dim(currentVersion)} → ${teal(cache.latest)}  Run ${teal('somewhere update')} to upgrade.`;
 }
 
+/** True when `latest` is at least one minor (or major) release ahead of
+ *  `current`. Patch-only gaps stay quiet for agents: they rarely change a
+ *  command or flag the docs describe. */
+export function isMinorBehind(current: string, latest: string): boolean {
+  const parse = (v: string) => v.split('-')[0].split('.').map((n) => Number(n));
+  const c = parse(current);
+  const l = parse(latest);
+  if (c.length < 3 || l.length < 3 || [...c, ...l].some((n) => Number.isNaN(n))) return false;
+  return l[0] > c[0] || (l[0] === c[0] && l[1] > c[1]);
+}
+
+/** The npm command that installs the latest release without `somewhere update`.
+ *  CLIs at 0.37.0 and older cannot self-update (their verifier predates npm's
+ *  current provenance format), so every outdated message names this path. */
+export const NPM_UPDATE_COMMAND = `npm i -g ${PACKAGE}@latest`;
+
+export function outdatedMessage(currentVersion: string, latest: string): string {
+  return `! somewhere CLI ${currentVersion} is behind the latest release ${latest}; `
+    + 'commands and flags in the current docs may be missing. '
+    + `Update with: somewhere update (or ${NPM_UPDATE_COMMAND})`;
+}
+
+/** The latest published version as last cached, without any network read.
+ *  `somewhere docs` uses this so reading docs never waits on npm; the daily
+ *  refresh happens in the notice pipeline that runs alongside every command. */
+export function cachedLatestVersion(cachePath = CACHE_PATH): string | null {
+  return readCache(cachePath)?.latest ?? null;
+}
+
+/** The latest published version from the daily cache, refreshing it when stale. */
+export async function latestKnownVersion(options: UpdateNoticeOptions = {}): Promise<string | null> {
+  const cachePath = options.cachePath ?? CACHE_PATH;
+  const now = options.now ?? Date.now;
+  const getLatest = options.fetchLatest ?? fetchLatest;
+  const cache = readCache(cachePath);
+  const checkedAt = now();
+  if (cache && checkedAt - cache.checkedAt <= ONE_DAY) return cache.latest;
+  const latest = (await getLatest()) ?? cache?.latest ?? null;
+  writeCache(latest, checkedAt, cachePath);
+  return latest;
+}
+
+export interface OutdatedWarningOptions extends UpdateNoticeOptions {
+  warnedPath?: string;
+}
+
+const WARNED_PATH = join(cliConfigDir(), 'outdated-warning.json');
+
+/** One stderr line, at most once a day, when the installed CLI is a minor
+ *  release or more behind. Unlike the interactive update notice this also
+ *  reaches agents and piped output, because an agent on an old CLI otherwise
+ *  reads current docs and concludes they are wrong (tsk_f681c871). */
+export async function getOutdatedWarning(
+  currentVersion: string,
+  options: OutdatedWarningOptions = {},
+): Promise<string | null> {
+  const warnedPath = options.warnedPath ?? WARNED_PATH;
+  const now = (options.now ?? Date.now)();
+  try {
+    const warned = JSON.parse(readFileSync(warnedPath, 'utf8')) as { warnedAt?: unknown };
+    if (typeof warned.warnedAt === 'number' && now - warned.warnedAt < ONE_DAY && now >= warned.warnedAt) return null;
+  } catch {
+    // no record yet: fall through
+  }
+  const latest = await latestKnownVersion(options);
+  if (!latest || !isMinorBehind(currentVersion, latest)) return null;
+  try {
+    const dir = dirname(warnedPath);
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    writeFileSync(warnedPath, JSON.stringify({ warnedAt: now }) + '\n', { mode: 0o600 });
+  } catch {
+    // best effort; an unwritable config dir means the warning may repeat
+  }
+  return outdatedMessage(currentVersion, latest);
+}
+
 async function fetchLatest(): Promise<string | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);

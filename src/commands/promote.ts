@@ -137,6 +137,9 @@ export function registerPromote(program: Command) {
       'Remove production functions the preview does not include. By default they stay live.',
     )
     .option('--json', 'Print the raw promote response as JSON')
+    .addHelpText('after', '\nFunctions missing from the preview: promote KEEPS production functions the preview does not\n'
+      + 'include, unless --prune. A full `somewhere deploy` is the opposite: it removes functions that are not in\n'
+      + 'the directory.\n')
     .action(async (draftId: string, candidateReleaseId: string, opts) => {
       const client = new ApiClient(getToken());
 
@@ -231,7 +234,7 @@ export function registerPromote(program: Command) {
         if (fromDraft) info(dim(`Promoted from preview session ${teal(fromDraft)}`));
         const kept = r.preserved_functions ?? [];
         if (kept.length > 0) {
-          info(`Kept ${kept.length} production function(s) the preview did not include: ${kept.join(', ')} (pass --prune to remove them).`);
+          info(`Kept ${kept.length} production function(s) the preview did not include: ${kept.join(', ')} (pass --prune to remove them). A plain \`somewhere deploy\` from a directory without them would remove them.`);
         }
         const removed = r.removed_functions ?? [];
         if (removed.length > 0) {

@@ -31,6 +31,7 @@ import {
   verifyTarballIntegrity,
   type OfficialRelease,
 } from '../lib/update-security.js';
+import { NPM_UPDATE_COMMAND } from '../lib/notify/providers/update.js';
 
 const PACKUMENT_URL = `${OFFICIAL_NPM_REGISTRY}/@somewhere-tech%2Fcli`;
 
@@ -52,6 +53,16 @@ interface UpdateDependencies {
 
 const message = (value: unknown): string =>
   value instanceof Error ? value.message : String(value);
+
+/** Every refusal names the working alternative. A refusal that only explains
+ * itself strands the user: CLIs at 0.37.0 and older refused every release once
+ * npm moved to a newer provenance format, and nothing said npm still worked
+ * (tsk_f681c871). */
+function refuse(cause: unknown): number {
+  error(`Update refused: ${message(cause)}.`);
+  info(`To install the latest release with npm instead, run: ${teal(NPM_UPDATE_COMMAND)}`);
+  return 1;
+}
 
 /** Read the installed CLI's own version from its package.json (dist/commands/ →
  * package root is two levels up). */
@@ -306,8 +317,7 @@ export async function runUpdate(
     const metadata = await fetchJson(fetchImpl, PACKUMENT_URL, 'the official npm registry');
     release = parseOfficialRelease(metadata);
   } catch (cause) {
-    error(`Update refused: ${message(cause)}.`);
-    return 1;
+    return refuse(cause);
   }
 
   if (release.version === installedVersion) {
@@ -340,8 +350,7 @@ export async function runUpdate(
     info(`Updating ${CLI_PACKAGE} from its authenticated dependency lock …`);
     await (dependencies.install ?? installVerifiedTarball)(tarballPath, tempDir, release);
   } catch (cause) {
-    error(`Update refused: ${message(cause)}.`);
-    return 1;
+    return refuse(cause);
   } finally {
     if (tempDir) rmSync(tempDir, { recursive: true, force: true });
   }

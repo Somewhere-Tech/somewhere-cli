@@ -180,7 +180,7 @@ test('env set defaults to server-only and prints effective visibility and refere
     assert.equal(publicKey.status, 0, publicKey.stderr);
     assert.match(publicKey.stdout, /VITE_API_BASE set \(public, prod\)/);
     assert.match(publicKey.stdout, /Browser: import\.meta\.env\.VITE_API_BASE/);
-    assert.match(publicKey.stdout, /Deploy again/);
+    assert.match(publicKey.stdout, /reaches your app on its next deploy/);
     assert.deepEqual({ public: calls.at(-1).body.public, scope: calls.at(-1).body.scope }, { public: true, scope: 'prod' });
 
     const serverKey = await run(['env', 'set', 'STRIPE_KEY', 'sk_test_x'], { cwd, env });

@@ -357,6 +357,9 @@ export function registerDeploy(program: Command) {
   program
     .command('deploy [dir]')
     .description('Deploy the current directory (anonymous automatically when logged out)')
+    .addHelpText('after', '\nFunctions missing from the directory: a full `somewhere deploy` REMOVES deployed functions that\n'
+      + 'are not in this directory (each one is named in the output). `--scope functions` keeps them unless\n'
+      + '--replace-functions. `somewhere promote` is the opposite: it keeps them unless --prune.\n')
     .option(
       '--project <ref>',
       'Project to deploy to — accepts the project UUID, slug, or subdomain (all three resolve server-side)',
@@ -887,7 +890,8 @@ export function registerDeploy(program: Command) {
         // directory — named, so a rename never leaves a silent leftover.
         if (result.removed_functions && result.removed_functions.length > 0) {
           warn(
-            `Removed ${result.removed_functions.length} function(s) no longer in this directory: ${result.removed_functions.join(', ')}.`,
+            `Removed ${result.removed_functions.length} function(s) no longer in this directory: ${result.removed_functions.join(', ')}. `
+              + 'A full deploy publishes exactly this directory (unlike `somewhere promote`, which keeps them unless --prune).',
           );
         }
 

@@ -140,7 +140,7 @@ test('docs docs streams the full document to stdout', async () => {
   }
 });
 
-test('bare docs streams the full platform reference', async () => {
+test('docs --full with no topic streams the full platform reference', async () => {
   const fullDoc = 'full platform reference\n';
   const server = createServer((req, res) => {
     assert.equal(req.url, '/docs.txt');
@@ -149,7 +149,7 @@ test('bare docs streams the full platform reference', async () => {
   await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
   const { port } = server.address();
   try {
-    const result = await run(['docs'], {
+    const result = await run(['docs', '--full'], {
       SOMEWHERE_DOCS_BASE: `http://127.0.0.1:${port}`,
       SOMEWHERE_NO_NOTIFICATIONS: '1',
       CI: '1',

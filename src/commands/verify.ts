@@ -15,7 +15,7 @@ import { isLoopbackUrl, runLocalBrowser } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
 import { withVerifyProgress } from '../lib/verify-progress.js';
 import { saveVerifyReport } from '../lib/verify-report.js';
-import { readBrowserIncomplete, readBrowserLifecycle, formatStepDuration, type BrowserLifecycle, type BrowserResult } from './browser.js';
+import { readBrowserIncomplete, readBrowserLifecycle, formatStepDuration, stringifyResult, type BrowserLifecycle, type BrowserResult } from './browser.js';
 
 /** The local browser's own bound (no platform execution cap applies). */
 const VERIFY_TIMEOUT_MS = 90_000;
@@ -372,11 +372,28 @@ function actionName(action: BrowserSequenceAction | undefined, fallback: string)
   if ('fill' in action) return `fill ${action.fill}`;
   if ('upload' in action) return `upload ${action.upload}`;
   if ('select' in action) return `select ${action.select}`;
-  if ('wait' in action) return `wait ${String(action.wait)}`;
+  if ('wait' in action) {
+    const wait = action.wait;
+    return typeof wait === 'number' ? `wait ${wait}ms` : `wait ${typeof wait === 'string' ? wait : wait.selector}`;
+  }
   if ('expect' in action) return `expect ${action.expect.selector}`;
   if ('screenshot' in action) return `screenshot ${action.screenshot}`;
   if ('goto' in action) return `goto ${action.goto}`;
   return `eval ${action.eval}`;
+}
+
+const OVERFLOW_FINDING = /horizontal overflow (\d+)px(?: near (.+?))?(?:;|\. Findings|$)/;
+
+/** ` WARNING — …` for every viewport whose layout line reports horizontal
+ *  overflow, naming the element the platform found; '' when none did. */
+export function overflowWarning(layout: Array<VerifySignal<string>>): string {
+  const found = layout.flatMap((item) => {
+    const match = OVERFLOW_FINDING.exec(item.detail);
+    return match ? [`${item.viewport} by ${match[1]}px${match[2] ? ` near ${match[2]}` : ''}`] : [];
+  });
+  return found.length
+    ? ` WARNING — the page is wider than the viewport at ${found.join(' and at ')} (horizontal scroll).`
+    : '';
 }
 
 function reportPassed(report: BrowserResult): boolean {
@@ -584,6 +601,10 @@ function shapeVerificationReport(
     verdict = `FAIL — the platform reported the run at ${failedRun?.viewport.label ?? 'one viewport'} as not passed.`;
   }
   if (lifecycle.length && !verdict.startsWith('INCOMPLETE')) verdict += ` INCOMPLETE — ${unknownNote(lifecycle)}`;
+  // A page wider than the viewport passed silently before: the layout line
+  // said so, but the verdict did not (tsk_3e62d9b5). Overflow stays a warning,
+  // never a failure, so existing flows keep their outcome.
+  if (verdict.startsWith('PASS')) verdict += overflowWarning(layout);
   verdict += retryNote;
 
   return {
@@ -1280,6 +1301,13 @@ export function formatVerifyReport(report: VerifyReport, evidencePath?: string):
   const lines = [report.passed ? green(report.verdict) : report.verdict.startsWith('INCOMPLETE') ? teal(report.verdict) : red(report.verdict)];
   for (const step of report.steps) {
     lines.push(`step ${step.step} ${step.ran === false ? dim('not run') : step.passed ? green('✓') : red('✗')} [${step.viewport}] ${step.name}${formatStepDuration(step.duration_ms, step.ran)}${step.error ? ` ${dim(`— ${step.error}`)}` : ''}`);
+    // The eval value, as `somewhere browser` prints it; reading it used to
+    // need --json or report.json (tsk_32e81790).
+    if (step.value !== undefined) {
+      const text = stringifyResult(step.value);
+      if (!text.includes('\n')) lines.push(`  result: ${text}`);
+      else lines.push('  result:', ...text.split('\n').map((line) => `    ${line}`));
+    }
   }
   lines.push(`page_health: ${report.health.page.errors?.length ? red('FAIL') : report.lifecycle?.length ? teal('UNKNOWN') : report.health.page.passed ? green('PASS') : red('FAIL')}`);
   lines.push(`console_health: ${report.health.console.errors?.length ? red('FAIL') : report.lifecycle?.length ? teal('UNKNOWN') : report.health.console.passed ? green('PASS') : red('FAIL')}`);

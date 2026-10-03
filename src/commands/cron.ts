@@ -108,6 +108,24 @@ function cronRows(value: unknown): CronRow[] {
   return rows.filter(isRecord);
 }
 
+/** The plan's schedule policy, which the platform returns for a one-project
+ *  listing. Printed even when the list is empty, so an agent learns whether a
+ *  schedule will be accepted before trying (tsk_a86f8a12). */
+export function cronPolicyLine(value: unknown): string | null {
+  const data = unwrapPlatformData(value);
+  const policy = isRecord(data) && isRecord(data.policy) ? data.policy : null;
+  if (!policy) return null;
+  const plan = typeof policy.plan === 'string' && policy.plan ? `${policy.plan} plan` : 'This plan';
+  if (policy.enabled === false) {
+    return `${plan}: creating or editing scheduled triggers is not available. See: somewhere docs cron`;
+  }
+  const limits = [
+    typeof policy.max_per_project === 'number' ? `up to ${policy.max_per_project} per project` : null,
+    typeof policy.min_interval_minutes === 'number' ? `at most once every ${policy.min_interval_minutes} min` : null,
+  ].filter(Boolean);
+  return `${plan}: scheduled triggers allowed${limits.length ? ` (${limits.join(', ')})` : ''}.`;
+}
+
 function cronRowId(row: CronRow): string | null {
   if (typeof row.cron_id === 'string' && row.cron_id.length > 0) return row.cron_id;
   if (typeof row.id === 'string' && row.id.length > 0) return row.id;
@@ -285,15 +303,17 @@ export function registerCron(program: Command): void {
         const rows = cronRows(value);
         if (rows.length === 0) {
           console.log(dim('No scheduled triggers.'));
-          return;
+        } else {
+          table(['ID', 'Name', 'Schedule (UTC)', 'Handler', 'Enabled'], rows.map((row) => [
+            cronRowId(row) ?? '—',
+            truncateText(row.name, 32),
+            typeof row.schedule === 'string' ? row.schedule : '—',
+            truncateText(row.handler, 48),
+            row.enabled === false ? 'no' : 'yes',
+          ]));
         }
-        table(['ID', 'Name', 'Schedule (UTC)', 'Handler', 'Enabled'], rows.map((row) => [
-          cronRowId(row) ?? '—',
-          truncateText(row.name, 32),
-          typeof row.schedule === 'string' ? row.schedule : '—',
-          truncateText(row.handler, 48),
-          row.enabled === false ? 'no' : 'yes',
-        ]));
+        const policy = cronPolicyLine(value);
+        if (policy) console.log(dim(policy));
       });
     });
 

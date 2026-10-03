@@ -33,10 +33,12 @@ test('isNewer — unparseable inputs are not "newer" (fail-safe)', () => {
   assert.equal(isNewer('1.0.0', 'x.y.z'), false);
 });
 
-test('collectNotices — central gate: silent on non-interactive output', async () => {
+test('collectNotices — central gate: no providers on non-interactive output', async () => {
   // The test runner's stderr is not a TTY, so the gate must suppress ALL providers
   // — this is the contract that keeps notices out of agent/piped/safety output.
-  const out = await collectNotices(['node', 'sw', 'whoami']);
+  // Only the once-a-day outdated warning may run there (tsk_f681c871); stubbed
+  // so this test never reads the real config dir or the network.
+  const out = await collectNotices(['node', 'sw', 'whoami'], { outdatedWarning: async () => null });
   assert.deepEqual(out, []);
 });
 

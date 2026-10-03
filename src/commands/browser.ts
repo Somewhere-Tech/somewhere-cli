@@ -4,7 +4,7 @@ import { Command, InvalidArgumentError } from 'commander';
 import { ApiClient, CliApiError } from '../lib/client.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { isLoopbackUrl, runLocalBrowser, type LocalBrowserReport } from '../lib/browser-run.js';
-import { dim, error, green, red, teal } from '../lib/output.js';
+import { dim, error, green, red, success, teal, yellow } from '../lib/output.js';
 import {
   normalizeBrowserActions,
   parseExpectFlag,
@@ -179,6 +179,8 @@ export interface BrowserOptions {
   include?: string;
   extract?: boolean;
   session?: string;
+  close?: string;
+  authUser?: string;
   actionSequence?: BrowserSequenceAction[];
   expectedRequests?: ExpectedBrowserRequest[];
   visibleOnly?: boolean;
@@ -213,14 +215,31 @@ export function buildBrowserBody(
   if (url) body.url = url;
   if (project) body.project_id = project;
 
+  // A reused session keeps its page, so the start URL alone would be ignored
+  // on every call after the first. Go there explicitly (tsk_ac45ad01).
+  const sessionGoto = opts.session && url ? urlPathOf(url) : undefined;
+  // Action flags and the single-step flags compose into ONE action sequence:
+  // --url (with --session) and --path first, then the actions in the order
+  // given, then --wait and --eval to inspect the result (tsk_ac45ad01).
+  const sequenced = Boolean(opts.actionSequence?.length) || sessionGoto !== undefined;
   const steps: Array<Record<string, unknown>> = [];
-  if (opts.path) steps.push({ action: 'goto', path: opts.path });
-  if (!opts.actionSequence?.length && opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
-  if (!opts.actionSequence?.length && opts.eval) steps.push({ action: 'eval', script: opts.eval });
-  if (opts.screenshot === true && !opts.actionSequence?.length) steps.push({ action: 'screenshot' });
+  if (!sequenced) {
+    if (opts.path) steps.push({ action: 'goto', path: opts.path });
+    if (opts.wait) steps.push({ action: 'wait_for', selector: opts.wait });
+    if (opts.eval) steps.push({ action: 'eval', script: opts.eval });
+    if (opts.screenshot === true) steps.push({ action: 'screenshot' });
+  }
   if (steps.length) body.steps = steps;
-  const actions = [...(opts.actionSequence ?? [])];
-  if (opts.screenshot === true && actions.length) actions.push({ screenshot: 'page' });
+  const actions: BrowserSequenceAction[] = sequenced
+    ? [
+      ...(sessionGoto ? [{ goto: sessionGoto }] : []),
+      ...(opts.path ? [{ goto: opts.path }] : []),
+      ...(opts.actionSequence ?? []),
+      ...(opts.wait ? [{ wait: opts.wait }] : []),
+      ...(opts.eval ? [{ eval: opts.eval }] : []),
+    ]
+    : [];
+  if (opts.screenshot === true && sequenced) actions.push({ screenshot: 'page' });
   if (typeof opts.screenshot === 'string') actions.push({ screenshot: opts.screenshot });
   if (actions.length) body.actions = actions;
   if (opts.expectedRequests?.length) body.expect_requests = opts.expectedRequests;
@@ -248,6 +267,37 @@ export function buildBrowserBody(
   // Persistent session: reuse ONE live browser across calls (feature B).
   if (opts.session) body.session_id = opts.session;
   return body;
+}
+
+/** The path (with query and hash) a session's `goto` needs for a start URL. */
+export function urlPathOf(url: string): string | undefined {
+  if (url.startsWith('/')) return url;
+  try {
+    const parsed = new URL(url);
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return undefined;
+  }
+}
+
+/** `--auth-user` takes a user id or an email. An email is looked up in the
+ *  project's own users and must match exactly one (tsk_ac45ad01). */
+export async function resolveAuthUser(
+  client: Pick<ApiClient, 'call'>,
+  projectId: string,
+  value: string,
+): Promise<string> {
+  const wanted = value.trim();
+  if (!wanted.includes('@')) return wanted;
+  const result = await client.call<{ users?: Array<{ id?: unknown; email?: unknown }> }>(
+    'GET', '/auth/users', undefined, { project_id: projectId, search: wanted, limit: '200' },
+  );
+  const matches = (result?.users ?? []).filter((user) =>
+    typeof user.email === 'string' && user.email.toLowerCase() === wanted.toLowerCase() && typeof user.id === 'string');
+  if (matches.length === 1) return matches[0].id as string;
+  throw new Error(matches.length === 0
+    ? `No user with email ${wanted} in this project. Sign them up first, or pass their user id.`
+    : `More than one user matches ${wanted}; pass the user id instead.`);
 }
 
 /**
@@ -359,7 +409,8 @@ export function formatBrowserReport(
   if (r.session_id && !lifecycle) {
     const exp = r.session_expires_at ? dim(` (expires ${r.session_expires_at})`) : '';
     lines.push(`session: ${r.session_id}${exp}`);
-    if (r.session_note) lines.push(`session_note: ${dim(r.session_note)}`);
+    // A recreated session is signed out: say so loudly, never as a dim aside.
+    if (r.session_note) lines.push(`session_note: ${yellow(r.session_note)}`);
   }
   if (incomplete) {
     lines.push(`incomplete: the run reached its ${Math.round(incomplete.budget_ms / 1000)}s execution cap after ${incomplete.completed} action${incomplete.completed === 1 ? '' : 's'}; action ${incomplete.next_step + 1} and later did not run and have no verdict.`);
@@ -510,7 +561,14 @@ async function runLocalBrowserCommand(url: string, opts: BrowserOptions): Promis
       path: opts.path,
       wait: opts.actionSequence?.length ? undefined : opts.wait,
       eval: opts.actionSequence?.length ? undefined : opts.eval,
-      actions: opts.actionSequence,
+      // With actions, --wait and --eval run after them, as on the hosted path.
+      actions: opts.actionSequence?.length
+        ? [
+          ...opts.actionSequence,
+          ...(opts.wait ? [{ wait: opts.wait }] : []),
+          ...(opts.eval ? [{ eval: opts.eval }] : []),
+        ]
+        : opts.actionSequence,
       expectedRequests: opts.expectedRequests,
       visibleOnly: opts.visibleOnly,
       // No project is involved, so there is nowhere on the platform to store
@@ -629,15 +687,31 @@ export function registerBrowser(program: Command) {
     )
     .option(
       '--session <id>',
-      'Hosted/deployed pages only: keep one live browser page across calls under this handle. Localhost is excluded because the local browser is intentionally bounded to one CLI process; omit --session and pass the local URL again for a fresh local call. Hosted sessions idle out after ~3 min.',
+      'Hosted/deployed pages only: keep one live browser page (cookies, storage, sign-in) across calls under this handle, including after a failed step. Localhost is excluded because the local browser is intentionally bounded to one CLI process; omit --session and pass the local URL again for a fresh local call. Hosted sessions end after 5 min idle or 10 min in total; a call that finds its session ended says it started a fresh signed-out browser. With --url, each call goes to that URL.',
     )
+    .option('--close <session>', 'Close a hosted session by its handle and free its slot (at most 3 live sessions).')
+    .option('--auth-user <email|user_id>', "Start signed in as one of your app's users (needs a project). An email must match exactly one user.")
     .option('--json', 'Print the raw browser response envelope as JSON.')
     .action(async (target: string | undefined, opts: BrowserOptions) => {
       opts.actionSequence = [...actionSequence];
       opts.expectedRequests = [...expectedRequests];
-      if (opts.actionSequence.length && (opts.path || opts.wait || opts.eval)) {
-        error('--path, --wait, and --eval cannot be mixed with --click/--fill/--upload/--select/--expect/--actions; put wait/eval in the actions file. --screenshot composes and captures after the action sequence.');
-        process.exit(1);
+      if (opts.close !== undefined) {
+        if (target || opts.session || opts.actionSequence.length || opts.path || opts.wait || opts.eval || opts.url || opts.project) {
+          error('--close takes only the session handle, e.g. somewhere browser --close bob');
+          process.exit(1);
+        }
+        try {
+          const closed = await new ApiClient(getToken()).call<{ session_id?: string; closed?: boolean }>(
+            'POST', '/browser/test', { session_id: opts.close },
+          );
+          if (opts.json) console.log(JSON.stringify(closed, null, 2));
+          else if (closed?.closed) success(`Closed browser session ${opts.close}.`);
+          else console.log(`No live browser session named ${opts.close}.`);
+        } catch (err) {
+          error(err instanceof Error ? err.message : String(err), err);
+          process.exit(1);
+        }
+        return;
       }
       if (opts.viewport && opts.viewport !== 'desktop' && opts.viewport !== 'mobile') {
         error(`--viewport must be "desktop" or "mobile" (got "${opts.viewport}")`);
@@ -674,6 +748,18 @@ export function registerBrowser(program: Command) {
       }
 
       const client = new ApiClient(getToken());
+      if (opts.authUser !== undefined) {
+        if (typeof body.project_id !== 'string') {
+          error('--auth-user needs a project: pass --project, or run from a linked project directory.');
+          process.exit(1);
+        }
+        try {
+          body.auth = { user_id: await resolveAuthUser(client, body.project_id, opts.authUser) };
+        } catch (err) {
+          error(err instanceof Error ? err.message : String(err), err);
+          process.exit(1);
+        }
+      }
       if (opts.screenshot && !opts.store && !body.project_id && !(typeof body.url === 'string' && isLoopbackUrl(body.url))) {
         error('--screenshot on a public URL needs --store for a short-lived link. Run `somewhere browser <url> --screenshot --store`, or omit --screenshot for the ordinary inline inspection capture.');
         process.exit(1);

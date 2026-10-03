@@ -11,7 +11,7 @@ import { ApiClient, CliApiError, LONG_CALL_TIMEOUT_MS } from '../lib/client.js';
 import { buildErrorSummary, isBuildError, renderBuildError } from '../lib/build-errors.js';
 import { getToken, loadProjectConfig } from '../lib/config.js';
 import { IGNORE, classifyKey, collectFiles } from '../lib/files.js';
-import { bold, dim, error, green, info, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
+import { bold, dim, error, green, info, printJson, printJsonError, red, success, teal, warn, yellow } from '../lib/output.js';
 import { showProjectNotices } from '../lib/project-notices.js';
 import { getDeployedProjectServingUrl } from '../lib/project-urls.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
@@ -280,7 +280,7 @@ function previewPollMs(): number {
 }
 
 export function registerPreview(program: Command) {
-  program
+  const preview = program
     .command('preview')
     .description(
       'Run your app on the platform instead of your machine. Every save goes to a private URL, '
@@ -298,9 +298,73 @@ export function registerPreview(program: Command) {
       'For a project that has never been published: publish this directory to production first, so the preview has a live version to build on. Without it you are asked, and a script that cannot be asked is refused.',
     )
     .option('--json', 'Print a typed JSON refusal when preview cannot start')
-    .action(async (opts: { project?: string; publishFirst?: boolean; json?: boolean }) => {
+    .option('--once', 'Sync once, print the preview link and promote command, and exit instead of watching')
+    .action(async (opts: { project?: string; publishFirst?: boolean; json?: boolean; once?: boolean }) => {
       await runHotDeploy(opts);
     });
+
+  preview
+    .command('link')
+    .description('Mint a fresh single-use link to the open preview (each link works once)')
+    .option('--project <id>', 'Override project ID')
+    .option('--preview-session <id>', 'Which preview, when more than one is open (its preview_session_id)')
+    .option('--json', 'Print { url, preview_session_id, preview_id } as JSON')
+    .action(async (opts: { project?: string; previewSession?: string; json?: boolean }) => {
+      try {
+        const projectId = opts.project ?? loadProjectConfig()?.project_id;
+        if (!projectId) throw new Error('No project linked. Run `somewhere init` or pass --project <id>.');
+        const candidate = choosePreviewCandidate(
+          await callPlatformTool('deploy_status', { project_id: projectId }, { allTools: true }),
+          opts.previewSession,
+        );
+        const handoff = await mintPreviewHandoff(
+          new ApiClient(getToken()), projectId, candidate.draftId, candidate.candidateReleaseId,
+        );
+        if (opts.json) {
+          printJson({
+            url: handoff.capabilityUrl,
+            preview_session_id: handoff.draftId,
+            preview_id: handoff.candidateReleaseId,
+            promote_command: handoff.promoteCommand,
+          });
+          return;
+        }
+        printPreviewHandoff(handoff);
+        console.log(dim('   This link works once; run `somewhere preview link` again for another.'));
+      } catch (err) {
+        error(err instanceof Error ? err.message : String(err), err);
+        process.exitCode = 1;
+      }
+    });
+}
+
+/** The open preview a fresh link should point at (tsk_35c1bb78): the one the
+ *  caller named, or the only open one. Several open previews and no choice is
+ *  an error that lists them, never a guess. */
+export function choosePreviewCandidate(
+  status: unknown,
+  previewSessionId?: string,
+): { draftId: string; candidateReleaseId: string } {
+  const deployment = unwrapPlatformData(status);
+  const open = (isRecord(deployment) && Array.isArray(deployment.preview_candidates)
+    ? deployment.preview_candidates.filter(isRecord)
+    : []).flatMap((item) => {
+    const draftId = typeof item.preview_session_id === 'string' ? item.preview_session_id : item.draft_id;
+    const candidateReleaseId = typeof item.preview_id === 'string' ? item.preview_id : item.candidate_release_id;
+    return typeof draftId === 'string' && typeof candidateReleaseId === 'string'
+      ? [{ draftId, candidateReleaseId }]
+      : [];
+  });
+  if (previewSessionId) {
+    const match = open.find((item) => item.draftId === previewSessionId);
+    if (!match) throw new Error(`No open preview has preview_session_id ${previewSessionId}. Open previews: ${open.map((item) => item.draftId).join(', ') || 'none'}.`);
+    return match;
+  }
+  if (open.length === 0) throw new Error('No open preview for this project. Start one with: somewhere preview --once');
+  if (open.length > 1) {
+    throw new Error(`${open.length} previews are open; name one with --preview-session <id>: ${open.map((item) => item.draftId).join(', ')}.`);
+  }
+  return open[0];
 }
 
 export function registerDev(program: Command) {
@@ -581,7 +645,7 @@ export async function readPublishConsent(publishFirst: boolean): Promise<Publish
   return ok === true ? 'granted' : 'declined';
 }
 
-async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; json?: boolean }) {
+async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; json?: boolean; once?: boolean }) {
   const token = getToken();
   const client = new ApiClient(token);
   const cwd = process.cwd();
@@ -756,6 +820,17 @@ async function runHotDeploy(opts: { project?: string; publishFirst?: boolean; js
       error(err instanceof Error ? err.message : String(err), err);
     }
     process.exit(1);
+  }
+
+  if (opts.once) {
+    // Agents cannot sit in a watch loop: print the link and the promote
+    // command, then exit. The preview stays open on the platform until it is
+    // promoted or expires; `somewhere preview link` mints another link.
+    console.log('');
+    printPreviewHandoff(initialHandoff);
+    console.log(dim('   private to you. The preview stays open until you promote it or it expires.'));
+    console.log(dim('   Each link works once; mint another with: somewhere preview link'));
+    process.exit(0);
   }
 
   console.log('');
