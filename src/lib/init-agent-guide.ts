@@ -13,9 +13,7 @@ extend it using the README file map. Minimal/bare starters omit auth.
 URL, claim URL, and expiry. Login is needed for account-owned operations,
 the email test inbox and cron. On a hosted VM, after consent, \`somewhere login\` prints a
 code a human approves in their browser; the machine stays signed in.
-Ask \`somewhere advisor "<question>"\` how to build or fix it. For a reference,
-use \`somewhere docs <topic> --section <id>\`
-(MCP: \`advisor({ question })\`, \`docs({ topic })\`, \`catalog\`).
+For a reference, use \`somewhere docs <topic> --section <id>\` (MCP: \`docs({ topic })\`, \`catalog\`).
 
 After every change:
 1. \`somewhere typecheck\`, then \`somewhere deploy\` (do not build first). Deploy
@@ -54,13 +52,14 @@ Functions: a bare \`export default async function (req, sw)\` returning a
 \`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
 handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
 
-Data: tables in \`db/schema.ts\` — \`owner()\` (each user's own rows; no auth
-guard), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
-access via \`somewhere:data\`; a custom endpoint enforces its own caller policy.
-\`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
+Data: tables in \`db/schema.ts\` — \`owner()\` (normal data operations use the
+signed-in user's rows), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
+access via \`somewhere:data\`; authorize custom endpoints.
+Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
-operator per column). Raw \`sw.db.query(sql, params)\` runs as written (add \`WHERE
-user_id = ?\`; managed projects refuse it). Independent reads: one \`Promise.all\`.`;
+operator per column). Raw SQL \`sw.db.query(sql, params)\` runs as written (add \`WHERE
+user_id = ?\`; managed projects refuse it). Use \`sw.db.server.query\` for managed
+raw access; authorize the caller in your function. Parallel reads: \`Promise.all\`.`;
 
 export const SKILLS_POINTER = `Skills: \`${SKILLS_DIR}/\` — `
   + skillNames(BUNDLED_SKILLS_PACK).map((name) => `\`${name}\``).join(', ')

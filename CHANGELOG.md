@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.37.8
+
+### Fixed
+
+- Generated `AGENTS.md` now matches the current app workflow: start with the relevant docs, keep owner-scoped queries tied to the signed-in user, and authorize custom endpoints and server queries.
+
 ## 0.37.7
 
 ### Fixed

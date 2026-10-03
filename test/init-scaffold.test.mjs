@@ -151,7 +151,6 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
     'somewhere init --name <slug>',
     'extend it using the README file map. Minimal/bare starters omit auth.',
     'npx @somewhere-tech/cli deploy',
-    'somewhere advisor "<question>"',
     'somewhere docs <topic> --section <id>',
     'somewhere typecheck',
     'somewhere deploy',
@@ -179,7 +178,7 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /no auth\nguard\)[\s\S]*a custom endpoint enforces its own caller policy/);
+  assert.match(agents, /normal data operations use the\nsigned-in user's rows\)[\s\S]*authorize custom endpoints\.[\s\S]*authorize the caller in your function/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,
