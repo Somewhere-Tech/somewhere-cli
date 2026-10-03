@@ -1,6 +1,7 @@
 // tsk_ac45ad01 (CLI half): --path/--wait/--eval compose with action flags,
-// --url on a session navigates every call, --auth-user resolves an email to
-// exactly one user, and the cron/preview helpers state what they found.
+// --url with --session is only the start URL (no extra goto), --auth-user
+// resolves an email to exactly one user, and the cron/preview helpers state
+// what they found.
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { buildBrowserBody, resolveAuthUser } from '../dist/commands/browser.js';
@@ -49,6 +50,29 @@ test('--auth-user: an id passes through; an email must match exactly one user', 
   let served = 0;
   const paged = { async call(_m, _p, _b, query) { if (served === 1) assert.equal(query.cursor, 'c1'); return pages[served++]; } };
   assert.equal(await resolveAuthUser(paged, 'p1', 'bob@example.com'), 'usr_bob');
+});
+
+test('--auth-user: complete pagination finds the one exact match; a cursor left after 10 pages refuses', async () => {
+  const pagedClient = (pageCount, exactOnPage, lastCursor) => {
+    const calls = [];
+    return {
+      calls,
+      async call(_m, _p, _b, query) {
+        calls.push(query.cursor ?? null);
+        const index = calls.length - 1;
+        const users = [{ id: `usr_partial_${index}`, email: `bob@example.com.${index}` }];
+        if (index === exactOnPage) users.push({ id: 'usr_bob', email: 'bob@example.com' });
+        const last = index === pageCount - 1;
+        return { users, next_cursor: last ? lastCursor : `c${index + 1}` };
+      },
+    };
+  };
+  const complete = pagedClient(10, 9, null);
+  assert.equal(await resolveAuthUser(complete, 'p1', 'bob@example.com'), 'usr_bob', 'exact match on the last page of a complete listing');
+  assert.equal(complete.calls.length, 10);
+  const unfinished = pagedClient(10, 3, 'c10');
+  await assert.rejects(resolveAuthUser(unfinished, 'p1', 'bob@example.com'), /could not be confirmed\. Pass the user id instead/);
+  assert.equal(unfinished.calls.length, 10, 'the request bound is kept: no 11th page');
 });
 
 test('cron list states the plan policy, including when scheduling is off', () => {

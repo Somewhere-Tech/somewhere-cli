@@ -290,6 +290,11 @@ export async function resolveAuthUser(
     cursor = result?.next_cursor === null || result?.next_cursor === undefined ? undefined : String(result.next_cursor);
     if (!cursor) break;
   }
+  if (matches.length > 1) throw new Error(`More than one user matches ${wanted}; pass the user id instead.`);
+  // Pages remain past the request bound: "exactly one" is unproven, so refuse.
+  if (cursor) {
+    throw new Error(`More than ${AUTH_USER_LOOKUP_PAGES * 200} users partially match ${wanted}, so an exact match could not be confirmed. Pass the user id instead.`);
+  }
   if (matches.length === 1) return matches[0].id as string;
   throw new Error(matches.length === 0
     ? `No user with email ${wanted} in this project. Sign them up first, or pass their user id.`
