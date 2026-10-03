@@ -57,7 +57,7 @@ async function captured(fn) {
   }
 }
 
-test('a refused update exits 1 and prints the npm fallback (the 0.37.0-and-older provenance case)', async () => {
+test('a refused update (no verifiable provenance) exits 1 and prints the npm fallback', async () => {
   const published = Buffer.from('published package');
   const { result, output } = await captured(() => runUpdate({}, {
     currentVersion: () => '0.33.10',
@@ -75,6 +75,16 @@ test('an unreachable registry also names the fallback', async () => {
     fetch: async () => { throw new Error('getaddrinfo ENOTFOUND'); },
   }));
   assert.equal(result, 1);
+  assert.match(output, FALLBACK);
+});
+
+test('refusing a release that is not newer also names the fallback', async () => {
+  const { result, output } = await captured(() => runUpdate({}, {
+    currentVersion: () => 'local-build',
+    fetch: async () => jsonResponse(metadata('0.37.6', Buffer.from('x'))),
+  }));
+  assert.equal(result, 1);
+  assert.match(output, /is not newer than local-build/);
   assert.match(output, FALLBACK);
 });
 
@@ -131,6 +141,7 @@ test('non-interactive commands get only the outdated warning; update, CI and opt
   assert.deepEqual(await collectNotices(['node', 'sw', 'deploy'], { isTTY: false, outdatedWarning: warning }), ['! behind']);
   assert.deepEqual(await collectNotices(['node', 'sw', 'deploy'], { isTTY: false, outdatedWarning: async () => null }), []);
   assert.deepEqual(await collectNotices(['node', 'sw', 'update'], { isTTY: false, outdatedWarning: warning }), []);
+  assert.deepEqual(await collectNotices(['node', 'sw', 'docs'], { isTTY: false, outdatedWarning: warning }), [], 'docs prints its own line');
   const previous = process.env.SOMEWHERE_NO_NOTIFICATIONS;
   process.env.SOMEWHERE_NO_NOTIFICATIONS = '1';
   try {

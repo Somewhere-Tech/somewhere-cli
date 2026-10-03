@@ -3,7 +3,7 @@
 // exactly one user, and the cron/preview helpers state what they found.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildBrowserBody, resolveAuthUser, urlPathOf } from '../dist/commands/browser.js';
+import { buildBrowserBody, resolveAuthUser } from '../dist/commands/browser.js';
 import { cronPolicyLine } from '../dist/commands/cron.js';
 import { choosePreviewCandidate } from '../dist/commands/dev.js';
 
@@ -22,14 +22,12 @@ test('single-step flags without actions keep the legacy step shape', () => {
   assert.deepEqual(body.steps, [{ action: 'goto', path: '/' }, { action: 'wait_for', selector: 'main' }, { action: 'eval', script: '1+1' }]);
 });
 
-test('--url with --session goes to that URL on every call; without a session it is only the start URL', () => {
-  const kept = buildBrowserBody(undefined, { url: 'https://crew.somewhere.site/invite?token=x#top', session: 'bob', eval: 'location.pathname' });
+test('--url with --session is only the start URL: no extra goto (a single-use link must load once)', () => {
+  const kept = buildBrowserBody(undefined, { url: 'https://crew.somewhere.site/auth/magic?token=T', session: 'bob' });
   assert.equal(kept.session_id, 'bob');
-  assert.deepEqual(kept.actions, [{ goto: '/invite?token=x#top' }, { eval: 'location.pathname' }]);
-  const once = buildBrowserBody(undefined, { url: 'https://crew.somewhere.site/invite', eval: 'location.pathname' });
-  assert.equal(once.actions, undefined);
-  assert.equal(urlPathOf('/club'), '/club');
-  assert.equal(urlPathOf('not a url'), undefined);
+  assert.equal(kept.url, 'https://crew.somewhere.site/auth/magic?token=T');
+  assert.equal(kept.actions, undefined, 'no goto: a fresh session already opens the URL once');
+  assert.equal(kept.steps, undefined, 'inspect mode is kept, so --extract and the DOM map still return');
 });
 
 test('--auth-user: an id passes through; an email must match exactly one user', async () => {
@@ -41,6 +39,16 @@ test('--auth-user: an id passes through; an email must match exactly one user', 
   assert.deepEqual(calls.at(-1), { method: 'GET', path: '/auth/users', query: { project_id: 'p1', search: 'bob@example.com', limit: '200' } });
   await assert.rejects(resolveAuthUser(client([]), 'p1', 'carol@example.com'), /No user with email carol@example\.com/);
   await assert.rejects(resolveAuthUser(client([{ id: 'a', email: 'x@y.z' }, { id: 'b', email: 'X@y.z' }]), 'p1', 'x@y.z'), /More than one user/);
+  await assert.rejects(resolveAuthUser(client([]), undefined, 'bob@example.com'), /needs a project/);
+  assert.equal(await resolveAuthUser(client([]), undefined, 'usr_9'), 'usr_9', 'an id works without a project (url mode)');
+  // An exact match past the first page of partial matches is still found.
+  const pages = [
+    { users: [{ id: 'usr_x', email: 'bob@example.com.au' }], next_cursor: 'c1' },
+    { users: [{ id: 'usr_bob', email: 'bob@example.com' }], next_cursor: null },
+  ];
+  let served = 0;
+  const paged = { async call(_m, _p, _b, query) { if (served === 1) assert.equal(query.cursor, 'c1'); return pages[served++]; } };
+  assert.equal(await resolveAuthUser(paged, 'p1', 'bob@example.com'), 'usr_bob');
 });
 
 test('cron list states the plan policy, including when scheduling is off', () => {

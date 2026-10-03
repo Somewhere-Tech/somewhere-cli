@@ -61,7 +61,9 @@ export async function collectNotices(argv: string[], options: CollectNoticesOpti
   try {
     const isTTY = options.isTTY ?? Boolean(process.stderr.isTTY);
     if (!notificationsAllowed(argv, isTTY)) {
-      if (isTTY || process.env.CI || process.env.SOMEWHERE_NO_NOTIFICATIONS || subcommandSuppressesNotifications(argv)) return [];
+      // `somewhere docs` prints its own version line, so skip the duplicate.
+      if (isTTY || process.env.CI || process.env.SOMEWHERE_NO_NOTIFICATIONS || subcommandSuppressesNotifications(argv)
+        || argv[2] === 'docs') return [];
       const warning = await (options.outdatedWarning ?? getOutdatedWarning)(currentVersion()).catch(() => null);
       return warning ? [warning] : [];
     }

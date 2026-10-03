@@ -191,7 +191,7 @@ test('a transport failure still closes the browsers; a close failure is reported
   assert.match(result.verdict, /socket hang up \[VERIFY_SEGMENT_FAILED\][\s\S]*INCOMPLETE/);
   assert.deepEqual(result.cleanup[0], { actor: 'alice', status: 'closed' });
   assert.equal(result.cleanup[1].status, 'unconfirmed');
-  assert.match(result.cleanup[1].reason, /close failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 3 minutes/);
+  assert.match(result.cleanup[1].reason, /close failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 5 minutes/);
   assert.equal(result.cleanup_confirmed, false, 'an unconfirmed close is never reported as clean');
   assert.match(formatVerifyJourneyReport(result).join('\n'), /bob unconfirmed[\s\S]*bob: close failed \(AUTHORITY_UNAVAILABLE\)/);
 });
@@ -429,7 +429,7 @@ test('a call still running when the cleanup budget runs out is reported unconfir
   assert.ok(cleanup_ms <= 400);
   assert.deepEqual(cleanup[0], { actor: 'alice', status: 'closed' });
   assert.equal(cleanup[1].status, 'unconfirmed');
-  assert.match(cleanup[1].reason, /still running when cleanup ran out of time; the platform closes an idle browser within 3 minutes/);
+  assert.match(cleanup[1].reason, /still running when cleanup ran out of time; the platform closes an idle browser within 5 minutes/);
   assert.equal(client.runs().length, 2);
 });
 
@@ -576,5 +576,5 @@ test('SIGTERM with a failed close reports that browser as unconfirmed and still 
   const { code, stderr } = await run.done();
   assert.equal(code, 143, stderr);
   assert.match(stderr, /alice closed, bob unconfirmed/);
-  assert.match(stderr, /bob: close after its call finished failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 3 minutes/);
+  assert.match(stderr, /bob: close after its call finished failed \(AUTHORITY_UNAVAILABLE\); the platform closes an idle browser within 5 minutes/);
 });

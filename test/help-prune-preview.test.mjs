@@ -39,4 +39,5 @@ test('preview help lists --once and the link subcommand; browser help lists --cl
   assert.match(browser, /--close <session>/);
   assert.match(browser, /--auth-user <email\|user_id>/);
   assert.match(browser, /end after 5 min idle or 10 min in total/);
+  assert.match(browser, /--url only sets where a NEW session starts/);
 });

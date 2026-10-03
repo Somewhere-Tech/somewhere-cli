@@ -215,13 +215,10 @@ export function buildBrowserBody(
   if (url) body.url = url;
   if (project) body.project_id = project;
 
-  // A reused session keeps its page, so the start URL alone would be ignored
-  // on every call after the first. Go there explicitly (tsk_ac45ad01).
-  const sessionGoto = opts.session && url ? urlPathOf(url) : undefined;
   // Action flags and the single-step flags compose into ONE action sequence:
-  // --url (with --session) and --path first, then the actions in the order
-  // given, then --wait and --eval to inspect the result (tsk_ac45ad01).
-  const sequenced = Boolean(opts.actionSequence?.length) || sessionGoto !== undefined;
+  // --path first, then the actions in the order given, then --wait and --eval
+  // to inspect the result (tsk_ac45ad01).
+  const sequenced = Boolean(opts.actionSequence?.length);
   const steps: Array<Record<string, unknown>> = [];
   if (!sequenced) {
     if (opts.path) steps.push({ action: 'goto', path: opts.path });
@@ -232,7 +229,6 @@ export function buildBrowserBody(
   if (steps.length) body.steps = steps;
   const actions: BrowserSequenceAction[] = sequenced
     ? [
-      ...(sessionGoto ? [{ goto: sessionGoto }] : []),
       ...(opts.path ? [{ goto: opts.path }] : []),
       ...(opts.actionSequence ?? []),
       ...(opts.wait ? [{ wait: opts.wait }] : []),
@@ -269,31 +265,31 @@ export function buildBrowserBody(
   return body;
 }
 
-/** The path (with query and hash) a session's `goto` needs for a start URL. */
-export function urlPathOf(url: string): string | undefined {
-  if (url.startsWith('/')) return url;
-  try {
-    const parsed = new URL(url);
-    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
-  } catch {
-    return undefined;
-  }
-}
-
 /** `--auth-user` takes a user id or an email. An email is looked up in the
  *  project's own users and must match exactly one (tsk_ac45ad01). */
+const AUTH_USER_LOOKUP_PAGES = 10;
+
 export async function resolveAuthUser(
   client: Pick<ApiClient, 'call'>,
-  projectId: string,
+  projectId: string | undefined,
   value: string,
 ): Promise<string> {
   const wanted = value.trim();
   if (!wanted.includes('@')) return wanted;
-  const result = await client.call<{ users?: Array<{ id?: unknown; email?: unknown }> }>(
-    'GET', '/auth/users', undefined, { project_id: projectId, search: wanted, limit: '200' },
-  );
-  const matches = (result?.users ?? []).filter((user) =>
-    typeof user.email === 'string' && user.email.toLowerCase() === wanted.toLowerCase() && typeof user.id === 'string');
+  if (!projectId) throw new Error('--auth-user with an email needs a project: pass --project, run from a linked directory, or pass the user id.');
+  // `search` is a substring filter, so page through every partial match.
+  const matches: Array<{ id?: unknown; email?: unknown }> = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < AUTH_USER_LOOKUP_PAGES; page++) {
+    const result = await client.call<{ users?: Array<{ id?: unknown; email?: unknown }>; next_cursor?: unknown }>(
+      'GET', '/auth/users', undefined,
+      { project_id: projectId, search: wanted, limit: '200', ...(cursor ? { cursor } : {}) },
+    );
+    matches.push(...(result?.users ?? []).filter((user) =>
+      typeof user.email === 'string' && user.email.toLowerCase() === wanted.toLowerCase() && typeof user.id === 'string'));
+    cursor = result?.next_cursor === null || result?.next_cursor === undefined ? undefined : String(result.next_cursor);
+    if (!cursor) break;
+  }
   if (matches.length === 1) return matches[0].id as string;
   throw new Error(matches.length === 0
     ? `No user with email ${wanted} in this project. Sign them up first, or pass their user id.`
@@ -687,10 +683,10 @@ export function registerBrowser(program: Command) {
     )
     .option(
       '--session <id>',
-      'Hosted/deployed pages only: keep one live browser page (cookies, storage, sign-in) across calls under this handle, including after a failed step. Localhost is excluded because the local browser is intentionally bounded to one CLI process; omit --session and pass the local URL again for a fresh local call. Hosted sessions end after 5 min idle or 10 min in total; a call that finds its session ended says it started a fresh signed-out browser. With --url, each call goes to that URL.',
+      'Hosted/deployed pages only: keep one live browser page (cookies, storage, sign-in) across calls under this handle, including after a failed step. Localhost is excluded because the local browser is intentionally bounded to one CLI process; omit --session and pass the local URL again for a fresh local call. Hosted sessions end after 5 min idle or 10 min in total; a call that finds its session ended says it started a fresh signed-out browser. --url only sets where a NEW session starts; a live session stays on its page, so move it with --path or a goto action.',
     )
-    .option('--close <session>', 'Close a hosted session by its handle and free its slot (at most 3 live sessions).')
-    .option('--auth-user <email|user_id>', "Start signed in as one of your app's users (needs a project). An email must match exactly one user.")
+    .option('--close <session>', 'Close a hosted session by its handle and free its slot (live sessions count against your plan\'s limit).')
+    .option('--auth-user <email|user_id>', "Start signed in as one of your app's users. An email is looked up in the project (--project or the linked one) and must match exactly one user.")
     .option('--json', 'Print the raw browser response envelope as JSON.')
     .action(async (target: string | undefined, opts: BrowserOptions) => {
       opts.actionSequence = [...actionSequence];
@@ -749,12 +745,12 @@ export function registerBrowser(program: Command) {
 
       const client = new ApiClient(getToken());
       if (opts.authUser !== undefined) {
-        if (typeof body.project_id !== 'string') {
-          error('--auth-user needs a project: pass --project, or run from a linked project directory.');
-          process.exit(1);
-        }
+        // A user id also works with --url on a project you own; the platform
+        // checks that the user belongs to that project.
         try {
-          body.auth = { user_id: await resolveAuthUser(client, body.project_id, opts.authUser) };
+          body.auth = {
+            user_id: await resolveAuthUser(client, typeof body.project_id === 'string' ? body.project_id : linked, opts.authUser),
+          };
         } catch (err) {
           error(err instanceof Error ? err.message : String(err), err);
           process.exit(1);

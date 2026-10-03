@@ -325,8 +325,7 @@ export async function runUpdate(
     return 0;
   }
   if (!semver.valid(installedVersion) || !semver.gt(release.version, installedVersion)) {
-    error(`Update refused: the official latest version (${release.version}) is not newer than ${installedVersion}.`);
-    return 1;
+    return refuse(new Error(`the official latest version (${release.version}) is not newer than ${installedVersion}`));
   }
 
   info(`Update available: ${dim(installedVersion)} → ${teal(release.version)}`);

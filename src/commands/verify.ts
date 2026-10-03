@@ -789,7 +789,7 @@ export interface VerifyKeptSession {
  *    its own browser).
  *  - unconfirmed: a close failed, or a call for that actor may still be running
  *    on the platform, so a browser can exist that this run could not close. The
- *    platform closes an idle browser within 3 minutes.
+ *    platform closes an idle browser within 5 minutes.
  */
 export interface VerifyJourneyCleanup {
   actor: string;
@@ -923,7 +923,7 @@ export interface VerifyJourneyRun {
   closeAll(): Promise<{ cleanup: VerifyJourneyCleanup[]; cleanup_ms: number }>;
 }
 
-const UNCONFIRMED_BACKSTOP = 'the platform closes an idle browser within 3 minutes';
+const UNCONFIRMED_BACKSTOP = 'the platform closes an idle browser within 5 minutes';
 /** A call the client stopped waiting for may still be admitted on the
  *  platform; wait this long (inside the cleanup budget) before closing again. */
 const RECLOSE_AFTER_ABANDONED_MS = 5_000;
@@ -1140,7 +1140,7 @@ export function createVerifyJourneyRun(
         // A continued actor whose browser was reaped would carry on signed out
         // in a fresh browser; that is a different person, so the journey stops.
         if (!first && report.session_note) {
-          const message = `${segment.as}'s browser ended between segments (${report.session_note}), so ${segment.as} is no longer the same signed-in user. Keep each actor's gap between segments under 3 minutes and run the journey again.`;
+          const message = `${segment.as}'s browser ended between segments (${report.session_note}), so ${segment.as} is no longer the same signed-in user. Keep each actor's gap between segments under 5 minutes and run the journey again.`;
           stopped = { kind: 'error', segment: index + 1, as: segment.as, viewport: viewport.label, code: 'VERIFY_ACTOR_SESSION_ENDED', message };
           segments.push({ ...base, ran: true, final_url: report.final_url, error: { code: stopped.code, message } });
           continue;
@@ -1410,7 +1410,7 @@ actor's browser (path becomes a goto). Limits: ${VERIFY_JOURNEY_LIMITS.actors} a
 ${VERIFY_JOURNEY_LIMITS.actions_per_segment} actions per segment, ${VERIFY_JOURNEY_LIMITS.total_actions} in total, ${VERIFY_JOURNEY_LIMITS.deadline_ms / 60000} minutes. Each segment is one browser
 run against your plan's browser limits. When the run ends or is interrupted,
 every actor browser is closed within ${VERIFY_JOURNEY_LIMITS.cleanup_budget_ms / 1000} seconds; any close that cannot be
-confirmed is reported, and the platform closes idle browsers within 3 minutes.
+confirmed is reported, and the platform closes idle browsers within 5 minutes.
 Several users need a claimed account and a CLI login approved for all your
 projects: a login approved for "Only these projects" cannot open named browsers
 (SESSION_SCOPE_FORBIDDEN). Print the full flow schema with: somewhere verify --schema
