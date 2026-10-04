@@ -3195,8 +3195,8 @@ var require_schema_types = __commonJS({
     references?: string; onDelete?: 'cascade' | 'restrict'; renamedFrom?: string;
   }
   interface ClientPermissions<Field extends string> {
-    identity?: 'authenticated' | 'visitor'; read?: boolean | Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
-    create?: Field[] | false | null; update?: Field[] | false | null; delete?: boolean;
+    identity?: 'authenticated' | 'visitor'; read?: boolean | readonly Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
+    create?: readonly Field[] | false | null; update?: readonly Field[] | false | null; delete?: boolean;
   }
   interface FileCollection { readonly __somewhereFileCollection: unique symbol }
   type FileOperation = 'read' | 'upload' | 'replace' | 'delete';

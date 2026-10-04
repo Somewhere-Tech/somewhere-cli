@@ -3,7 +3,7 @@
   "source_files": {
     "worker/containers/compile/declared-data-contract.cjs": "f8a4d1353773f34881aaffbe7ad74aa1eb1458628f2da46cda961e6dd352eb40",
     "worker/containers/compile/runtime-types.cjs": "2ea89ebdf25073a70b69c76cbe78502d8a29f6e89b55323c8bc84ed6651c94eb",
-    "worker/containers/compile/schema-types.cjs": "a99f567e4cdcd996a07cc0b9e868ab69f69a13a573d8f690d6339c61c36b4e33",
+    "worker/containers/compile/schema-types.cjs": "f31099146c91e38e0b526ea4b59b33d4d83f7cdafe79f9805769df850e101848",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
     "worker/containers/compile/typed-files.cjs": "0e17085a38d2c40f84849ebdd5c892a838b9d18d6a5111c0b224f4d389872e90",
     "worker/src/utils/authority/scope-enforcement.ts": "77133d3026c26a7a842952221f54703916322dbccb7d744c98e3f69dec56e5f0",
@@ -16,5 +16,5 @@
     "worker/src/utils/db-schema-deploy/schema-constants.ts": "07e648748409207fa4b97367b8942463c047a0bb0e27a36f16f696f90f2b550d",
     "worker/src/utils/db-schema-deploy/schema-ownership.ts": "e6c811a87bc657707be3518dfe547c6d97718ac073108b126eb7f791c9c08202"
   },
-  "sha256": "3a879aead10fbd5ae906e49a41935e94178c49c3198f6d5729a0bffd469efba0"
+  "sha256": "786df868aee907143e2b3e9c0497792c5d8eb9bf7d2582860db7ad0107eaba40"
 }

@@ -21,9 +21,8 @@ export default schema({
     client: { read: ['id', 'label', 'amount_cents', 'ledger_id'], create: ['label', 'amount_cents', 'ledger_id'] },
   }),
 });`;
-// A reused field-list constant: the platform reader accepts it, but the
-// candidate's schema declaration types client field lists as mutable Field[],
-// so an "as const" (readonly) list does not typecheck yet.
+// A reused field-list constant ("as const", readonly) — the declaration accepts
+// readonly Field[] for client read/create/update.
 const withFieldListConstant = withConstants
   .replace('export default schema({', "const readable = ['id', 'label', 'amount_cents', 'ledger_id'] as const;\nexport default schema({")
   .replace("read: ['id', 'label', 'amount_cents', 'ledger_id']", 'read: readable');
@@ -87,9 +86,7 @@ test('a reused field-list constant is read by the vendored generator', () => {
   assert.deepEqual(vendored.generateFromFiles({ 'db/schema.ts': withFieldListConstant }), vendored.generateFromFiles({ 'db/schema.ts': inline }));
 });
 
-test('a reused "as const" field-list constant typechecks in db/schema.ts', {
-  todo: 'platform schema-types.cjs types client field lists as mutable Field[]; readonly Field[] is needed (root-owned platform source)',
-}, async t => {
+test('a reused "as const" field-list constant typechecks in db/schema.ts', async t => {
   const root = fixture(t, withFieldListConstant, { 'src/main.ts': 'export {};' });
   const result = await check(root);
   assert.equal(result.ok, true, result.raw);
