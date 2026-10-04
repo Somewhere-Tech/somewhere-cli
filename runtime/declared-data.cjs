@@ -35,7 +35,13 @@ var require_declared_data_contract = __commonJS({
   "worker/containers/compile/declared-data-contract.cjs"(exports2, module2) {
     "use strict";
     var identifier = /^[a-z_][a-z0-9_]*$/;
-    var types = /* @__PURE__ */ new Set(["integer", "number", "text", "boolean", "timestamp", "json", "blob"]);
+    var types = /* @__PURE__ */ new Set(["integer", "bigint", "number", "text", "boolean", "timestamp", "json", "blob"]);
+    function canonicalBigintText(value) {
+      if (typeof value !== "string" || !/^(0|-?[1-9][0-9]*)$/.test(value)) return false;
+      const digits = value.startsWith("-") ? value.slice(1) : value;
+      const limit = value.startsWith("-") ? "9223372036854775808" : "9223372036854775807";
+      return digits.length < limit.length || digits.length === limit.length && digits <= limit;
+    }
     function fail(detail) {
       throw new Error(`Invalid declared data contract: ${detail}`);
     }
@@ -120,7 +126,7 @@ var require_declared_data_contract = __commonJS({
           for (const [field, value] of entries.sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
             const column = columns.find((column2) => column2.n === field);
             if (!column || ["json", "blob"].includes(column.t) || !(value === null || typeof value === "string" && value.length <= 256 || typeof value === "boolean" || typeof value === "number" && Number.isFinite(value))) fail(`${name} public read predicate`);
-            if (value === null ? column.nul !== 1 : column.t === "boolean" ? typeof value !== "boolean" : ["integer", "number"].includes(column.t) ? typeof value !== "number" : ["text", "timestamp"].includes(column.t) ? typeof value !== "string" : true) fail(`${name} public read predicate type`);
+            if (value === null ? column.nul !== 1 : column.t === "boolean" ? typeof value !== "boolean" : column.t === "integer" ? !Number.isSafeInteger(value) : column.t === "number" ? typeof value !== "number" : column.t === "bigint" ? !canonicalBigintText(value) : ["text", "timestamp"].includes(column.t) ? typeof value !== "string" : true) fail(`${name} public read predicate type`);
             where[field] = value;
           }
           publicRead = { where };
@@ -211,7 +217,7 @@ var require_declared_data_contract = __commonJS({
       return JSON.stringify({ version: 1, tables });
     }
     function columnType(column) {
-      const type = { integer: "number | string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "Json", blob: "number[]" }[column.t];
+      const type = { integer: "number", bigint: "string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "Json", blob: "number[]" }[column.t];
       return column.nul ? `${type} | null` : type;
     }
     function shape(columns, names, mode, required = /* @__PURE__ */ new Set()) {
@@ -1792,6 +1798,20 @@ interface SomewhereRuntimeContext {
 // ---- sw.ai ----
 type SomewhereAiProvider = 'anthropic' | 'openai' | 'xai' | 'workers-ai' | 'deepseek' | 'deepinfra';
 interface SomewhereAiInputBlock { type: string; [key: string]: unknown }
+/** Native Anthropic image input. Encode file bytes without a data: URL prefix. */
+interface SomewhereAiImageInputBlock extends SomewhereAiInputBlock {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+    data: string;
+  };
+}
+/** Native Anthropic PDF input for one-shot extraction. */
+interface SomewhereAiDocumentInputBlock extends SomewhereAiInputBlock {
+  type: 'document';
+  source: { type: 'base64'; media_type: 'application/pdf'; data: string };
+}
 interface SomewhereAiMessage {
   role: 'user' | 'assistant' | 'system';
   content: string | readonly SomewhereAiInputBlock[];
@@ -1944,7 +1964,13 @@ interface SomewhereAiUserMemory {
   clear(): Promise<{ cleared: true }>;
   compact(schema: SomewhereJsonObject, options?: SomewhereAiUserMemoryCompactOptions): Promise<SomewhereJsonObject>;
 }
-type SomewhereAiTranscribeOptions = { model?: string } & (
+type SomewhereAiTranscribeOptions = {
+  model?: string;
+  /** Spoken language hint for the default transcription model, e.g. 'en'. */
+  language?: string;
+  /** Names, vocabulary or context for the default transcription model. */
+  prompt?: string;
+} & (
   | { audio: string; audio_url?: string }
   | { audio?: string; audio_url: string }
 );
@@ -2720,9 +2746,17 @@ interface SomewhereJob {
   run_at: string | null;
   recovery: SomewhereJobsRecovery | null;
 }
+interface SomewhereJobsCancelResult {
+  job_id: string;
+  status: 'cancelled';
+  ownership_status: 'app_user' | 'project_owner';
+  owner_subject_id: string | null;
+}
 interface SomewhereRuntimeJobs {
   create(options: SomewhereJobsCreateOptions): Promise<SomewhereJobsCreateResult>;
   status(jobId: string): Promise<SomewhereJob>;
+  // Cancels queued work. An ordinary handler already running finishes; its side effects remain.
+  cancel(jobId: string): Promise<SomewhereJobsCancelResult>;
   // True only for a platform-signed job/queue/cron delivery; never throws.
   verifyInvocation(req: Request): Promise<boolean>;
 }
@@ -2951,7 +2985,7 @@ interface SomewhereEndpointConfig<Auth extends SomewhereEndpointAuth, Schema ext
   ): unknown;
 }
 `;
-    var DECLARED_COLUMN_TYPES = { integer: "number | string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "__SomewhereJson", blob: "number[]" };
+    var DECLARED_COLUMN_TYPES = { integer: "number", bigint: "string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "__SomewhereJson", blob: "number[]" };
     function declaredOwnerColumn2(name, table, scopes) {
       if (Object.prototype.hasOwnProperty.call(scopes, name)) return scopes[name];
       const find = (policy) => !policy ? null : policy.k === "o" ? policy.c : policy.k === "a" ? find(policy.p[0]) || find(policy.p[1]) : null;
@@ -3011,7 +3045,7 @@ var require_typed_files = __commonJS({
       const groupOption = member ? `${groupKey}: string | number; ` : "";
       const ops = [];
       if (collection.client.read) {
-        ops.push(`list(options?: { ${groupOption.replace(": string | number; ", "?: string | number; ")}limit?: number; cursor?: string | null }): Promise<FileResult<{ items: ${meta}[]; next: string | null; has_more: boolean }>>`);
+        ops.push(`list(options?: { ${groupOption.replace(": string | number; ", "?: string | number; ")}limit?: number; cursor?: string | null }): Promise<FileResult<{ items: Array<${meta}>; next: string | null; has_more: boolean }>>`);
         ops.push(`get(id: string): Promise<FileResult<${meta}>>`);
         ops.push("url(id: string): string");
         ops.push("shareLink(id: string, options?: { expiresIn?: number }): Promise<FileResult<{ url: string; expires_at: string; expires_in: number }>>");
@@ -3183,6 +3217,7 @@ function id(options?: { uuid?: boolean }): SomewhereSchemaDeclaration.Column;
 function text(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
 function number(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
 function integer(options?: SomewhereSchemaDeclaration.ColumnOptions<number>): SomewhereSchemaDeclaration.Column;
+function bigint(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
 function boolean(options?: SomewhereSchemaDeclaration.ColumnOptions<boolean>): SomewhereSchemaDeclaration.Column;
 function timestamp(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
 function json(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
@@ -3224,6 +3259,15 @@ module.exports = __toCommonJS(declared_data_vendor_entry_exports);
 
 // worker/src/utils/db-schema-deploy/schema-ownership.ts
 var SHARED_AUTHOR_COLUMN = "_sw_author_id";
+
+// worker/src/utils/db-schema-deploy/bigint-text.ts
+function isCanonicalBigintText(value) {
+  if (!/^(0|-?[1-9][0-9]*)$/.test(value)) return false;
+  const negative = value.startsWith("-");
+  const digits = negative ? value.slice(1) : value;
+  const limit = negative ? "9223372036854775808" : "9223372036854775807";
+  return digits.length < limit.length || digits.length === limit.length && digits <= limit;
+}
 
 // worker/src/utils/db-schema-deploy/client-permissions.ts
 function parseClientPermissions(value, columns, scope) {
@@ -3268,7 +3312,7 @@ function parseClientPermissions(value, columns, scope) {
       if (!(literal === null || typeof literal === "boolean" || typeof literal === "string" || typeof literal === "number" && Number.isFinite(literal))) return fail(`client.publicRead.where field "${rawName}" must equal a literal scalar.`);
       if (typeof literal === "string" && literal.length > 256) return fail(`client.publicRead.where field "${rawName}" exceeds 256 characters.`);
       if (literal === null && !column.nullable) return fail(`client.publicRead.where field "${rawName}" cannot equal null because it is required.`);
-      if (literal !== null && (column.helper === "boolean" && typeof literal !== "boolean" || ["integer", "number"].includes(column.helper) && typeof literal !== "number" || ["text", "timestamp"].includes(column.helper) && typeof literal !== "string")) {
+      if (literal !== null && (column.helper === "boolean" && typeof literal !== "boolean" || ["integer", "number"].includes(column.helper) && typeof literal !== "number" || column.helper === "integer" && !Number.isSafeInteger(literal) || column.helper === "bigint" && (typeof literal !== "string" || !isCanonicalBigintText(literal)) || ["text", "timestamp"].includes(column.helper) && typeof literal !== "string")) {
         return fail(`client.publicRead.where field "${rawName}" must match its declared type.`);
       }
       normalized[name] = literal;
@@ -3367,7 +3411,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (col.helper === "id") {
       t = col.uuid === true ? "text" : "integer";
       implicitDefault = true;
-    } else if (col.helper === "integer" || col.helper === "number" || col.helper === "text" || col.helper === "boolean" || col.helper === "timestamp" || col.helper === "json" || col.helper === "blob") {
+    } else if (col.helper === "integer" || col.helper === "bigint" || col.helper === "number" || col.helper === "text" || col.helper === "boolean" || col.helper === "timestamp" || col.helper === "json" || col.helper === "blob") {
       t = col.helper;
     } else {
       return null;
@@ -3508,6 +3552,229 @@ function bakedMemberFromDeclared(scope) {
     o = operations.length === allowed.length ? void 0 : operations;
   }
   return { g, m: s.membership.toLowerCase(), u: s.memberUser.toLowerCase(), mg, ...o !== void 0 ? { o } : {} };
+}
+
+// worker/src/utils/db-schema-deploy/schema-constants.ts
+var LITERAL_WORDS = /* @__PURE__ */ new Set(["true", "false", "null"]);
+var STATEMENT_WORDS = /* @__PURE__ */ new Set([
+  "import",
+  "export",
+  "default",
+  "from",
+  "const",
+  "let",
+  "var",
+  "as",
+  "function",
+  "class"
+]);
+var isPunct = (t, value) => !!t && t.kind === "punct" && t.value === value;
+var OPENERS = "([{";
+var CLOSERS = ")]}";
+function append(into, tokens) {
+  for (const t of tokens) into.push(t);
+}
+var isIdent = (t, value) => !!t && t.kind === "ident" && t.value === value;
+function resolveSchemaConstants(tokens, callable, maxTokens, fail) {
+  const out = [];
+  let i = 0;
+  const imported = /* @__PURE__ */ new Set();
+  while (isIdent(tokens[i], "import")) {
+    const start = i;
+    while (tokens[i].kind !== "eof" && !isIdent(tokens[i], "from")) {
+      if (tokens[i].kind === "ident" && i > start) imported.add(tokens[i].value);
+      i++;
+    }
+    if (isIdent(tokens[i], "from")) i += 2;
+    if (isPunct(tokens[i], ";")) i++;
+    append(out, tokens.slice(start, i));
+  }
+  const constants = /* @__PURE__ */ new Map();
+  const declaredLater = /* @__PURE__ */ new Map();
+  for (let k = i; k < tokens.length; k++) {
+    const t = tokens[k];
+    if ((isIdent(t, "const") || isIdent(t, "let") || isIdent(t, "var")) && tokens[k + 1]?.kind === "ident") {
+      if (!declaredLater.has(tokens[k + 1].value)) declaredLater.set(tokens[k + 1].value, tokens[k + 1].line);
+    }
+  }
+  let expanded = out.length;
+  const budget = (line, adding) => {
+    expanded += adding;
+    if (expanded > maxTokens) {
+      fail(line, "reusing constants here expands the declaration past the size db/schema.ts allows. Reuse fewer copies, or write the shared part once.");
+    }
+  };
+  const expandRange = (from, to, into, owner) => {
+    const open2 = [];
+    for (let k = from; k < to; k++) {
+      const t = tokens[k];
+      if (t.kind === "punct" && OPENERS.includes(t.value)) open2.push(t.value);
+      else if (t.kind === "punct" && CLOSERS.includes(t.value)) open2.pop();
+      if (isPunct(t, ".") && isPunct(tokens[k + 1], ".") && isPunct(tokens[k + 2], ".")) {
+        const target = tokens[k + 3];
+        const opener = open2.length > 0 ? open2[open2.length - 1] : null;
+        if (!target || target.kind !== "ident") {
+          fail(t.line, "a spread (...) must name a constant declared above, as in ...sharedColumns.");
+        }
+        const constant = lookup(target, owner);
+        if (opener !== "{") {
+          fail(t.line, `...${target.value} is only supported inside an object literal { \u2026 }. Reference ${target.value} directly, or write the values inline.`);
+        }
+        if (!constant.objectLiteral) {
+          fail(t.line, `...${target.value} spreads a constant that is not an object literal { \u2026 }. Only object constants can be spread.`);
+        }
+        const inner = constant.tokens.slice(1, -1);
+        if (inner.length > 0 && isPunct(inner[inner.length - 1], ",")) inner.pop();
+        budget(t.line, Math.max(inner.length, 4));
+        append(into, inner);
+        if (inner.length === 0 && isPunct(tokens[k + 4], ",")) k++;
+        k += 3;
+        continue;
+      }
+      if (t.kind !== "ident") {
+        into.push(t);
+        continue;
+      }
+      const next = tokens[k + 1];
+      const prev = tokens[k - 1];
+      const keyPosition = isPunct(next, ":") && (isPunct(prev, "{") || isPunct(prev, ","));
+      if (keyPosition || LITERAL_WORDS.has(t.value) || isPunct(prev, ".")) {
+        into.push(t);
+        continue;
+      }
+      if (owner === null && STATEMENT_WORDS.has(t.value)) {
+        if (isIdent(t, "export") && isIdent(next, "const")) {
+          fail(t.line, '"export const" is not supported in db/schema.ts; the file exports only the schema. Remove "export" from the constant.');
+        }
+        into.push(t);
+        continue;
+      }
+      if (constants.has(t.value) || declaredLater.has(t.value)) {
+        const constant = lookup(t, owner);
+        if (isPunct(next, "(")) {
+          fail(t.line, `${t.value} is a constant, not a function \u2014 write ${t.value} without "( \u2026 )".`);
+        }
+        if (isPunct(next, ".")) {
+          fail(t.line, `${t.value}.${tokens[k + 2]?.value ?? ""} reads a property of a constant, which db/schema.ts cannot evaluate. Declare that part as its own constant, or write it inline.`);
+        }
+        budget(t.line, constant.tokens.length);
+        append(into, constant.tokens);
+        continue;
+      }
+      if (callable.has(t.value)) {
+        into.push(t);
+        continue;
+      }
+      if ((isPunct(next, "(") || isPunct(next, ".")) && owner === null) {
+        into.push(t);
+        continue;
+      }
+      if (isPunct(next, ".")) {
+        fail(t.line, `${t.value}.${tokens[k + 2]?.value ?? ""} reads a value at run time; db/schema.ts is read without running it. Write the literal value instead.`);
+      }
+      if (isPunct(next, "(")) {
+        fail(t.line, `${t.value}(\u2026) is a function call; db/schema.ts is read without running it, so only the schema helpers can be called. Write the value inline, or declare it with const using schema helpers and literals.`);
+      }
+      fail(t.line, `"${t.value}" is not defined in db/schema.ts. Declare it above export default as const ${t.value} = \u2026; or write the value inline.`);
+    }
+  };
+  const lookup = (t, owner) => {
+    const constant = constants.get(t.value);
+    if (constant) return constant;
+    const at = declaredLater.get(t.value);
+    if (owner === t.value) {
+      fail(t.line, `constant ${t.value} refers to itself. A constant must be built from values declared above it.`);
+    }
+    if (at !== void 0) {
+      fail(t.line, owner ? `constant ${owner} uses ${t.value}, which is declared later (line ${at}). Move ${t.value} above ${owner}; constants that refer to each other in a cycle cannot be resolved.` : `${t.value} is used before its declaration on line ${at}. Move the const above export default.`);
+    }
+    return fail(t.line, `"${t.value}" is not defined in db/schema.ts. Declare it above export default as const ${t.value} = \u2026; or write the value inline.`);
+  };
+  while (!isIdent(tokens[i], "export")) {
+    const t = tokens[i];
+    if (t.kind === "eof") return [...out, t];
+    if (isIdent(t, "let") || isIdent(t, "var")) {
+      fail(t.line, `"${t.value}" declares a changeable binding; db/schema.ts allows only const. Change "${t.value}" to "const".`);
+    }
+    if (!isIdent(t, "const")) {
+      if (t.kind === "ident" && constants.has(t.value)) {
+        fail(t.line, `${t.value} is changed after its declaration; constants in db/schema.ts cannot be reassigned or mutated. Declare the final value once with const.`);
+      }
+      if (isIdent(t, "import")) fail(t.line, "imports must come first in db/schema.ts, before any const.");
+      return [...out, ...tokens.slice(i)];
+    }
+    const nameTok = tokens[i + 1];
+    if (!nameTok || nameTok.kind !== "ident") {
+      fail(t.line, "destructuring (const { \u2026 } = / const [ \u2026 ] =) is not supported in db/schema.ts. Declare one constant per name: const name = \u2026;");
+    }
+    const name = nameTok.value;
+    if (callable.has(name) || LITERAL_WORDS.has(name) || STATEMENT_WORDS.has(name) || name === "schema") {
+      fail(nameTok.line, `const ${name} shadows a db/schema.ts helper or keyword. Choose another name, such as ${name}Rule.`);
+    }
+    if (imported.has(name)) {
+      fail(nameTok.line, `const ${name} has the same name as an import. Choose another name.`);
+    }
+    if (constants.has(name)) fail(nameTok.line, `const ${name} is declared twice. Keep one declaration.`);
+    if (isPunct(tokens[i + 2], ":")) {
+      fail(tokens[i + 2].line, `const ${name} has a type annotation; db/schema.ts constants take their type from the helpers. Remove ": \u2026".`);
+    }
+    if (!isPunct(tokens[i + 2], "=")) fail(nameTok.line, `expected "=" after const ${name}.`);
+    const start = i + 3;
+    let k = start;
+    let depth = 0;
+    for (; tokens[k].kind !== "eof"; k++) {
+      const v = tokens[k];
+      if (v.kind === "punct" && OPENERS.includes(v.value)) depth++;
+      else if (v.kind === "punct" && CLOSERS.includes(v.value)) {
+        depth--;
+        if (depth < 0) fail(v.line, `const ${name} has an unmatched "${v.value}". Balance its brackets.`);
+      } else if (depth === 0 && (isPunct(v, ";") || isPunct(v, ",") || isIdent(v, "const") && !isIdent(tokens[k - 1], "as") || isIdent(v, "let") || isIdent(v, "var") || isIdent(v, "export"))) break;
+      if (depth === 0 && isPunct(v, "=")) fail(v.line, `${name} is assigned twice; give each constant one value.`);
+    }
+    if (depth !== 0) fail(nameTok.line, `const ${name} has an unclosed bracket. Balance its brackets.`);
+    let end2 = k;
+    if (end2 - start >= 2 && isIdent(tokens[end2 - 2], "as") && isIdent(tokens[end2 - 1], "const")) end2 -= 2;
+    if (end2 === start) fail(nameTok.line, `const ${name} has no value.`);
+    if (isPunct(tokens[k], ",")) {
+      fail(tokens[k].line, `one declaration declares several constants; write one const per name (const ${name} = \u2026;).`);
+    }
+    const value = [];
+    expandRange(start, end2, value, name);
+    const objectLiteral = isPunct(tokens[start], "{") && matchingClose(tokens, start) === end2 - 1;
+    constants.set(name, { name, line: nameTok.line, tokens: value, objectLiteral });
+    i = isPunct(tokens[k], ";") ? k + 1 : k;
+  }
+  if (isIdent(tokens[i], "export") && isIdent(tokens[i + 1], "const")) {
+    fail(tokens[i].line, '"export const" is not supported in db/schema.ts; the file exports only the schema. Remove "export" from the constant.');
+  }
+  const body = [];
+  const open = tokens.findIndex((v, k) => k > i && isPunct(v, "(") && isIdent(tokens[k - 1], "schema"));
+  const close = open < 0 ? -1 : matchingClose(tokens, open);
+  const end = close < 0 ? tokens.length : close + 1;
+  expandRange(i, end, body, null);
+  for (let k = end; k < tokens.length; k++) {
+    const v = tokens[k];
+    if (v.kind === "ident" && constants.has(v.value) && (isPunct(tokens[k + 1], "=") || isPunct(tokens[k + 1], "."))) {
+      fail(v.line, `${v.value} is changed after its declaration; constants in db/schema.ts cannot be reassigned or mutated. Declare the final value once with const.`);
+    }
+    body.push(v);
+  }
+  if (out.length + body.length > maxTokens) {
+    fail(tokens[i].line, "reusing constants here expands the declaration past the size db/schema.ts allows. Reuse fewer copies, or write the shared part once.");
+  }
+  return [...out, ...body];
+}
+function matchingClose(tokens, open) {
+  let depth = 0;
+  for (let k = open; k < tokens.length; k++) {
+    const v = tokens[k];
+    if (v.kind === "punct" && "([{".includes(v.value)) depth++;
+    else if (v.kind === "punct" && ")]}".includes(v.value)) {
+      depth--;
+      if (depth === 0) return k;
+    }
+  }
+  return -1;
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-relations.ts
@@ -3876,6 +4143,7 @@ var COLUMN_HELPERS = /* @__PURE__ */ new Set([
   "text",
   "number",
   "integer",
+  "bigint",
   "boolean",
   "timestamp",
   "json",
@@ -3883,6 +4151,17 @@ var COLUMN_HELPERS = /* @__PURE__ */ new Set([
 ]);
 var SCOPE_HELPERS = /* @__PURE__ */ new Set(["owner", "shared", "serverOnly", "member", "anyOf", "parent"]);
 var TABLE_MARKER_HELPERS = /* @__PURE__ */ new Set(["removedTable", "exported"]);
+var SCHEMA_CALLABLE = /* @__PURE__ */ new Set([
+  ...COLUMN_HELPERS,
+  ...SCOPE_HELPERS,
+  ...TABLE_MARKER_HELPERS,
+  "schema",
+  "table",
+  "removed",
+  "hasMany",
+  "belongsTo",
+  "files"
+]);
 var SAFE_IDENT = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
 var RESERVED_PREFIXES = ["app_", "sqlite_", "d1_", "__sw_"];
 var MAX_TABLES = 100;
@@ -3979,7 +4258,7 @@ function tokenize(source) {
       i = j;
       continue;
     }
-    if ("(){}[]:,;.".includes(ch)) {
+    if ("(){}[]:,;.=".includes(ch)) {
       tokens.push({ kind: "punct", value: ch, line });
       i++;
       continue;
@@ -4146,7 +4425,7 @@ function readColumn(r, tableName, rawName, line) {
   }
   if (!COLUMN_HELPERS.has(helper)) {
     throw new SchemaTsError(
-      `line ${helperTok.line}: unknown column type "${helper}" on "${tableName}"."${rawName}". Use one of: id, text, number, integer, boolean, timestamp, json, blob.`
+      `line ${helperTok.line}: unknown column type "${helper}" on "${tableName}"."${rawName}". Use one of: id, text, number, integer, bigint, boolean, timestamp, json, blob.`
     );
   }
   r.expectPunct("(", `after "${helper}"`);
@@ -4196,14 +4475,17 @@ function readColumn(r, tableName, rawName, line) {
           col.autoNow = true;
           break;
         }
-        const okType = value === null || t === "boolean" && typeof value === "boolean" || (t === "number" || t === "integer") && typeof value === "number" || (t === "text" || t === "timestamp" || t === "json") && typeof value === "string";
+        const okType = value === null || t === "boolean" && typeof value === "boolean" || (t === "number" || t === "integer") && typeof value === "number" || (t === "text" || t === "timestamp" || t === "json" || t === "bigint") && typeof value === "string";
         if (!okType) {
           throw new SchemaTsError(
-            `line ${optLine}: the default for "${tableName}"."${rawName}" (${t}) must be ${t === "boolean" ? "true or false" : t === "number" || t === "integer" ? "a number" : t === "blob" ? "omitted \u2014 blob columns cannot declare a default" : "a string"} or null.`
+            `line ${optLine}: the default for "${tableName}"."${rawName}" (${t}) must be ${t === "boolean" ? "true or false" : t === "number" || t === "integer" ? "a number" : t === "bigint" ? "a whole number written as a string, like '9007199254740993'" : t === "blob" ? "omitted \u2014 blob columns cannot declare a default" : "a string"} or null.`
           );
         }
-        if (t === "integer" && typeof value === "number" && !Number.isInteger(value)) {
-          throw new SchemaTsError(`line ${optLine}: the default for integer column "${tableName}"."${rawName}" must be a whole number.`);
+        if (t === "integer" && typeof value === "number" && !Number.isSafeInteger(value)) {
+          throw new SchemaTsError(Number.isInteger(value) ? `line ${optLine}: the default for integer column "${tableName}"."${rawName}" is outside JavaScript's exact whole-number range (\xB19007199254740991). Declare the column bigint() and write the default as a string.` : `line ${optLine}: the default for integer column "${tableName}"."${rawName}" must be a whole number.`);
+        }
+        if (t === "bigint" && typeof value === "string" && !isCanonicalBigintText(value)) {
+          throw new SchemaTsError(`line ${optLine}: the default for bigint column "${tableName}"."${rawName}" must be a whole number between -9223372036854775808 and 9223372036854775807, written as a string with no sign other than a leading minus and no leading zeros.`);
         }
         col.hasDefault = true;
         col.default = value;
@@ -4755,12 +5037,14 @@ function extractSchemaTs(source) {
     return { ok: false, errors: [`db/schema.ts is larger than ${Math.floor(MAX_SOURCE_BYTES / 1024)}KB \u2014 that is not a schema declaration.`] };
   }
   try {
-    const r = new Reader(tokenize(source));
+    const r = new Reader(resolveSchemaConstants(tokenize(source), SCHEMA_CALLABLE, MAX_SOURCE_BYTES, (line, message) => {
+      throw new SchemaTsError(`line ${line}: ${message}`);
+    }));
     while (r.peek().kind === "ident" && r.peek().value === "import") skipImport(r);
     const exp = r.expectIdent("to start the declaration");
     if (exp.value !== "export") {
       throw new SchemaTsError(
-        `line ${exp.line}: db/schema.ts must contain only the schema declaration: optional imports, then "export default schema({ \u2026 })". Found "${exp.value}".`
+        `line ${exp.line}: db/schema.ts must contain only the schema declaration: optional imports, optional const declarations, then "export default schema({ \u2026 })". Found "${exp.value}".`
       );
     }
     const def = r.expectIdent('after "export"');

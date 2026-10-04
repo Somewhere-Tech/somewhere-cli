@@ -261,7 +261,8 @@ test('private-data schema compiles through the platform parser to an owner() tab
   assert.match(client.declaration, /"notes": \{ list\(/);
   // Browser writes are limited to title/body; the platform owns the owner column.
   assert.match(client.declaration, /create\(values: \{ "body"\?: string; "title": string \}\)/);
-  assert.match(client.declaration, /update\(id: number \| string, values: \{ "body"\?: string; "title"\?: string \}\)/);
+  // An id() key is an integer, so the candidate generator types it as number (not number | string).
+  assert.match(client.declaration, /update\(id: number, values: \{ "body"\?: string; "title"\?: string \}\)/);
   assert.match(schema, /scope: owner\(\)/);
   assert.match(schema, /identity: 'authenticated'/);
   assert.doesNotMatch(schema, /publicRead: true|shared\(\)|serverOnly\(\)/);
