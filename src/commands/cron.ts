@@ -28,6 +28,7 @@ interface CronCreateOptions extends ProjectOptions {
 
 interface CronUpdateOptions {
   schedule?: string;
+  timezone?: string;
   handler?: string;
   name?: string;
   payload?: string;
@@ -277,7 +278,8 @@ export function registerCron(program: Command): void {
         + '  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
         + '  somewhere cron create "0 9 * * *" /api/daily-digest --project my-app --timezone America/Los_Angeles\n'
         + '  somewhere cron run daily-digest --wait   # queue one run now and wait for its result\n'
-        + '\nSchedules are read in UTC unless --timezone names an IANA zone.\n',
+        + '\nA new schedule is read in UTC unless --timezone names an IANA zone. `cron list` shows the\n'
+        + 'zone each trigger is stored in, and `cron update --schedule` keeps that zone unless --timezone changes it.\n',
     );
 
   cron
@@ -304,10 +306,12 @@ export function registerCron(program: Command): void {
         if (rows.length === 0) {
           console.log(dim('No scheduled triggers.'));
         } else {
-          table(['ID', 'Name', 'Schedule (UTC)', 'Handler', 'Enabled'], rows.map((row) => [
+          // Each trigger's schedule is read in its own stored zone (tsk_b07f1dac).
+          table(['ID', 'Name', 'Schedule', 'Time zone', 'Handler', 'Enabled'], rows.map((row) => [
             cronRowId(row) ?? '—',
             truncateText(row.name, 32),
             typeof row.schedule === 'string' ? row.schedule : '—',
+            typeof row.timezone === 'string' && row.timezone ? row.timezone : '—',
             truncateText(row.handler, 48),
             row.enabled === false ? 'no' : 'yes',
           ]));
@@ -415,7 +419,8 @@ export function registerCron(program: Command): void {
   cron
     .command('update <cron-id>')
     .description('Update a scheduled trigger')
-    .option('--schedule <expression>', 'New 5-field UTC cron expression')
+    .option('--schedule <expression>', "New 5-field cron expression, read in the trigger's stored time zone (shown by cron list) unless --timezone changes it")
+    .option('--timezone <iana>', 'New IANA time zone the schedule is read in, e.g. America/Los_Angeles; omit to keep the stored zone')
     .option('--handler <path-or-url>', 'New project-relative /api path or https URL')
     .option('--name <name>', 'New display name')
     .option('--payload <json>', 'New JSON object sent to the handler')
@@ -428,13 +433,14 @@ export function registerCron(program: Command): void {
         const args = compactRecord([
           ['cron_id', cronId],
           ['schedule', opts.schedule],
+          ['timezone', opts.timezone],
           ['handler', opts.handler],
           ['name', opts.name],
           ['payload', parsePayload(opts.payload)],
           ['enabled', opts.enable ? true : opts.disable ? false : undefined],
         ]);
         if (Object.keys(args).length === 1) {
-          throw new Error('No update supplied. Pass a field such as --schedule, --handler, --enable, or --disable.');
+          throw new Error('No update supplied. Pass a field such as --schedule, --timezone, --handler, --enable, or --disable.');
         }
         await runCronTool('cron_update', args, opts.json, (value) => printCronMutation('Scheduled trigger updated', value));
       } catch (err) {

@@ -191,3 +191,48 @@ test('cron create uses the linked project and explicit project overrides it', as
   assert.equal(calls[0].project_id, 'linked-project');
   assert.equal(calls[1].project_id, 'explicit-project');
 });
+
+// tsk_b07f1dac item 3: `cron list` labelled every schedule UTC and `cron update
+// --help` called the expression UTC, while a trigger keeps the zone it was
+// created in. The list now shows each stored zone; update documents and can
+// change it.
+test('cron list shows each trigger\'s stored time zone, never a blanket UTC label', async () => {
+  const home = credentialHome('sw-cron-tz-list-');
+  let output;
+  await withFixture(() => toolSuccess({ crons: [
+    { cron_id: 'cron_la', name: 'reminder', schedule: '0 9 * * *', timezone: 'America/Los_Angeles', handler: '/api/remind', enabled: true },
+    { cron_id: 'cron_utc', name: 'cleanup', schedule: '0 3 * * *', timezone: 'UTC', handler: '/api/cleanup', enabled: true },
+    { cron_id: 'cron_old', name: 'legacy', schedule: '0 4 * * *', handler: '/api/legacy', enabled: true },
+  ] }), async (url) => {
+    output = await run(['cron', 'list', '--project', 'platform'], { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url });
+  });
+  assert.equal(output.status, 0, output.stderr);
+  assert.doesNotMatch(output.stdout, /Schedule \(UTC\)/i);
+  assert.match(output.stdout, /Time zone/i);
+  const line = (id) => output.stdout.split('\n').find((l) => l.includes(id)) ?? '';
+  assert.match(line('cron_la'), /America\/Los_Angeles/);
+  assert.match(line('cron_utc'), /UTC/);
+  // No zone in the response: shown as unknown, not assumed to be UTC.
+  assert.doesNotMatch(line('cron_old'), /UTC/);
+});
+
+test('cron update --help reads the schedule in the stored zone and offers --timezone', async () => {
+  const home = credentialHome('sw-cron-tz-update-help-');
+  const help = await run(['cron', 'update', '--help'], { HOME: home, USERPROFILE: home });
+  assert.equal(help.status, 0, help.stderr);
+  assert.doesNotMatch(help.stdout, /5-field UTC cron expression/);
+  assert.match(help.stdout, /stored time zone/);
+  assert.match(help.stdout, /--timezone <iana>/);
+});
+
+test('cron update forwards --timezone verbatim and omits it otherwise', async () => {
+  const home = credentialHome('sw-cron-tz-update-');
+  const calls = [];
+  await withFixture((params) => { calls.push(params.arguments); return toolSuccess({ cron_id: 'cron_la' }); }, async (url) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url };
+    assert.equal((await run(['cron', 'update', 'cron_la', '--timezone', 'Europe/Paris'], env)).status, 0);
+    assert.equal((await run(['cron', 'update', 'cron_la', '--schedule', '0 8 * * *'], env)).status, 0);
+  });
+  assert.deepEqual(calls[0], { cron_id: 'cron_la', timezone: 'Europe/Paris' });
+  assert.deepEqual(calls[1], { cron_id: 'cron_la', schedule: '0 8 * * *' });
+});
