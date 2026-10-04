@@ -831,6 +831,19 @@ interface SomewhereRuntimeAuthMfa {
   verify(options: { token: string; enrollment_id: string; activation_token: string; code: string }):
     Promise<{ enabled: true; backup_codes: string[] }>;
   unenroll(options: { token: string; code: string }): Promise<{ enabled: false }>;
+  // The same steps for the request's own session (cookie or Bearer). verifyWithCookie ends every session and clears the cookies.
+  enrollWithCookie(req: Request): Promise<{
+    secret: string; enrollment_id: string; otpauth_uri: string; issuer: string; account: string;
+  }>;
+  reauthenticateWithCookie(req: Request, options: { enrollment_id: string; method: 'password'; password: string }):
+    Promise<{ method: 'password'; activation_token: string; expires_in_seconds: number }>;
+  reauthenticateWithCookie(req: Request, options: { enrollment_id: string; method: 'email' }):
+    Promise<{ method: 'email'; challenge_id: string; expires_in_seconds: number; pending?: true }>;
+  verifyReauthenticationWithCookie(req: Request, options: { enrollment_id: string; challenge_id: string; code: string }):
+    Promise<{ method: 'email'; activation_token: string; expires_in_seconds: number }>;
+  verifyWithCookie(req: Request, options: { enrollment_id: string; activation_token: string; code: string }):
+    Promise<{ enabled: true; backup_codes: string[] }>;
+  unenrollWithCookie(req: Request, options: { code: string }): Promise<{ enabled: false }>;
 }
 interface SomewhereRuntimeAuth {
   signup(options: SomewhereAuthSignupOptions): Promise<SomewhereAuthIssuedSession>;
@@ -854,10 +867,17 @@ interface SomewhereRuntimeAuth {
   // Email change is verify-gated: sends a code, never writes the address immediately.
   updateProfile(token: string, options: SomewhereAuthEmailChangeRequest): Promise<SomewhereAuthEmailChangeStarted>;
   updateProfileWithCookie(req: Request, options: SomewhereAuthProfileUpdate): Promise<{ user: SomewhereAuthUpdatedUser }>;
+  updateProfileWithCookie(req: Request, options: SomewhereAuthEmailChangeRequest): Promise<{ email_change: SomewhereAuthEmailChange }>;
+  // Email change steps for the request's own session: change_id is email_change.id, code the 6-digit emailed code.
+  verifyEmailChangeCurrentWithCookie(req: Request, options: { change_id: string; code: string }): Promise<SomewhereAuthVerificationSent>;
+  verifyEmailChangeWithCookie(req: Request, options: { change_id: string; code: string }): Promise<{ changed: true; email: string }>;
   // Email verification for the request's own session (cookie or Bearer); no token in app code.
   requestEmailVerificationWithCookie(req: Request): Promise<SomewhereAuthVerificationSent>;
   verifyEmailWithCookie(req: Request, options: { code: string }): Promise<{ verified: true }>;
   deleteUser(token: string): Promise<{ deleted: true }>;
+  // Password change and account deletion end every session of the account; these clear the cookies.
+  updatePasswordWithCookie(req: Request, options: { new_password: string; current_password?: string }): Promise<{ updated: true }>;
+  deleteUserWithCookie(req: Request): Promise<{ deleted: true }>;
   googleUrl(options: { redirect_uri: string }): string;
   githubUrl(options: { redirect_uri: string }): string;
   discordUrl(options: { redirect_uri: string }): string;
@@ -1256,6 +1276,8 @@ interface SomewhereCalendarPolicyInput {
   advance_notice_hours?: number | null;
   bookable_from?: SomewhereCalendarInstant | null;
   turnaround_hours?: number | null;
+  // Seats per exact [start, end) class slot. Omitted or null: one reservation per overlapping range.
+  capacity?: number | null;
 }
 type SomewhereCalendarSetPolicyOptions = { resource: string } & ({ policy: SomewhereCalendarPolicyInput } | (SomewhereCalendarPolicyInput & { policy?: never }));
 interface SomewhereCalendarPolicy {
@@ -1265,6 +1287,7 @@ interface SomewhereCalendarPolicy {
   advance_notice_hours: number | null;
   bookable_from_ms: number | null;
   turnaround_hours: number | null;
+  capacity: number | null;
   created_at: number | null;
   updated_at: number | null;
 }
@@ -1280,6 +1303,10 @@ interface SomewhereCalendarAvailabilityResult {
     expires_at: number | null;
   }[];
   free: { start_ms: number; end_ms: number }[];
+  // null for an exclusive resource.
+  capacity: number | null;
+  // Existing class slots overlapping the range (full ones included); not a schedule.
+  slots: { start_ms: number; end_ms: number; capacity: number; reserved: number; remaining: number }[];
 }
 interface SomewhereCalendarListExtras {
   range?: SomewhereCalendarReadRange | null;
@@ -2534,17 +2561,91 @@ interface SomewhereRuntimeNotifications {
 interface SomewherePushSendOptions {
   // Required: a string or any JSON-serializable value.
   payload: string | number | boolean | object;
-  // Neither user_id nor endpoint: broadcast to every subscription in the project.
+  // Exactly one target; a missing, null or empty one is refused.
   user_id?: string;
   userId?: string;
   endpoint?: string;
+  subscription_id?: string;
+  subscriptionId?: string;
+  // 'developer': devices registered with developer credentials. 'all': every device.
+  audience?: 'developer' | 'all';
   ttl?: number;
 }
-interface SomewherePushSendResult { sent: number; failed: number; gone: number; recipients: number }
-// subscribe / unsubscribe are withdrawn in functions (always throw PUSH_SUBSCRIBE_UNAVAILABLE) and are not declared.
+type SomewherePushPlatform = 'web' | 'test';
+type SomewherePushDeliveryOutcome = 'sent' | 'failed' | 'gone' | 'captured';
+interface SomewherePushDeviceResult {
+  delivery_id: string;
+  subscription_id: string;
+  user_id: string | null;
+  platform: SomewherePushPlatform;
+  device_label: string | null;
+  endpoint_host: string | null;
+  outcome: SomewherePushDeliveryOutcome;
+  http_status: number | null;
+  error: string | null;
+}
+interface SomewherePushSendResult {
+  sent: number; failed: number; gone: number; captured: number; recipients: number;
+  // false: the notifications went out but their history was not recorded.
+  history_recorded: boolean;
+  devices: SomewherePushDeviceResult[];
+}
+// The object PushManager.subscribe() returns, or its toJSON().
+interface SomewherePushBrowserSubscription {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+interface SomewherePushSubscribeResult {
+  id: string; platform: SomewherePushPlatform; owner: 'app_user' | 'developer';
+  created: boolean; reassigned?: boolean;
+}
+interface SomewherePushDevice {
+  // 'legacy': stored before owners were verified; no send reaches it until it re-registers.
+  id: string; user_id: string | null; owner: 'app_user' | 'developer' | 'legacy';
+  platform: SomewherePushPlatform; device_label: string | null; endpoint_host: string | null;
+  created_at: string; updated_at: string | null;
+}
+interface SomewherePushDelivery {
+  id: string; subscription_id: string; user_id: string | null; platform: SomewherePushPlatform;
+  device_label: string | null; endpoint_host: string | null; outcome: SomewherePushDeliveryOutcome;
+  http_status: number | null; error: string | null; title: string | null; url: string | null;
+  // Present on test-inbox deliveries only.
+  payload?: unknown;
+  created_at: string;
+}
+interface SomewherePushHistoryOptions {
+  user_id?: string;
+  userId?: string;
+  subscription_id?: string;
+  subscriptionId?: string;
+  limit?: number;
+}
 interface SomewhereRuntimePush {
   vapidPublicKey(): Promise<{ vapid_public_key: string }>;
+  // Registers a device for the signed-in user of this request (AUTH_REQUIRED without one).
+  subscribe(
+    subscription: SomewherePushBrowserSubscription | { toJSON(): SomewherePushBrowserSubscription } | { test: true },
+    options?: { label?: string },
+  ): Promise<SomewherePushSubscribeResult>;
+  unsubscribe(target: string | { endpoint: string } | { test: true }): Promise<{ deleted: boolean }>;
   send(options: SomewherePushSendOptions): Promise<SomewherePushSendResult>;
+  subscriptions(options?: { user_id?: string; userId?: string; limit?: number }): Promise<{ subscriptions: SomewherePushDevice[] }>;
+  deliveries(options?: SomewherePushHistoryOptions): Promise<{ deliveries: SomewherePushDelivery[] }>;
+}
+
+// The push browser helper (tsk_80c0ed92). The compiler maps this specifier to
+// the same-origin /__sw/push/client.js the project origin serves.
+declare module 'somewhere:push' {
+  export interface PushDeviceResult {
+    endpoint?: string; id: string; platform: 'web' | 'test'; owner: 'app_user' | 'developer';
+    created: boolean; reassigned?: boolean;
+  }
+  export interface PushStatus { supported: boolean; permission: NotificationPermission | 'unsupported'; subscribed: boolean; endpoint: string | null }
+  export interface PushMessage { type: 'push' | 'click'; payload: unknown }
+  export function enablePush(options?: { test?: boolean; label?: string }): Promise<PushDeviceResult>;
+  export function disablePush(options?: { test?: boolean }): Promise<{ deleted: boolean }>;
+  export function pushStatus(): Promise<PushStatus>;
+  export function listenToPush(handler: (message: PushMessage) => void): () => void;
 }
 
 // \u2500\u2500 sw.queue / sw.jobs \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
@@ -2570,6 +2671,8 @@ interface SomewhereJobsCreateOptions {
   priority?: 'normal' | 'low';
   // Generated per call when omitted.
   idempotency_key?: string;
+  // Earliest start: an ISO-8601 time with an explicit offset, e.g. '2026-10-05T09:00:00Z'. Must be in the future.
+  run_at?: string;
   agent?: { messages: readonly unknown[]; max_steps?: number; max_turns?: number; deployment_version?: string };
 }
 interface SomewhereJobsRecovery {
@@ -2586,6 +2689,8 @@ interface SomewhereJobsCreateResult {
   recovery: SomewhereJobsRecovery | null;
   ownership_status?: 'app_user' | 'project_owner';
   owner_subject_id?: string | null;
+  // ISO time when run_at was given; status is 'scheduled' until then.
+  run_at?: string | null;
 }
 interface SomewhereJob {
   job_id: string;
@@ -2612,6 +2717,7 @@ interface SomewhereJob {
   cron_id: string | null;
   cron_scheduled_at: string | null;
   trigger: 'scheduled' | 'manual' | null;
+  run_at: string | null;
   recovery: SomewhereJobsRecovery | null;
 }
 interface SomewhereRuntimeJobs {
@@ -2795,6 +2901,14 @@ interface __SomewhereTypedRequest<Input> extends Request { json(): Promise<Input
 type ServerFunction<Contract extends { input: unknown; output: unknown }> =
   (req: __SomewhereTypedRequest<Contract["input"]>, sw: SomewhereRuntimeContext) =>
     Contract["output"] | Promise<Contract["output"]>;
+
+// Outbound WebSocket client: fetch(url, { headers: { Upgrade: 'websocket' } })
+// returns the upgraded socket on the response (null on any other response),
+// and the function calls accept() before using it. The runtime fetch wrapper
+// and the pinned egress transport both hand that response through
+// (worker/src/runtime/fetch.ts, routes/code-egress.ts). Merged into lib.dom.
+interface Response { readonly webSocket: WebSocket | null }
+interface WebSocket { accept(): void }
 `;
     var ENDPOINT_DECLARATION2 = `
 interface SomewhereEndpointUser {
