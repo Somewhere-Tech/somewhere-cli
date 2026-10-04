@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.37.9
+
+### Added
+
+- Every auth starter (plain `somewhere init` and `--features auth`) includes a "Verify your email" code panel for password accounts. It uses the SDK cookie session through the packaged `/api/auth` route, so the session decides the account and no token reaches page code. The starter pins `@somewhere-tech/sdk` 0.11.6.
+- `somewhere init --features magic-link` adds passwordless sign-in links: an "email me a sign-in link" form on the sign-in page and the `/auth/magic` page the email opens, routed in front of the sign-in gate. The page redeems the one-time token for the same cookie session, then opens the link's `redirect_uri` only when it is a page of this app. `sw.auth.invite` links land on the same page.
+- `somewhere init --subdomain <slug>` names the new project's subdomain (default: derived from `--name`). It cannot be combined with `--link`.
+
+### Changed
+
+- The bundled declared-data parser and generator are re-vendored from the current platform source.
+
 ## 0.37.8
 
 ### Fixed
