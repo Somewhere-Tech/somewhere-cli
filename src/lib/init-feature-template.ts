@@ -21,7 +21,7 @@ const PACKAGE_JSON = `{
     "typecheck": "somewhere typecheck"
   },
   "dependencies": {
-    "@somewhere-tech/sdk": "0.11.3",
+    "@somewhere-tech/sdk": "0.11.6",
     "react": "19.2.7",
     "react-dom": "19.2.7"
   },
@@ -116,6 +116,25 @@ export interface SignOutAction {
 /** A sign-out the server has not confirmed; retry() calls it again. */
 export interface UnconfirmedSignOut {
   pending: boolean;
+  retry(): void;
+}
+
+/**
+ * The "verify your email" panel. checking: asking the server. verified: done;
+ * the panel shows nothing. unverified: the code form. unavailable: the server
+ * could not say; retry() asks again.
+ */
+export interface EmailVerification {
+  status: 'checking' | 'verified' | 'unverified' | 'unavailable';
+  code: string;
+  /** A code was emailed in this visit. */
+  sent: boolean;
+  pending: boolean;
+  error: string | null;
+  canSubmit: boolean;
+  setCode(value: string): void;
+  sendCode(): Promise<void>;
+  submit(): Promise<void>;
   retry(): void;
 }
 `;
@@ -2228,12 +2247,422 @@ const ASSISTANT_CSS = `/* Assistant example: delete with src/ui/AssistantPanel.t
 }
 `;
 
+// ----------------------------------------------------------------- magic-link
+
+const MAGIC_LINK_TYPES = `/** The "email me a sign-in link" form on the sign-in page. */
+export interface MagicLinkRequest {
+  email: string;
+  pending: boolean;
+  /** The address the last link was sent to, until the email is edited. */
+  sentTo: string | null;
+  error: string | null;
+  canSubmit: boolean;
+  setEmail(value: string): void;
+  submit(): Promise<void>;
+}
+
+/**
+ * The /auth/magic page the emailed link opens. verifying: the one-time token
+ * is being exchanged for the session. failed: it was missing, already used,
+ * expired or revoked. On success the page leaves, so there is no third state.
+ */
+export type MagicLinkLanding =
+  | { status: 'verifying' }
+  | { status: 'failed'; error: string };
+`;
+
+const MAGIC_LINK_HOOKS = `import { useEffect, useRef, useState } from 'react';
+import { useAuth } from '@somewhere-tech/sdk/react';
+import type { MagicLinkLanding, MagicLinkRequest } from '../../types/magic-link';
+import { authErrorMessage } from '../services/auth';
+
+// Sign-in links. The packaged route api/auth/[...path].ts sends the email
+// (POST /api/auth/magic-link) and redeems it (/api/auth/magic-link/verify).
+// The email opens /auth/magic?token=…; the token works once.
+
+export function useMagicLinkRequest(): MagicLinkRequest {
+  const auth = useAuth();
+  const [email, setEmailValue] = useState('');
+  const [pending, setPending] = useState(false);
+  const [sentTo, setSentTo] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const canSubmit = !pending && email.trim() !== '';
+
+  async function submit() {
+    if (!canSubmit) return;
+    const address = email.trim();
+    setPending(true);
+    setError(null);
+    try {
+      await auth.sendMagicLink({ email: address });
+      setSentTo(address);
+    } catch (reason: unknown) {
+      setError(authErrorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return {
+    email,
+    pending,
+    sentTo,
+    error,
+    canSubmit,
+    setEmail(value) {
+      setEmailValue(value);
+      setSentTo(null);
+    },
+    submit,
+  };
+}
+
+/**
+ * Where to go after signing in: the link's redirect_uri when it is a page of
+ * this app (an invitation link carries ?invite_id=… there), otherwise home.
+ * Another origin is never followed.
+ */
+export function landingTarget(search: string, origin: string): string {
+  const requested = new URLSearchParams(search).get('redirect_uri');
+  if (!requested) return '/';
+  try {
+    const url = new URL(requested, origin);
+    return url.origin === origin ? url.pathname + url.search + url.hash : '/';
+  } catch {
+    return '/';
+  }
+}
+
+export function useMagicLinkLanding(): MagicLinkLanding {
+  const auth = useAuth();
+  const [error, setError] = useState<string | null>(null);
+  const started = useRef(false);
+
+  useEffect(() => {
+    if (started.current) return; // the token works once; never verify it twice
+    started.current = true;
+    const token = new URLSearchParams(window.location.search).get('token');
+    const target = landingTarget(window.location.search, window.location.origin);
+    if (!token) {
+      setError('This sign-in link is incomplete. Request a new one.');
+      return;
+    }
+    // Keep the one-time token out of the address bar and history.
+    window.history.replaceState(null, '', window.location.pathname);
+    auth.verifyMagicLink({ token })
+      // A full load: the app starts again with the new session.
+      .then(() => window.location.replace(target))
+      .catch((reason: unknown) => setError(authErrorMessage(reason)));
+  }, [auth]);
+
+  return error === null ? { status: 'verifying' } : { status: 'failed', error };
+}
+`;
+
+const MAGIC_LINK_PAGE = `import { useMagicLinkLanding } from '../auth/magic-link';
+import { MagicLinkStatus } from '../ui/MagicLink';
+
+// /auth/magic: the page the emailed sign-in or invitation link opens.
+export function MagicLinkPage() {
+  const landing = useMagicLinkLanding();
+  return <MagicLinkStatus landing={landing} />;
+}
+`;
+
+const MAGIC_SIGN_IN_PAGE = `import { useCredentialsForm, useUnconfirmedSignOut } from '../auth/hooks';
+import { useMagicLinkRequest } from '../auth/magic-link';
+import { APP_NAME } from '../config';
+import { AuthCard } from '../ui/AuthCard';
+import { SignOutUnconfirmed } from '../ui/feedback';
+import { MagicLinkForm } from '../ui/MagicLink';
+
+export function SignInPage() {
+  const form = useCredentialsForm();
+  const magicLink = useMagicLinkRequest();
+  const unconfirmed = useUnconfirmedSignOut();
+  return (
+    <>
+      {unconfirmed ? <SignOutUnconfirmed pending={unconfirmed.pending} onRetry={unconfirmed.retry} /> : null}
+      <AuthCard appName={APP_NAME} form={form}>
+        <MagicLinkForm request={magicLink} />
+      </AuthCard>
+    </>
+  );
+}
+`;
+
+const STYLED_MAGIC_LINK = `import type { FormEvent } from 'react';
+import type { MagicLinkLanding, MagicLinkRequest } from '../../types/magic-link';
+
+export function MagicLinkForm({ request }: { request: MagicLinkRequest }) {
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void request.submit();
+  }
+  return (
+    <form className="panel auth__form" onSubmit={onSubmit} noValidate aria-label="Email me a sign-in link">
+      <div className="field">
+        <label htmlFor="magic-email">No password? Get a sign-in link</label>
+        <input id="magic-email" type="email" name="email" autoComplete="email" inputMode="email" required
+          value={request.email} onChange={(event) => request.setEmail(event.target.value)} />
+      </div>
+      {request.error ? <p className="error" role="alert">{request.error}</p> : null}
+      {request.sentTo ? <p className="hint" role="status">Check {request.sentTo} for your sign-in link. It works once.</p> : null}
+      <button type="submit" className="button button--quiet" disabled={!request.canSubmit} aria-busy={request.pending}>
+        {request.pending ? 'Sending…' : 'Email me a sign-in link'}
+      </button>
+    </form>
+  );
+}
+
+export function MagicLinkStatus({ landing }: { landing: MagicLinkLanding }) {
+  if (landing.status === 'verifying') {
+    return (
+      <main className="loading" aria-busy="true">
+        <span className="spinner" aria-hidden="true" />
+        <p role="status">Signing you in…</p>
+      </main>
+    );
+  }
+  return (
+    <main className="loading">
+      <p className="error" role="alert">{landing.error}</p>
+      <a href="/">Back to sign-in</a>
+    </main>
+  );
+}
+`;
+
+const PLAIN_MAGIC_LINK = `import type { FormEvent } from 'react';
+import type { MagicLinkLanding, MagicLinkRequest } from '../../types/magic-link';
+
+export function MagicLinkForm({ request }: { request: MagicLinkRequest }) {
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void request.submit();
+  }
+  return (
+    <form onSubmit={onSubmit} noValidate aria-label="Email me a sign-in link">
+      <p>
+        <label htmlFor="magic-email">No password? Get a sign-in link</label><br />
+        <input id="magic-email" type="email" name="email" autoComplete="email" required
+          value={request.email} onChange={(event) => request.setEmail(event.target.value)} />
+      </p>
+      {request.error ? <p role="alert">{request.error}</p> : null}
+      {request.sentTo ? <p role="status">Check {request.sentTo} for your sign-in link. It works once.</p> : null}
+      <button type="submit" disabled={!request.canSubmit} aria-busy={request.pending}>
+        {request.pending ? 'Sending…' : 'Email me a sign-in link'}
+      </button>
+    </form>
+  );
+}
+
+export function MagicLinkStatus({ landing }: { landing: MagicLinkLanding }) {
+  if (landing.status === 'verifying') return <main aria-busy="true"><p role="status">Signing you in…</p></main>;
+  return (
+    <main>
+      <p role="alert">{landing.error}</p>
+      <a href="/">Back to sign-in</a>
+    </main>
+  );
+}
+`;
+
+function replaceOnce(text: string, find: string, replacement: string): string {
+  const at = text.indexOf(find);
+  if (at === -1 || text.indexOf(find, at + 1) !== -1) throw new Error(`init template: expected one ${JSON.stringify(find)}`);
+  return text.slice(0, at) + replacement + text.slice(at + find.length);
+}
+
+/** The sign-in card with room below its form for the sign-in-link form. */
+function authCard(styled: boolean, magicLink: boolean): string {
+  const card = styled ? STYLED_AUTH_CARD : PLAIN_AUTH_CARD;
+  if (!magicLink) return card;
+  let out = replaceOnce(card, "import type { FormEvent } from 'react';", "import type { FormEvent, ReactNode } from 'react';");
+  out = replaceOnce(out, '{ appName, form }: { appName: string; form: CredentialsForm }',
+    '{ appName, form, children }: { appName: string; form: CredentialsForm; children?: ReactNode }');
+  if (styled) {
+    out = replaceOnce(out, '      <form className="panel auth__form"', '      <div className="auth__column">\n      <form className="panel auth__form"');
+    out = replaceOnce(out, '      </form>\n    </main>', '      </form>\n      {children}\n      </div>\n    </main>');
+  } else {
+    out = replaceOnce(out, '      </p>\n    </main>', '      </p>\n      {children}\n    </main>');
+  }
+  return out;
+}
+
+/** App.tsx with /auth/magic in front of the sign-in gate: the person is not
+ *  signed in yet when the emailed link opens it. */
+function appTsx(magicLink: boolean): string {
+  if (!magicLink) return APP;
+  let out = replaceOnce(APP, "import { HomePage } from './pages/HomePage';\n",
+    "import { HomePage } from './pages/HomePage';\nimport { MagicLinkPage } from './pages/MagicLinkPage';\n");
+  out = replaceOnce(out, '  const session = useAuthState();\n\n',
+    "  const pathname = usePathname();\n  const session = useAuthState();\n\n  // The emailed sign-in link lands here before a session exists.\n  if (pathname === '/auth/magic') return <MagicLinkPage />;\n");
+  return out;
+}
+
+const MAGIC_LINK_CSS = `/* Sign-in links: delete with src/ui/MagicLink.tsx. */
+.auth__column { display: grid; gap: var(--space-4); }
+`;
+
+// --------------------------------------------------------------- verify-email
+
+const VERIFY_EMAIL_HOOK = `import { useEffect, useState } from 'react';
+import { useAuth } from '@somewhere-tech/sdk/react';
+import type { EmailVerification } from '../../types/auth';
+import { authErrorMessage } from '../services/auth';
+
+// Email verification for the signed-in account, through the packaged route
+// api/auth/[...path].ts (GET/POST /api/auth/verify-email and
+// POST /api/auth/request-email-verification). The session cookie decides the
+// account; this page never holds a token. Accounts that signed in with a link
+// are already verified, so they never see the panel.
+export function useEmailVerification(): EmailVerification {
+  const auth = useAuth();
+  const [status, setStatus] = useState<EmailVerification['status']>('checking');
+  const [code, setCode] = useState('');
+  const [sent, setSent] = useState(false);
+  const [pending, setPending] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [attempt, setAttempt] = useState(0);
+
+  useEffect(() => {
+    let current = true;
+    setStatus('checking');
+    auth.emailVerified()
+      .then((verified) => { if (current) setStatus(verified ? 'verified' : 'unverified'); })
+      .catch(() => { if (current) setStatus('unavailable'); });
+    return () => { current = false; };
+  }, [auth, attempt]);
+
+  async function run(action: () => Promise<void>) {
+    setPending(true);
+    setError(null);
+    try {
+      await action();
+    } catch (reason: unknown) {
+      setError(authErrorMessage(reason));
+    } finally {
+      setPending(false);
+    }
+  }
+
+  return {
+    status,
+    code,
+    sent,
+    pending,
+    error,
+    canSubmit: !pending && /^[0-9]{6}$/.test(code.trim()),
+    setCode,
+    sendCode: () => run(async () => { await auth.requestEmailVerification(); setSent(true); }),
+    submit: () => run(async () => { await auth.verifyEmail({ code: code.trim() }); setStatus('verified'); }),
+    retry: () => setAttempt((value) => value + 1),
+  };
+}
+`;
+
+const STYLED_VERIFY_EMAIL = `import type { FormEvent } from 'react';
+import type { EmailVerification } from '../../types/auth';
+
+export function VerifyEmailPanel({ verification }: { verification: EmailVerification }) {
+  if (verification.status === 'checking' || verification.status === 'verified') return null;
+  if (verification.status === 'unavailable') {
+    return (
+      <div className="banner" role="alert">
+        <p>Could not check whether your email is verified.</p>
+        <button type="button" className="button button--quiet" onClick={verification.retry}>Try again</button>
+      </div>
+    );
+  }
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void verification.submit();
+  }
+  return (
+    <section className="panel verify-email" aria-label="Verify your email">
+      <p><strong>Verify your email.</strong> {verification.sent ? 'Enter the 6-digit code we emailed you.' : 'We will email you a 6-digit code.'}</p>
+      {verification.sent ? (
+        <form className="verify-email__form" onSubmit={onSubmit} noValidate>
+          <label htmlFor="verify-code">Code</label>
+          <input id="verify-code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required
+            value={verification.code} onChange={(event) => verification.setCode(event.target.value)} />
+          <button type="submit" className="button" disabled={!verification.canSubmit} aria-busy={verification.pending}>Verify</button>
+          <button type="button" className="link-button" onClick={() => void verification.sendCode()} disabled={verification.pending}>Send a new code</button>
+        </form>
+      ) : (
+        <button type="button" className="button" onClick={() => void verification.sendCode()} disabled={verification.pending} aria-busy={verification.pending}>
+          Email me a code
+        </button>
+      )}
+      {verification.error ? <p className="error" role="alert">{verification.error}</p> : null}
+    </section>
+  );
+}
+`;
+
+const PLAIN_VERIFY_EMAIL = `import type { FormEvent } from 'react';
+import type { EmailVerification } from '../../types/auth';
+
+export function VerifyEmailPanel({ verification }: { verification: EmailVerification }) {
+  if (verification.status === 'checking' || verification.status === 'verified') return null;
+  if (verification.status === 'unavailable') {
+    return (
+      <p role="alert">
+        Could not check whether your email is verified. <button type="button" onClick={verification.retry}>Try again</button>
+      </p>
+    );
+  }
+  function onSubmit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    void verification.submit();
+  }
+  return (
+    <section aria-label="Verify your email">
+      <p>Verify your email. {verification.sent ? 'Enter the 6-digit code we emailed you.' : 'We will email you a 6-digit code.'}</p>
+      {verification.sent ? (
+        <form onSubmit={onSubmit} noValidate>
+          <label htmlFor="verify-code">Code</label>{' '}
+          <input id="verify-code" inputMode="numeric" autoComplete="one-time-code" maxLength={6} required
+            value={verification.code} onChange={(event) => verification.setCode(event.target.value)} />{' '}
+          <button type="submit" disabled={!verification.canSubmit} aria-busy={verification.pending}>Verify</button>{' '}
+          <button type="button" onClick={() => void verification.sendCode()} disabled={verification.pending}>Send a new code</button>
+        </form>
+      ) : (
+        <button type="button" onClick={() => void verification.sendCode()} disabled={verification.pending} aria-busy={verification.pending}>
+          Email me a code
+        </button>
+      )}
+      {verification.error ? <p role="alert">{verification.error}</p> : null}
+    </section>
+  );
+}
+`;
+
+const VERIFY_EMAIL_CSS = `/* Email verification panel (src/ui/VerifyEmail.tsx). */
+.verify-email { display: grid; gap: var(--space-3); margin-bottom: var(--space-6); }
+.verify-email p { margin: 0; }
+.verify-email__form { display: flex; flex-wrap: wrap; gap: var(--space-2); align-items: center; }
+.verify-email__form input { width: 8ch; letter-spacing: 0.2em; }
+`;
+
+/** The signed-in frame, with the verify-email panel above every page. */
+function signedInLayout(): string {
+  let out = replaceOnce(SIGNED_IN_LAYOUT, "import { useSignOut } from '../auth/hooks';\n",
+    "import { useSignOut } from '../auth/hooks';\nimport { useEmailVerification } from '../auth/useEmailVerification';\n");
+  out = replaceOnce(out, "import { AppShell } from '../ui/AppShell';\n", "import { AppShell } from '../ui/AppShell';\nimport { VerifyEmailPanel } from '../ui/VerifyEmail';\n");
+  out = replaceOnce(out, '  const signOut = useSignOut();\n', '  const signOut = useSignOut();\n  const verification = useEmailVerification();\n');
+  out = replaceOnce(out, '      {children}\n', '      <VerifyEmailPanel verification={verification} />\n      {children}\n');
+  return out;
+}
+
 // --------------------------------------------------------------------- readme
 
 function readme(selection: InitSelection): string {
   const styled = selection.ui === 'styled';
   const privateData = selection.modules.includes('private-data');
   const agent = selection.modules.includes('agent');
+  const magicLink = selection.modules.includes('magic-link');
   const lines = [
     '# somewhere.tech app',
     '',
@@ -2243,8 +2672,11 @@ function readme(selection: InitSelection): string {
     styled
       ? '- Look: `src/styles/tokens.css` (shared values), `src/styles/app.css`, and the views in `src/ui/`. Views take props only; rewrite or replace them freely.'
       : '- Look: `src/ui/` holds plain semantic views. Replace them with your own components; keep their props, or change the pages that pass them.',
-    '- Sign-in: `src/auth/hooks.ts` (state and actions) over the SDK client in `src/services/auth.ts` and the SDK route `api/auth/[...path].ts`.',
+    '- Sign-in: `src/auth/hooks.ts` (state and actions) over the SDK client in `src/services/auth.ts` and the SDK route `api/auth/[...path].ts`. Email verification: `src/auth/useEmailVerification.ts` and `src/ui/VerifyEmail.tsx`.',
   ];
+  if (magicLink) {
+    lines.push('- Sign-in links: `src/auth/magic-link.ts` (send and redeem), `src/pages/MagicLinkPage.tsx` (the `/auth/magic` page the email opens), `src/ui/MagicLink.tsx` (views).');
+  }
   if (privateData) {
     lines.push('- Data: `db/schema.ts` (tables and browser permissions), `src/services/notes.ts` (calls), `src/data/useNotes.ts` (state). The notes example is removable.');
   }
@@ -2263,8 +2695,27 @@ function readme(selection: InitSelection): string {
     'clears private pages at once and shows "Signing out…" until the server answers;',
     'if it cannot confirm, the sign-in page says so and offers "Sign out again". The gate is',
     'only UX: functions and `db/schema.ts` decide what a request may read or write.',
+    'A password account sees a "Verify your email" panel until it enters the 6-digit',
+    'code the platform emails it (`auth.requestEmailVerification` / `auth.verifyEmail`',
+    'through the same SDK route; the session cookie decides the account).',
     'Password reset, OAuth and MFA are not generated.',
   );
+  if (magicLink) {
+    lines.push(
+      '',
+      '## Sign-in links',
+      '',
+      'The sign-in page also emails a one-time link (`auth.sendMagicLink`). It opens',
+      '`/auth/magic?token=…`, which `src/App.tsx` routes in front of the sign-in gate;',
+      'the page exchanges the token for the same cookie session (`auth.verifyMagicLink`)',
+      'and then opens the link\'s `redirect_uri` when it is a page of this app, otherwise',
+      '`/`. The first link creates the account. Invitations from `sw.auth.invite` land',
+      'on the same page. The email shows the project name: create the project with',
+      '`somewhere init --name "Your App" --subdomain your-app`.',
+      'Test it with `<name>@<subdomain>.test.somewhere.site`, then',
+      '`somewhere email test-inbox <address>` prints the link. `somewhere docs sw.auth`',
+    );
+  }
   if (privateData) {
     lines.push(
       '',
@@ -2349,6 +2800,7 @@ export function extensionPoints(selection: InitSelection): Record<string, string
     look: selection.ui === 'styled' ? 'src/styles/tokens.css, src/styles/app.css, src/ui/' : 'src/ui/',
     auth: 'src/auth/hooks.ts',
   };
+  if (selection.modules.includes('magic-link')) points.magic_link = 'src/auth/magic-link.ts, src/pages/MagicLinkPage.tsx';
   if (selection.modules.includes('private-data')) points.data = 'db/schema.ts, src/services/notes.ts, src/data/useNotes.ts';
   if (selection.modules.includes('agent')) points.assistant = 'api/chat.ts, api/proposals.ts, src/data/useAssistant.ts, src/fixtures/assistant.ts';
   return points;
@@ -2363,6 +2815,7 @@ export function createFeatureTemplate(
   const styled = selection.ui === 'styled';
   const privateData = selection.modules.includes('private-data');
   const agent = selection.modules.includes('agent');
+  const magicLink = selection.modules.includes('magic-link');
   const files: InitScaffoldFile[] = [
     { path: '.gitignore', content: 'node_modules\ndist\nbuild\n.env\n' },
     { path: 'AGENTS.md', content: INIT_AGENTS_MD },
@@ -2374,23 +2827,33 @@ export function createFeatureTemplate(
     { path: 'api/auth/[...path].ts', content: AUTH_API },
     { path: 'types/auth.ts', content: AUTH_TYPES },
     { path: 'src/main.tsx', content: mainTsx(styled, agent) },
-    { path: 'src/App.tsx', content: APP },
+    { path: 'src/App.tsx', content: appTsx(magicLink) },
     { path: 'src/config.ts', content: configTs(options.appName) },
     { path: 'src/routes.ts', content: ROUTES },
     { path: 'src/services/auth.ts', content: AUTH_SERVICE },
     { path: 'src/auth/hooks.ts', content: AUTH_HOOKS },
-    { path: 'src/pages/SignInPage.tsx', content: SIGN_IN_PAGE },
-    { path: 'src/pages/SignedInLayout.tsx', content: SIGNED_IN_LAYOUT },
+    { path: 'src/pages/SignInPage.tsx', content: magicLink ? MAGIC_SIGN_IN_PAGE : SIGN_IN_PAGE },
+    { path: 'src/pages/SignedInLayout.tsx', content: signedInLayout() },
+    { path: 'src/auth/useEmailVerification.ts', content: VERIFY_EMAIL_HOOK },
+    { path: 'src/ui/VerifyEmail.tsx', content: styled ? STYLED_VERIFY_EMAIL : PLAIN_VERIFY_EMAIL },
     { path: 'src/pages/HomePage.tsx', content: homePage(privateData, agent) },
     { path: 'src/pages/NotFoundPage.tsx', content: NOT_FOUND_PAGE },
     { path: 'src/ui/feedback.tsx', content: styled ? STYLED_FEEDBACK : PLAIN_FEEDBACK },
-    { path: 'src/ui/AuthCard.tsx', content: styled ? STYLED_AUTH_CARD : PLAIN_AUTH_CARD },
+    { path: 'src/ui/AuthCard.tsx', content: authCard(styled, magicLink) },
     { path: 'src/ui/AppShell.tsx', content: styled ? STYLED_APP_SHELL : PLAIN_APP_SHELL },
   ];
   if (styled) {
     files.push(
       { path: 'src/styles/tokens.css', content: TOKENS_CSS },
-      { path: 'src/styles/app.css', content: [APP_CSS, ...(privateData ? [NOTES_CSS] : []), ...(agent ? [privateData ? ASSISTANT_CSS : ASSISTANT_SHARED_CSS + ASSISTANT_CSS] : [])].join('\n') },
+      { path: 'src/styles/app.css', content: [APP_CSS, VERIFY_EMAIL_CSS, ...(magicLink ? [MAGIC_LINK_CSS] : []), ...(privateData ? [NOTES_CSS] : []), ...(agent ? [privateData ? ASSISTANT_CSS : ASSISTANT_SHARED_CSS + ASSISTANT_CSS] : [])].join('\n') },
+    );
+  }
+  if (magicLink) {
+    files.push(
+      { path: 'types/magic-link.ts', content: MAGIC_LINK_TYPES },
+      { path: 'src/auth/magic-link.ts', content: MAGIC_LINK_HOOKS },
+      { path: 'src/pages/MagicLinkPage.tsx', content: MAGIC_LINK_PAGE },
+      { path: 'src/ui/MagicLink.tsx', content: styled ? STYLED_MAGIC_LINK : PLAIN_MAGIC_LINK },
     );
   }
   if (privateData || agent) files.push({ path: 'db/schema.ts', content: schemaTs(privateData, agent) });

@@ -2,7 +2,7 @@
 // plugin system: each module names what it requires, and the resolver adds
 // those requirements and reports them. Files come from init-feature-template.ts.
 
-export const INIT_MODULE_IDS = ['auth', 'private-data', 'agent'] as const;
+export const INIT_MODULE_IDS = ['auth', 'magic-link', 'private-data', 'agent'] as const;
 export type InitModuleId = (typeof INIT_MODULE_IDS)[number];
 
 export const INIT_UI_MODES = ['styled', 'headless'] as const;
@@ -17,8 +17,13 @@ interface InitModuleDefinition {
 const MODULES: readonly InitModuleDefinition[] = [
   {
     id: 'auth',
-    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, auth hooks over the SDK provider, a sign-in page, and a per-user private boundary behind a loading state. This is what plain `somewhere init` writes.',
+    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, auth hooks over the SDK provider, a sign-in page, a "Verify your email" code panel for password accounts (the session decides the account; no token in page code), and a per-user private boundary behind a loading state. This is what plain `somewhere init` writes.',
     requires: [],
+  },
+  {
+    id: 'magic-link',
+    summary: 'Passwordless sign-in links on the sign-in page: an "email me a sign-in link" form (auth.sendMagicLink through the packaged /api/auth route), the /auth/magic page the email opens, routed in front of the sign-in gate, which redeems the one-time token for the same cookie session and then opens the link\'s redirect_uri only when it is a page of this app. sw.auth.invite links land on the same page.',
+    requires: ['auth'],
   },
   {
     id: 'private-data',

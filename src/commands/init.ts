@@ -40,6 +40,7 @@ import { bold, dim, error, info, printJson, success, teal, warn } from '../lib/o
 
 interface InitOptions {
   name?: string;
+  subdomain?: string;
   link?: boolean;
   project?: string;
   bare?: boolean;
@@ -68,12 +69,13 @@ export function registerInit(program: Command) {
   program
     .command('init')
     .description('Write a local starter; when signed in, also create a project and link this directory')
-    .option('--name <name>', 'Project name (skip prompt)')
+    .option('--name <name>', 'Project name (skip prompt); sign-in and invitation emails show it')
+    .option('--subdomain <slug>', 'Subdomain for the new project; default: derived from --name')
     .option('--link', 'Link to an existing project instead of creating one')
     .option('--project <ref>', 'Existing project ID, name, slug, or subdomain (requires --link)')
     .option('--bare', 'Create and link only: no starter source or dependencies (AGENTS.md/CLAUDE.md are still added when absent)')
     .option('--template <name>', 'Starter to write: auth (default, cookie sign-in) or minimal (no sign-in)', 'auth')
-    .option('--features <ids>', 'Generate selected modules into an empty directory, comma-separated: auth, private-data, agent (see --catalog)')
+    .option('--features <ids>', 'Generate selected modules into an empty directory, comma-separated: auth, magic-link, private-data, agent (see --catalog)')
     .option('--ui <mode>', 'With --features: styled (default; src/ui + design tokens) or headless (hooks and plain markup)')
     .option('--catalog', 'Print the module catalog for --features and exit; no login, project or files')
     .option('--dry-run', 'With --features: validate the selection and print the file plan; nothing is created')
@@ -93,7 +95,8 @@ export function registerInit(program: Command) {
         + '  somewhere init --catalog --json\n'
         + '  somewhere init --name my-app --features private-data --dry-run --json\n'
         + '  somewhere init --name my-app --features auth,private-data --ui styled\n'
-        + 'Requirements are added and reported (private-data and agent add auth). --features only\n'
+        + '  somewhere init --name "Crew" --subdomain crew-app --features magic-link\n'
+        + 'Requirements are added and reported (magic-link, private-data and agent add auth). --features only\n'
         + 'writes into an empty directory and is checked before the project is created.\n',
     )
     .action(async (opts: InitOptions, command: Command) => {
@@ -129,6 +132,10 @@ export function registerInit(program: Command) {
       }
       if (opts.project && !opts.link) {
         error('--project requires --link.');
+        process.exit(1);
+      }
+      if (opts.subdomain !== undefined && opts.link) {
+        error('--subdomain names a new project; it cannot be combined with --link.');
         process.exit(1);
       }
       if (opts.json && opts.link && !opts.project) {
@@ -233,9 +240,11 @@ export function registerInit(program: Command) {
         if (!name) return;
       }
 
-      // If --name was provided, derive subdomain automatically (no prompt)
+      // --subdomain wins; with only --name, derive it (no prompt)
       let subdomain: string;
-      if (opts.name) {
+      if (opts.subdomain !== undefined) {
+        subdomain = opts.subdomain.trim().toLowerCase();
+      } else if (opts.name) {
         subdomain = name.toLowerCase().replace(/[^a-z0-9-]/g, '-');
       } else {
         const subRes = await prompts({
@@ -377,6 +386,7 @@ function printCatalog(opts: InitOptions, command: Command): void {
     opts.ui !== undefined ? '--ui' : null,
     opts.dryRun ? '--dry-run' : null,
     opts.name ? '--name' : null,
+    opts.subdomain !== undefined ? '--subdomain' : null,
     opts.link ? '--link' : null,
     opts.project ? '--project' : null,
     opts.bare ? '--bare' : null,

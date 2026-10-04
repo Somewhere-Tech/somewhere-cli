@@ -693,8 +693,39 @@ interface SomewhereAuthMfaRequired {
 }
 type SomewhereAuthLoginResult = SomewhereAuthIssuedSession | SomewhereAuthMfaRequired;
 interface SomewhereAuthOtpSession extends SomewhereAuthIssuedSession {
-  // The redirect_uri passed to signInWithOtp, or null.
+  // The redirect_uri passed to signInWithOtp, or null. For an invitation
+  // link: the invite's redirect_uri with ?invite_id=<id> added.
   redirect_uri: string | null;
+  // Present when the verified token was an invitation.
+  invite_id?: string;
+}
+type SomewhereAuthInviteStatus = 'pending' | 'accepted' | 'revoked' | 'expired';
+interface SomewhereAuthInvite {
+  id: string;
+  email: string;
+  status: SomewhereAuthInviteStatus;
+  redirect_uri: string;
+  // Server-side only; never in the email or the link.
+  data: SomewhereJsonObject | null;
+  expires_at: number;
+  created_at: number;
+  accepted_at: number | null;
+  accepted_user_id: string | null;
+  revoked_at: number | null;
+}
+interface SomewhereAuthInviteOptions {
+  email: string;
+  // A path in the app such as '/join', or an allowed absolute URL.
+  redirect_uri: string;
+  // At most 4096 bytes of JSON.
+  data?: SomewhereJsonObject;
+  // Seconds, 900 to 2592000; default 604800 (7 days).
+  expires_in?: number;
+}
+interface SomewhereAuthInviteSent {
+  invite: SomewhereAuthInvite;
+  delivery: 'sent' | 'pending';
+  message_id?: string;
 }
 interface SomewhereAuthOAuthSession {
   user: SomewhereAuthSignedInUser;
@@ -823,6 +854,9 @@ interface SomewhereRuntimeAuth {
   // Email change is verify-gated: sends a code, never writes the address immediately.
   updateProfile(token: string, options: SomewhereAuthEmailChangeRequest): Promise<SomewhereAuthEmailChangeStarted>;
   updateProfileWithCookie(req: Request, options: SomewhereAuthProfileUpdate): Promise<{ user: SomewhereAuthUpdatedUser }>;
+  // Email verification for the request's own session (cookie or Bearer); no token in app code.
+  requestEmailVerificationWithCookie(req: Request): Promise<SomewhereAuthVerificationSent>;
+  verifyEmailWithCookie(req: Request, options: { code: string }): Promise<{ verified: true }>;
   deleteUser(token: string): Promise<{ deleted: true }>;
   googleUrl(options: { redirect_uri: string }): string;
   githubUrl(options: { redirect_uri: string }): string;
@@ -841,6 +875,14 @@ interface SomewhereRuntimeAuth {
   logoutWithCookie(req: Request): Promise<{ ok: true }>;
   signInWithOtp(options: { email: string; redirect_uri?: string }): Promise<SomewhereAuthOtpSent>;
   verifyOtp(options: { token: string }): Promise<SomewhereAuthOtpSession>;
+  // One invite email; the link signs the invitee in as the invited address.
+  invite(options: SomewhereAuthInviteOptions): Promise<SomewhereAuthInviteSent>;
+  listInvites(options?: { status?: SomewhereAuthInviteStatus; email?: string; limit?: number }): Promise<SomewhereAuthInvite[]>;
+  getInvite(id: string): Promise<SomewhereAuthInvite | null>;
+  revokeInvite(id: string): Promise<SomewhereAuthInvite>;
+  // The accepted invite, only for the signed-in account that accepted it;
+  // otherwise throws INVITE_NOT_ACCEPTED_BY_YOU (403) or AUTH_REQUIRED (401).
+  getAcceptedInvite(req: Request, id: string): Promise<SomewhereAuthInvite>;
   anonSession(): Promise<SomewhereAuthAnonSession>;
   readonly moderation: SomewhereRuntimeAuthModeration;
 }
@@ -1687,13 +1729,9 @@ interface SomewhereAnalyticsTrackOptions {
   referrer?: string | null;
   user_agent?: string | null;
 }
-interface SomewhereAnalyticsTrackResult {
-  recorded: true;
-  event: string;
-  // Derived from the signed-in request user; never caller-supplied.
-  user_id: string | null;
-  attribution: 'app_user' | 'project';
-}
+type SomewhereAnalyticsTrackResult =
+  | { recorded: true; event: string; user_id: string | null; attribution: 'app_user' | 'project' }
+  | { recorded: false; reason: 'consent_pending' | 'consent_declined' | 'consent_unavailable' };
 interface SomewhereAnalyticsQueryOptions {
   event?: string;
   from?: string | number;
@@ -1794,6 +1832,7 @@ interface SomewhereAiChatResult {
 interface __SomewhereAiChatFn {
   (options: SomewhereAiChatOptions & { stream: true }): Promise<ReadableStream<Uint8Array>>;
   (options: SomewhereAiChatOptions & { stream?: false }): Promise<SomewhereAiChatResult>;
+  /** \`stream\` typed as plain boolean, e.g. \`const o = { messages, stream: false }\` (false widens to boolean): narrow the result with \`instanceof ReadableStream\`, or write \`stream: false as const\`. */
   (options: SomewhereAiChatOptions): Promise<SomewhereAiChatResult | ReadableStream<Uint8Array>>;
 }
 interface SomewhereAiConversationSummary {
@@ -1915,9 +1954,16 @@ interface SomewhereAiGenerateImageOptions {
   width?: number;
   height?: number;
   steps?: number;
+  // gpt-image-2.5-flare only; refused on other models.
+  quality?: 'low' | 'medium' | 'high';
+  background?: 'auto' | 'opaque' | 'transparent';
   storage?: string;
 }
-interface SomewhereAiGenerateImageStored extends __SomewhereAiStoredFile { width: number; height: number; steps: number }
+interface SomewhereAiGenerateImageStored extends __SomewhereAiStoredFile {
+  width: number; height: number; steps: number;
+  quality?: 'low' | 'medium' | 'high';
+  background?: 'auto' | 'opaque' | 'transparent';
+}
 interface SomewhereAiRemoveBackgroundOptions { image_url: string; model?: string; storage?: string }
 type SomewhereAiEmbeddingsOptions = {
   model?: string;
@@ -2089,6 +2135,9 @@ interface SomewhereAgentStepCheckpoint {
   __sw_agent_turn: true;
   state: SomewhereJsonObject;
   done: boolean;
+  // Present only when the run stopped at its budget and the platform's signed callback reads terminal budget
+  // envelopes; the platform then records the run as failed with this code. Otherwise the budget stop throws.
+  error?: { code: 'AI_SPEND_CAP_EXCEEDED' | 'AI_COST_PENDING'; message: string };
   agent_id?: never;
   status?: never;
   max_steps?: never;
@@ -4542,17 +4591,25 @@ function readTable(r, rawName, nameLine) {
   }
   const uniques = [];
   for (const entry of uniqueEntries ?? []) {
-    if (entry.columns.length < 2) {
-      throw new SchemaTsError(
-        `line ${entry.line}: the "unique" option on table "${rawName}" is for MULTI-column uniqueness. For a single column, put { unique: true } on the column itself.`
-      );
-    }
     for (const colName of entry.columns) {
       if (!known.has(colName)) {
         throw new SchemaTsError(
           `line ${entry.line}: a "unique" entry on table "${rawName}" names "${colName}", which is not one of its declared columns.`
         );
       }
+    }
+    const single = entry.columns.length === 1 ? columns.find((c) => c.name === entry.columns[0]) : void 0;
+    if (single) {
+      if (single.helper === "id") {
+        throw new SchemaTsError(`line ${entry.line}: the primary key "${single.name}" on table "${rawName}" is already unique; remove its one-column "unique" group.`);
+      }
+      single.unique = true;
+      continue;
+    }
+    if (entry.columns.length < 2) {
+      throw new SchemaTsError(
+        `line ${entry.line}: the "unique" option on table "${rawName}" lists only "${entry.columns[0]}", the owner column the platform manages, and an owner column cannot be unique on its own. Pair it with another column (for example [['${entry.columns[0]}', 'kind']]) for per-owner uniqueness.`
+      );
     }
     uniques.push(entry.columns);
   }

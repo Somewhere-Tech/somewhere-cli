@@ -37,6 +37,9 @@ const COMBINATIONS = [
   ['agent', 'styled'],
   ['agent', 'headless'],
   ['auth,private-data,agent', 'styled'],
+  ['magic-link', 'styled'],
+  ['magic-link', 'headless'],
+  ['magic-link,private-data', 'styled'],
 ];
 
 function tempDir(prefix = 'somewhere-init-features-') {
@@ -80,16 +83,24 @@ test('unknown modules, unoffered modules and unknown UI modes are usage errors',
 test('catalog is machine-readable and lists module files from the generator', () => {
   const catalog = initCatalog((selection) => createFeatureTemplate(selection, { appName: 'x' }));
   assert.equal(catalog.version, 1);
-  assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['private-data', ['auth']], ['agent', ['auth']]]);
+  assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['magic-link', ['auth']], ['private-data', ['auth']], ['agent', ['auth']]]);
   assert.ok(catalog.modules[0].files.includes('api/auth/[...path].ts'));
   assert.deepEqual(catalog.modules[1].files, [
+    'src/auth/magic-link.ts',
+    'src/pages/MagicLinkPage.tsx',
+    'src/ui/MagicLink.tsx',
+    'types/magic-link.ts',
+  ]);
+  assert.ok(catalog.modules[0].files.includes('src/auth/useEmailVerification.ts') && catalog.modules[0].files.includes('src/ui/VerifyEmail.tsx'),
+    'email verification is part of the auth module');
+  assert.deepEqual(catalog.modules[2].files, [
     'db/schema.ts',
     'src/data/useNotes.ts',
     'src/services/notes.ts',
     'src/ui/NotesBoard.tsx',
     'types/notes.ts',
   ]);
-  assert.deepEqual(catalog.modules[2].files, [
+  assert.deepEqual(catalog.modules[3].files, [
     'api/chat.ts',
     'api/proposals.ts',
     'db/schema.ts',
@@ -103,7 +114,7 @@ test('catalog is machine-readable and lists module files from the generator', ()
   ]);
   assert.deepEqual(catalog.ui.map((u) => u.id), ['styled', 'headless']);
   assert.ok(catalog.ui[0].files.includes('src/styles/tokens.css'));
-  assert.deepEqual(catalog.ui[1].files, ['src/ui/AppShell.tsx', 'src/ui/AssistantPanel.tsx', 'src/ui/AuthCard.tsx', 'src/ui/NotesBoard.tsx', 'src/ui/feedback.tsx']);
+  assert.deepEqual(catalog.ui[1].files, ['src/ui/AppShell.tsx', 'src/ui/AssistantPanel.tsx', 'src/ui/AuthCard.tsx', 'src/ui/MagicLink.tsx', 'src/ui/NotesBoard.tsx', 'src/ui/VerifyEmail.tsx', 'src/ui/feedback.tsx']);
   assert.ok(!catalog.ui[0].files.some((path) => path.startsWith('src/pages/')), 'pages are shared by both modes');
   assert.equal(catalog.defaults.ui, 'styled');
   for (const id of ['private-files', 'payments', 'teams', 'public-sharing', 'password-reset', 'oauth', 'mfa', 'agent-durable']) {
@@ -149,14 +160,14 @@ test('every combination separates types, services, hooks, pages and presentation
     assert.doesNotMatch(all, /fonts\.googleapis|@import url|https?:\/\/[^\s'"`]*\.(woff2?|ttf)/, `${label}: no remote fonts`);
     const pkg = JSON.parse(read('package.json'));
     assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@somewhere-tech/sdk', 'react', 'react-dom']);
-    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.3');
+    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.6', 'the SDK release with the email verification routes');
     assert.equal(pkg.scripts.build, undefined);
   }
 });
 
 test('views take props only, and both UI modes share pages, hooks and view signatures', () => {
-  const styled = generate('auth,private-data,agent', 'styled');
-  const plain = generate('auth,private-data,agent', 'headless');
+  const styled = generate('auth,magic-link,private-data,agent', 'styled');
+  const plain = generate('auth,magic-link,private-data,agent', 'headless');
   for (const path of styled.result.created.filter((p) => /^(src\/(pages|auth|data|services)\/|types\/|src\/App|src\/routes)/.test(p))) {
     assert.equal(plain.read(path), styled.read(path), `${path} is shared`);
   }
@@ -166,12 +177,12 @@ test('views take props only, and both UI modes share pages, hooks and view signa
   }
   const { dir, result } = styled;
   const uiFiles = [...result.created.filter((path) => path.startsWith('src/ui/'))];
-  assert.equal(uiFiles.length, 5);
+  assert.equal(uiFiles.length, 7);
   for (const [root, path] of [...uiFiles.map((p) => [dir, p]), ...uiFiles.map((p) => [plain.dir, p])]) {
     const content = readFileSync(join(root, path), 'utf8');
     const imports = [...content.matchAll(/from '([^']+)'/g)].map((m) => m[1]);
     for (const specifier of imports) {
-      assert.match(specifier, /^(react|\.\/[A-Za-z]+|\.\.\/routes|\.\.\/\.\.\/types\/(auth|notes|assistant))$/, `${path} imports ${specifier}`);
+      assert.match(specifier, /^(react|\.\/[A-Za-z]+|\.\.\/routes|\.\.\/\.\.\/types\/(auth|magic-link|notes|assistant))$/, `${path} imports ${specifier}`);
     }
     assert.doesNotMatch(content, /import (?!type)[^;]*\.\.\/\.\.\/types/, `${path}: types are type-only imports`);
     assert.doesNotMatch(content, /\buse(Auth|User|Notes|Assistant|SignOut|CredentialsForm)\b|fetch\(/, path);
@@ -179,6 +190,65 @@ test('views take props only, and both UI modes share pages, hooks and view signa
   // Deleting the look leaves behaviour intact: services/hooks never import ui or styles.
   for (const path of ['src/services/auth.ts', 'src/services/notes.ts', 'src/services/assistant.ts', 'src/auth/hooks.ts', 'src/data/useNotes.ts', 'src/data/useAssistant.ts']) {
     assert.doesNotMatch(readFileSync(join(dir, path), 'utf8'), /\/ui\/|\.css'/, path);
+  }
+});
+
+test('magic-link routes /auth/magic before the gate and adds the link form without changing the plain starter', () => {
+  for (const ui of ['styled', 'headless']) {
+    const plain = generate('auth', ui);
+    const magic = generate('magic-link', ui);
+    assert.deepEqual(magic.selection.modules, ['auth', 'magic-link']);
+    const app = magic.read('src/App.tsx');
+    const route = app.indexOf("if (pathname === '/auth/magic') return <MagicLinkPage />;");
+    assert.ok(route > 0, 'the landing page is routed');
+    assert.ok(route < app.indexOf("session.status === 'loading'"), 'it is decided before the session gate');
+    assert.match(magic.read('src/pages/SignInPage.tsx'), /<MagicLinkForm request=\{magicLink\} \/>/);
+    assert.match(magic.read('src/ui/AuthCard.tsx'), /children\?: ReactNode/);
+    assert.match(magic.read('src/ui/AuthCard.tsx'), /\{children\}/);
+    const hooks = magic.read('src/auth/magic-link.ts');
+    assert.match(hooks, /auth\.sendMagicLink\(\{ email: address \}\)/);
+    assert.match(hooks, /auth\.verifyMagicLink\(\{ token \}\)/);
+    assert.match(hooks, /started\.current/, 'the one-time token is verified once, even under StrictMode');
+    assert.match(hooks, /history\.replaceState/, 'the token is removed from the address bar');
+    // Without the module the starter is byte-identical to before.
+    for (const path of ['src/App.tsx', 'src/pages/SignInPage.tsx', 'src/ui/AuthCard.tsx']) {
+      assert.equal(plain.read(path), generate('auth', ui).read(path));
+      assert.doesNotMatch(plain.read(path), /MagicLink|children/, `${ui} ${path}`);
+    }
+    assert.ok(!plain.result.created.some((path) => /magic/i.test(path)));
+  }
+});
+
+test('every auth starter verifies email through the packaged route, with no token in page code', () => {
+  for (const ui of ['styled', 'headless']) {
+    const starter = generate('auth', ui);
+    const hook = starter.read('src/auth/useEmailVerification.ts');
+    assert.match(hook, /auth\.emailVerified\(\)/);
+    assert.match(hook, /auth\.requestEmailVerification\(\)/);
+    assert.match(hook, /auth\.verifyEmail\(\{ code: code\.trim\(\) \}\)/);
+    assert.match(starter.read('src/pages/SignedInLayout.tsx'), /<VerifyEmailPanel verification=\{verification\} \/>/);
+    assert.match(starter.read('types/auth.ts'), /export interface EmailVerification/);
+    assert.ok(!starter.result.created.some((path) => path.startsWith('api/') && path !== 'api/auth/[...path].ts'),
+      'the packaged route serves verification; no extra function');
+    assert.doesNotMatch(hook + starter.read('src/ui/VerifyEmail.tsx'), /fetch\(|Authorization|Bearer|access_token|refresh_token|__Host-|localStorage/);
+  }
+  assert.throws(() => resolveInitSelection('verify-email'), /Unknown --features verify-email/, 'verification is not a separate module');
+});
+
+test('the magic-link landing follows only a same-origin redirect_uri', async () => {
+  const { read } = generate('magic-link', 'styled');
+  const ts = createRequire(import.meta.url)('typescript');
+  const source = read('src/auth/magic-link.ts');
+  const fn = source.slice(source.indexOf('export function landingTarget'), source.indexOf('export function useMagicLinkLanding'));
+  const js = ts.transpileModule(fn, { compilerOptions: { module: ts.ModuleKind.ESNext, target: ts.ScriptTarget.ES2022 } }).outputText;
+  const { landingTarget } = await import(`data:text/javascript;base64,${Buffer.from(js).toString('base64')}`);
+  const origin = 'https://crew.somewhere.site';
+  const target = (redirect) => landingTarget(redirect === undefined ? '?token=t' : `?token=t&redirect_uri=${encodeURIComponent(redirect)}`, origin);
+  assert.equal(target(undefined), '/');
+  assert.equal(target('https://crew.somewhere.site/join?invite_id=inv_1'), '/join?invite_id=inv_1', 'an invitation lands on its page with its id');
+  assert.equal(target('/teams/7#tasks'), '/teams/7#tasks');
+  for (const hostile of ['https://evil.example/x', '//evil.example/x', '/\\evil.example', 'javascript:alert(1)', 'https://crew.somewhere.site.evil.example/', 'http://crew.somewhere.site/']) {
+    assert.equal(target(hostile), '/', hostile);
   }
 });
 
@@ -376,8 +446,12 @@ test('every combination typechecks against the SDK and the generated somewhere:d
 // ------------------------------------------------------------------- command
 
 let requests = [];
+let bodies = [];
 const api = createServer((req, res) => {
   requests.push(`${req.method} ${req.url}`);
+  let body = '';
+  req.on('data', (chunk) => { body += chunk; });
+  req.on('end', () => { if (body) bodies.push(JSON.parse(body)); });
   res.writeHead(500, { 'content-type': 'application/json' });
   res.end(JSON.stringify({ error: 'FIXTURE', message: 'fixture refuses' }));
 });
@@ -408,7 +482,7 @@ test('--catalog --json needs no login, makes no request and writes nothing', asy
   const run = await cli(['--catalog', '--json'], dir, { signedIn: false });
   assert.equal(run.status, 0, run.stderr);
   const catalog = JSON.parse(run.stdout);
-  assert.deepEqual(catalog.modules.map((m) => m.id), ['auth', 'private-data', 'agent']);
+  assert.deepEqual(catalog.modules.map((m) => m.id), ['auth', 'magic-link', 'private-data', 'agent']);
   assert.deepEqual(readdirSync(dir), []);
   assert.deepEqual(requests, []);
 });
@@ -439,6 +513,7 @@ test('invalid and conflicting selections exit 2 before any request, even when si
     [['--name', 'x', '--features', 'auth', '--bare'], /cannot be combined with --bare/],
     [['--features', 'auth', '--link', '--project', 'x'], /cannot be combined with --link, --project/],
     [['--catalog', '--features', 'auth'], /--catalog only prints the catalog; drop --features/],
+    [['--catalog', '--subdomain', 'crew-app'], /--catalog only prints the catalog; drop --subdomain/],
   ];
   for (const [args, message] of cases) {
     requests = [];
@@ -468,4 +543,24 @@ test('an occupied directory is refused before the project is created and left un
   assert.equal(valid.status, 1);
   assert.deepEqual(requests, ['POST /projects']);
   assert.deepEqual(readdirSync(empty), [], 'a failed create writes no starter');
+});
+
+test('--name is the display name and --subdomain the address of the new project', async () => {
+  requests = [];
+  bodies = [];
+  const run = await cli(['--name', 'Crew', '--subdomain', 'Crew-App', '--features', 'magic-link', '--json'], tempDir());
+  assert.equal(run.status, 1, 'the fixture API refuses the create');
+  assert.deepEqual(requests, ['POST /projects']);
+  assert.deepEqual(bodies, [{ name: 'Crew', subdomain: 'crew-app' }]);
+
+  requests = [];
+  bodies = [];
+  await cli(['--name', 'crew-race', '--features', 'auth', '--json'], tempDir());
+  assert.deepEqual(bodies, [{ name: 'crew-race', subdomain: 'crew-race' }], 'without --subdomain it is derived from --name as before');
+
+  requests = [];
+  const linked = await cli(['--link', '--project', 'x', '--subdomain', 'y', '--json'], tempDir());
+  assert.equal(linked.status, 1);
+  assert.match(linked.stderr + linked.stdout, /--subdomain names a new project/);
+  assert.deepEqual(requests, []);
 });
