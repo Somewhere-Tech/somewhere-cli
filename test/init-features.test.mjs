@@ -341,67 +341,6 @@ test('notes service validates, reports zero-change updates and maps a vanished r
   delete globalThis.__notesFixture;
 });
 
-const CONTRACT_TYPES = `declare module 'react' {
-  export type ReactNode = unknown;
-  export interface FormEvent<T> { preventDefault(): void; currentTarget: T }
-  export interface MouseEvent<T> { preventDefault(): void; defaultPrevented: boolean; button: number; metaKey: boolean; ctrlKey: boolean; shiftKey: boolean; altKey: boolean; currentTarget: T }
-  export interface RefObject<T> { current: T | null }
-  export const StrictMode: (props: { children?: ReactNode }) => JSX.Element;
-  export function useEffect(effect: () => void | (() => void), dependencies: unknown[]): void;
-  export function useState<T>(initial: T): [T, (next: T | ((previous: T) => T)) => void];
-  export function useRef<T>(initial: T | null): RefObject<T>;
-  export function useId(): string;
-}
-declare module 'react/jsx-runtime' {
-  namespace JSX {
-    interface Element {}
-    interface IntrinsicAttributes { key?: string | number }
-    interface IntrinsicElements {
-      [name: string]: {
-        onChange?: (event: { target: { value: string } }) => void;
-        onClick?: (event: import('react').MouseEvent<HTMLAnchorElement>) => void;
-        onSubmit?: (event: import('react').FormEvent<HTMLFormElement>) => void;
-        [prop: string]: unknown;
-      };
-    }
-  }
-  export function jsx(type: unknown, props: unknown): JSX.Element;
-  export function jsxs(type: unknown, props: unknown): JSX.Element;
-  export const Fragment: unknown;
-}
-declare module 'react-dom/client' {
-  export function createRoot(node: Element): { render(value: unknown): void };
-}
-declare module '@somewhere-tech/sdk/auth' {
-  export interface User { id: string; email: string | null; [key: string]: unknown }
-  export class AuthError extends Error { status: number; code?: string }
-  export interface SomewhereAuth {
-    getUser(): Promise<User | null>;
-    signIn(input: { email: string; password: string }): Promise<User>;
-    signUp(input: { email: string; password: string }): Promise<User>;
-    signOut(): Promise<void>;
-  }
-  export function createSomewhereAuth(): SomewhereAuth;
-}
-declare module '@somewhere-tech/sdk/react' {
-  import type { SomewhereAuth, User } from '@somewhere-tech/sdk/auth';
-  export function SomewhereAuthProvider(props: { client?: SomewhereAuth; children: unknown }): JSX.Element;
-  export function useUser(): User | null;
-  export function useAuthLoading(): boolean;
-  export function useAuthState(): {
-    status: 'checking' | 'authenticated' | 'signed-out' | 'indeterminate';
-    user: User | null;
-    signOutUnconfirmed: boolean;
-    signingOut: boolean;
-    recheck(): Promise<User | null>;
-  };
-  export function useAuth(): SomewhereAuth;
-}
-declare module '@somewhere-tech/sdk/server' {
-  export function somewhereAuth(req: Request, sw: unknown): Promise<Response>;
-}
-`;
-
 // runTypecheck installs the declared @types packages with npm, which installs
 // the starter's pinned dependencies too, so this checks against the real,
 // published SDK the starter pins. SOMEWHERE_TEST_SDK_TARBALL points it at a
@@ -416,9 +355,6 @@ test('every combination typechecks against the SDK and the generated somewhere:d
       pkg.dependencies['@somewhere-tech/sdk'] = `file:${sdkTarball}`;
       writeFileSync(pkgPath, JSON.stringify(pkg, null, 2));
     }
-    const typesDir = join(dir, 'node_modules/@types/scaffold-contract');
-    mkdirSync(typesDir, { recursive: true });
-    writeFileSync(join(typesDir, 'index.d.ts'), CONTRACT_TYPES);
     const result = await runTypecheck(dir);
     assert.equal(result.ok, true, `${features}/${ui}\n${result.raw}`);
     // Runtime types are always generated; somewhere:data only with a schema.

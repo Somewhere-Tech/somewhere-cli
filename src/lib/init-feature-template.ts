@@ -443,7 +443,7 @@ export default schema({
 `;
 
 const NOTES_TYPES = `export interface Note {
-  id: number | string;
+  id: number;
   title: string;
   body: string;
 }
@@ -974,12 +974,12 @@ export interface ToolActivity {
 
 /** A task the assistant drafted; it becomes a task only after approval. */
 export interface Proposal {
-  id: number | string;
+  id: number;
   title: string;
 }
 
 export interface AgentTask {
-  id: number | string;
+  id: number;
   title: string;
 }
 
