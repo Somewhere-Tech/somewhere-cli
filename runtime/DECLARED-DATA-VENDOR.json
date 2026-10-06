@@ -2,8 +2,8 @@
   "esbuild": "0.24.0",
   "source_files": {
     "worker/containers/compile/declared-data-contract.cjs": "bf2d7d56252e1f64ded67c322acf7fa0f2dc722d79f3965211a3442859d26d9f",
-    "worker/containers/compile/groups-types.cjs": "44b37c03c05dd8bbb07e0dd8c9e2d7f48dda6882666283d4dfa3cde926871731",
-    "worker/containers/compile/runtime-types.cjs": "43b15bc33a8b55a4233627cab5a802257c6b60de1a1da380981710d4fbc8f0ec",
+    "worker/containers/compile/groups-types.cjs": "28c70fa5473fac717256f72ede3d6a7faaee26170dbd4f98402f8ba8a167db0c",
+    "worker/containers/compile/runtime-types.cjs": "23e1fff1d12bbc75b2554f066e2a037169d24382a42810698b177bd6b60896e2",
     "worker/containers/compile/schema-types.cjs": "1c5a0b3ad6b506dc178de7f031080426558cab055f1c1620eb949c524e5546f8",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
     "worker/containers/compile/typed-files.cjs": "a0b1818afbc7673f84583c76436a3b3ca1d1fdf63d8d8db138b36646103f0708",
@@ -26,5 +26,5 @@
     "worker/src/utils/managed-groups/errors.ts": "2ea002d5bb2890492fbe470e0dabb6681060780e94b89e2c30d37cabe6484383",
     "worker/src/utils/managed-groups/policy.ts": "2259a883645c8bfd607ead7c37387f3ffd42ac9dfb86722c72b224adb498511e"
   },
-  "sha256": "bdd35454de450860372ae9010e6d0a8c73855777c0472e560443ac4970d1ea52"
+  "sha256": "b64c285cce571cbc7e67c1a73ee6938a6fcf00ea60a2f29e01bdfb766fe3303f"
 }

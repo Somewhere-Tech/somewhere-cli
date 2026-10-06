@@ -471,12 +471,12 @@ interface SomewhereGroupInvitationOutcome {
   code?: string;
 }
 
-/** retry is false when a change's outcome could not be confirmed (GROUPS_OUTCOME_UNKNOWN). */
+/** Expected refusals and unconfirmed outcomes resolve with retry:false; changes are never re-sent. */
 interface SomewhereGroupsError {
   code: string;
   message: string;
   status: number;
-  retry?: false;
+  retry: false;
   data?: Record<string, unknown>;
 }
 
@@ -488,7 +488,7 @@ type SomewhereGroupsResult<T> = { data: T; error: null } | { data: null; error: 
  * accepted for compatibility and never read: passing another Request cannot
  * change who acts, and no method accepts an acting user. Groups are available
  * on the live app only; a preview, a dev run, a job delivery or a signed-out
- * request throws before any change.
+ * request resolves with data:null and a non-retryable error before any change.
  */
 interface SomewhereGroups {
   create(req: Request, input: { name: string }): Promise<SomewhereGroupsResult<SomewhereGroupDetail>>;
@@ -1218,6 +1218,7 @@ type SomewherePaymentsStatus =
   };
 interface SomewherePaymentsLineItem { price?: string; amount?: number; currency?: string; name?: string; quantity?: number }
 interface SomewherePaymentsCheckoutOptions {
+  row?: never;
   env?: SomewherePaymentsEnv;
   mode?: 'payment' | 'subscription';
   line_items?: readonly SomewherePaymentsLineItem[];
@@ -1231,6 +1232,44 @@ interface SomewherePaymentsCheckoutOptions {
   customer_email?: string;
   metadata?: Readonly<Record<string, string>>;
 }
+/** Row checkout is a live, one-time payment; amounts are integer cents and items use one currency. */
+interface SomewherePaymentsRowCheckoutLineItem {
+  name: string;
+  amount: number;
+  currency: string;
+  quantity?: number;
+  price?: never;
+}
+interface SomewherePaymentsRowCheckoutOptions {
+  row: { binding: string; id: string | number };
+  env?: 'prod';
+  mode?: 'payment';
+  line_items: readonly SomewherePaymentsRowCheckoutLineItem[];
+  success_url: string;
+  cancel_url: string;
+  customer_email?: string;
+  metadata?: never;
+  quote_id?: never;
+  booking_id?: never;
+  calendar_hold_token?: never;
+  plan?: never;
+}
+interface SomewherePaymentsRowCheckoutSessionResult {
+  binding_id: string;
+  session_id: string;
+  url: string | null;
+  reused: boolean;
+  stripe_mode: 'live';
+  amount_total_cents: number;
+  currency: string;
+}
+/** A pending result has no checkout URL; reconciliation_required:true needs operator reconciliation. */
+interface SomewherePaymentsRowCheckoutPendingResult {
+  binding_id: string;
+  status: 'pending';
+  reconciliation_required: boolean;
+}
+type SomewherePaymentsRowCheckoutResult = SomewherePaymentsRowCheckoutSessionResult | SomewherePaymentsRowCheckoutPendingResult;
 interface SomewherePaymentsCheckoutForUserOptions extends SomewherePaymentsCheckoutOptions { plan: string }
 interface SomewherePaymentsCheckoutResult {
   session_id: string;
@@ -1319,6 +1358,7 @@ interface SomewhereRuntimePayments {
   onboard(opts?: SomewherePaymentsOnboardOptions | null): Promise<SomewherePaymentsOnboardResult>;
   quote: SomewhereQuoteFunction;
   status(opts?: { refresh?: boolean } | null): Promise<SomewherePaymentsStatus>;
+  checkout(opts: SomewherePaymentsRowCheckoutOptions): Promise<SomewherePaymentsRowCheckoutResult>;
   checkout(opts: SomewherePaymentsCheckoutOptions): Promise<SomewherePaymentsCheckoutResult>;
   // The app user is the request's verified principal; no user id argument.
   checkoutForUser(opts: SomewherePaymentsCheckoutForUserOptions): Promise<SomewherePaymentsCheckoutResult>;
@@ -2881,6 +2921,10 @@ interface SomewhereJobsCreateOptions {
   // Earliest start: an ISO-8601 time with an explicit offset, e.g. '2026-10-05T09:00:00Z'. Must be in the future.
   run_at?: string;
   agent?: { messages: readonly unknown[]; max_steps?: number; max_turns?: number; deployment_version?: string };
+  // Row-bound job: acts for the signed-in user on ONE row of a job binding declared in db/schema.ts, with only that
+  // binding's operations, until its deadline. id is the row's id(): a whole number, or a string for uuid ids.
+  // Created only from that user's own request (not from another job); not combined with agent.
+  row?: { binding: string; id: number | string };
 }
 interface SomewhereJobsRecovery {
   dispatch_state: string;
