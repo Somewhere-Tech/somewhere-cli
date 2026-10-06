@@ -22,48 +22,34 @@
  *      serving host returns 404, in a finally block, so a mid-test failure
  *      cannot leave production junk behind.
  *
- * With no credential it skips with a named reason instead of falling back to
- * anonymous deploy — which is what made the old failure mode possible. CI has
- * no credential, so CI never creates anything.
+ * It runs only with BOTH SOMEWHERE_LIVE_DEPLOY_TEST=1 and SOMEWHERE_TEST_TOKEN
+ * set. Otherwise it skips with a named reason: it never falls back to an
+ * anonymous deploy, and never to the signed-in ~/.somewhere/config.json, which
+ * made a plain `npm test` deploy on the developer's own account (tsk_fc1afab0).
+ *
+ *   SOMEWHERE_LIVE_DEPLOY_TEST=1 SOMEWHERE_TEST_TOKEN=<test account key> \
+ *     node --test test/deploy-outcome-live.test.mjs
  */
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { liveDeployCredential } from '../scripts/live-test-gate.mjs';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
 const API = (process.env.SOMEWHERE_API_URL || 'https://api.somewhere.tech/v1').replace(/\/$/, '');
 
-/**
- * A credential this test is allowed to deploy with. A TEMPORARY session is
- * deliberately refused: temp credentials are exactly what the anonymous path
- * mints, and honouring one here would re-open the hole this test closed.
- */
-function resolveCredential() {
-  if (process.env.SOMEWHERE_TEST_TOKEN) {
-    return { token: process.env.SOMEWHERE_TEST_TOKEN, source: 'SOMEWHERE_TEST_TOKEN' };
-  }
-  const configPath = join(homedir(), '.somewhere', 'config.json');
-  if (!existsSync(configPath)) return null;
-  try {
-    const config = JSON.parse(readFileSync(configPath, 'utf8'));
-    if (!config?.token || config.temporary) return null;
-    return { token: config.token, source: '~/.somewhere/config.json' };
-  } catch {
-    return null;
-  }
-}
-
-const credential = resolveCredential();
-const SKIP_REASON =
-  'SOMEWHERE_LIVE_DEPLOY_SKIPPED: no signed-in somewhere credential ' +
-  '(set SOMEWHERE_TEST_TOKEN, or run `somewhere login`). This test deploys to the real ' +
-  'platform, so it never runs unauthenticated — it will not fall back to an anonymous deploy.';
+// Both an explicit opt-in and an explicit test credential, from the
+// environment only; the signed-in ~/.somewhere/config.json is never read
+// (tsk_fc1afab0). Without both, this test skips and makes no request.
+const gate = liveDeployCredential();
+const credential = gate.ok ? { token: gate.token } : null;
+const SKIP_REASON = gate.ok ? '' : gate.reason;
 
 function run(args, { cwd, home }) {
   return new Promise((resolvePromise) => {
@@ -73,6 +59,7 @@ function run(args, { cwd, home }) {
         ...process.env,
         HOME: home,
         USERPROFILE: home,
+        SOMEWHERE_CONFIG_DIR: join(home, '.somewhere'),
         CI: '1',
         SOMEWHERE_NO_NOTIFICATIONS: '1',
       },

@@ -10,17 +10,28 @@
  * (rewritten index.html, _compiled/ chunks) must NOT leak into pull output.
  *
  * Each fixture runs on a fresh THROWAWAY project, archived afterwards.
- * Requires a logged-in CLI. Run: node scripts/e2e-roundtrip.mjs
+ * Runs only with BOTH SOMEWHERE_LIVE_DEPLOY_TEST=1 and SOMEWHERE_TEST_TOKEN set;
+ * the signed-in ~/.somewhere/config.json is never read, and the CLI runs with
+ * its own config root holding the test token (tsk_fc1afab0).
+ * Run: SOMEWHERE_LIVE_DEPLOY_TEST=1 SOMEWHERE_TEST_TOKEN=<test account key> node scripts/e2e-roundtrip.mjs
  */
 import { execFileSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, tmpdir } from 'node:os';
+import { tmpdir } from 'node:os';
 import { join, dirname, relative } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { liveDeployCredential } from './live-test-gate.mjs';
+
+const gate = liveDeployCredential();
+if (!gate.ok) {
+  console.error(gate.reason);
+  process.exit(2);
+}
+const { token } = gate;
 const API = 'https://api.somewhere.tech/v1';
-const { token } = JSON.parse(readFileSync(join(homedir(), '.somewhere', 'config.json'), 'utf8'));
-if (!token) throw new Error('Not logged in');
+const cliConfigDir = mkdtempSync(join(tmpdir(), 'sw-roundtrip-config-'));
+writeFileSync(join(cliConfigDir, 'config.json'), JSON.stringify({ token, user: { email: '', username: '' } }) + '\n');
 
 const cliRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const somewhereBin = join(cliRoot, 'bin', 'somewhere.js');
@@ -43,7 +54,11 @@ async function api(method, path, body) {
 }
 
 function cli(args, cwd) {
-  return execFileSync('node', [somewhereBin, ...args], { cwd, encoding: 'utf8' });
+  return execFileSync('node', [somewhereBin, ...args], {
+    cwd,
+    encoding: 'utf8',
+    env: { ...process.env, SOMEWHERE_CONFIG_DIR: cliConfigDir },
+  });
 }
 
 /**
