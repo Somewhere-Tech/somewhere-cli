@@ -143,9 +143,22 @@ async function withPlatformClient<T>(
 export async function listPlatformTools(
   options: PlatformToolCallOptions = {},
 ): Promise<Tool[]> {
+  // The platform pages tools/list; reading only the first page hides later
+  // tools from `call --list` and from the linked-project default (tsk_bc255b87).
   return withPlatformClient(options, async (client) => {
-    const result = await client.listTools();
-    return result.tools;
+    const tools: Tool[] = [];
+    const seen = new Set<string>();
+    let cursor: string | undefined;
+    do {
+      const result = await client.listTools(cursor === undefined ? undefined : { cursor });
+      tools.push(...result.tools);
+      cursor = result.nextCursor;
+      if (cursor !== undefined) {
+        if (seen.has(cursor)) throw new Error('The platform repeated a tools/list cursor.');
+        seen.add(cursor);
+      }
+    } while (cursor !== undefined);
+    return tools;
   });
 }
 

@@ -91,3 +91,72 @@ test('the CLI sends the linked project for cron_list, keeps an explicit one, and
     await new Promise((resolvePromise) => server.close(resolvePromise));
   }
 });
+
+// tsk_bc255b87: the platform pages tools/list. A tool on a later page must
+// still get the linked project, and `call --list` must show every page.
+test('the linked project reaches a project tool listed on a later tools/list page', async () => {
+  const home = mkdtempSync(join(tmpdir(), 'sw-call-paged-home-'));
+  mkdirSync(join(home, '.somewhere'), { recursive: true });
+  writeFileSync(join(home, '.somewhere', 'config.json'), JSON.stringify({ token: 'smt_call_paged_test', user: { email: 't@example.com' } }));
+  const appDir = mkdtempSync(join(tmpdir(), 'sw-call-paged-app-'));
+  writeFileSync(join(appDir, '.somewhere.json'), JSON.stringify(LINKED));
+  const firstPage = Array.from({ length: 64 }, (_, i) => ({ name: `filler_${i}`, description: 'Filler', inputSchema: { type: 'object', properties: {} } }));
+  const dbBrowse = { name: 'db_browse', description: 'Browse rows', inputSchema: { type: 'object', properties: { project_id: { type: 'string' }, table: { type: 'string' } } } };
+  const calls = [];
+  const listCursors = [];
+  const server = createServer((req, res) => {
+    let body = '';
+    req.on('data', (chunk) => (body += chunk));
+    req.on('end', () => {
+      const rpc = JSON.parse(body);
+      if (rpc.method === 'initialize') {
+        sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: { protocolVersion: '2024-11-05', capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } });
+      } else if (rpc.method === 'tools/list') {
+        const cursor = rpc.params?.cursor;
+        listCursors.push(cursor ?? null);
+        const result = cursor === 'page-2'
+          ? { tools: [dbBrowse, withoutProject] }
+          : { tools: firstPage, nextCursor: 'page-2' };
+        sendJson(res, { jsonrpc: '2.0', id: rpc.id, result });
+      } else if (rpc.method === 'tools/call') {
+        calls.push({ name: rpc.params.name, arguments: rpc.params.arguments });
+        sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: { content: [{ type: 'text', text: JSON.stringify({ ok: true, data: { rows: [] } }) }] } });
+      } else {
+        sendJson(res, { jsonrpc: '2.0', id: rpc.id, result: {} });
+      }
+    });
+  });
+  await new Promise((resolvePromise) => server.listen(0, '127.0.0.1', resolvePromise));
+  const env = { ...process.env, HOME: home, USERPROFILE: home, SOMEWHERE_CONFIG_DIR: join(home, '.somewhere'), SOMEWHERE_MCP_URL: `http://127.0.0.1:${server.address().port}/mcp`, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' };
+  const run = (args) => new Promise((resolvePromise) => {
+    const child = spawn(process.execPath, [distIndex, ...args], { cwd: appDir, env });
+    let stdout = '';
+    let stderr = '';
+    child.stdout.on('data', (c) => (stdout += c));
+    child.stderr.on('data', (c) => (stderr += c));
+    child.on('close', (status) => resolvePromise({ status, stdout, stderr }));
+  });
+  try {
+    const browsed = await run(['call', 'db_browse', '{"table":"workspaces"}']);
+    assert.equal(browsed.status, 0, browsed.stderr);
+    assert.deepEqual(listCursors, [null, 'page-2']);
+    assert.deepEqual(calls.at(-1), { name: 'db_browse', arguments: { table: 'workspaces', project_id: LINKED.project_id } });
+    assert.match(browsed.stderr, /Using the linked project crew-race-fd02/);
+
+    const explicit = await run(['call', 'db_browse', '{"table":"workspaces","project_id":"another-app"}']);
+    assert.equal(explicit.status, 0, explicit.stderr);
+    assert.deepEqual(calls.at(-1).arguments, { table: 'workspaces', project_id: 'another-app' });
+
+    const unrelated = await run(['call', 'domain_check', '{"domain":"example.com"}']);
+    assert.equal(unrelated.status, 0, unrelated.stderr);
+    assert.deepEqual(calls.at(-1).arguments, { domain: 'example.com' });
+
+    const listed = await run(['call', '--list', '--json']);
+    assert.equal(listed.status, 0, listed.stderr);
+    const catalog = JSON.parse(listed.stdout);
+    assert.equal(catalog.count, 66);
+    assert.ok(catalog.tools.some((t) => t.name === 'db_browse'));
+  } finally {
+    await new Promise((resolvePromise) => server.close(resolvePromise));
+  }
+});
