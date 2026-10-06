@@ -143,8 +143,8 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
   const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
   assert.equal(agents, `# somewhere.tech project contract\n${SKILLS_POINTER}\n${AGENT_WORKFLOW}\n`);
-  // 76 since tsk_c8e60ff7 added the data mixing rule and its ownership step.
-  assert.ok(agents.trimEnd().split('\n').length <= 76, 'AGENTS.md must stay within 76 lines');
+  // 81 since tsk_c8e60ff7 added the data mixing rule and its validated ownership step.
+  assert.ok(agents.trimEnd().split('\n').length <= 81, 'AGENTS.md must stay within 81 lines');
   assert.equal(claude, 'Read AGENTS.md for project instructions.\n');
   assert.equal(claude.trimEnd().split('\n').length, 1);
 
