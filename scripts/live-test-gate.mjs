@@ -1,8 +1,9 @@
 // tsk_fc1afab0: the one gate for tests and scripts that deploy to the real
 // platform. Both an explicit opt-in and an explicit test credential are
 // required, and both come from the environment only. The signed-in
-// ~/.somewhere/config.json is never read, so `npm test` on a developer's
-// machine makes no live call and never acts on their account.
+// ~/.somewhere/config.json is never read, so nothing behind this gate deploys
+// implicitly or acts on the developer's account. It covers only the
+// entrypoints that use it; it does not make the rest of the suite offline.
 
 export const LIVE_DEPLOY_OPT_IN = 'SOMEWHERE_LIVE_DEPLOY_TEST';
 export const LIVE_TEST_TOKEN = 'SOMEWHERE_TEST_TOKEN';

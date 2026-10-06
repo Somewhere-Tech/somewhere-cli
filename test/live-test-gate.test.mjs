@@ -1,4 +1,4 @@
-// tsk_fc1afab0: a default `npm test` makes no live call. The live deploy test
+// tsk_fc1afab0: no implicit live deploy or account use. The live deploy test
 // and the round-trip script run only with BOTH SOMEWHERE_LIVE_DEPLOY_TEST=1 and
 // SOMEWHERE_TEST_TOKEN, and never pick up the signed-in ~/.somewhere login.
 // Every case here is a refusal: the case with both set would deploy to the

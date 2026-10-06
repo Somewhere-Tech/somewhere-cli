@@ -30,8 +30,13 @@ if (!gate.ok) {
 }
 const { token } = gate;
 const API = 'https://api.somewhere.tech/v1';
+// The test key lives only in this run's own config root: owner-only, and
+// removed however the run ends ('exit' also fires after an uncaught error or
+// a rejected top-level await; an interrupt is turned into an exit).
 const cliConfigDir = mkdtempSync(join(tmpdir(), 'sw-roundtrip-config-'));
-writeFileSync(join(cliConfigDir, 'config.json'), JSON.stringify({ token, user: { email: '', username: '' } }) + '\n');
+process.on('exit', () => rmSync(cliConfigDir, { recursive: true, force: true }));
+for (const [signal, code] of [['SIGINT', 130], ['SIGTERM', 143]]) process.once(signal, () => process.exit(code));
+writeFileSync(join(cliConfigDir, 'config.json'), JSON.stringify({ token, user: { email: '', username: '' } }) + '\n', { mode: 0o600 });
 
 const cliRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const somewhereBin = join(cliRoot, 'bin', 'somewhere.js');
