@@ -143,7 +143,8 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
   const agents = readFileSync(join(dir, 'AGENTS.md'), 'utf8');
   const claude = readFileSync(join(dir, 'CLAUDE.md'), 'utf8');
   assert.equal(agents, `# somewhere.tech project contract\n${SKILLS_POINTER}\n${AGENT_WORKFLOW}\n`);
-  assert.ok(agents.trimEnd().split('\n').length <= 60, 'AGENTS.md must stay within 60 lines');
+  // 75 since tsk_c8e60ff7 added the data mixing rule and its ownership step.
+  assert.ok(agents.trimEnd().split('\n').length <= 75, 'AGENTS.md must stay within 75 lines');
   assert.equal(claude, 'Read AGENTS.md for project instructions.\n');
   assert.equal(claude.trimEnd().split('\n').length, 1);
 
@@ -178,7 +179,9 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
     previous = next;
   }
   assert.match(agents, /Promise\.all/);
-  assert.match(agents, /normal data operations use the\nsigned-in user's rows\)[\s\S]*authorize custom endpoints\.[\s\S]*authorize the caller in your function/);
+  // tsk_c8e60ff7: the generated client for normal data, one function for the
+  // exceptional write, the owner from the lookup, and caller checks on raw access.
+  assert.match(agents, /pages use the generated\n`somewhere:data` client[\s\S]*`owner\(\)` per user[\s\S]*add one\nfunction for that write[\s\S]*never one from the body[\s\S]*authorize the caller in your function/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,

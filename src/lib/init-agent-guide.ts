@@ -52,9 +52,24 @@ Functions: a bare \`export default async function (req, sw)\` returning a
 \`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
 handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
 
-Data: tables in \`db/schema.ts\` — \`owner()\` (normal data operations use the
-signed-in user's rows), \`shared()\` or \`serverOnly()\` — with a \`client\` block for browser
-access via \`somewhere:data\`; authorize custom endpoints.
+Data: declare tables in \`db/schema.ts\`; pages use the generated
+\`somewhere:data\` client (\`data.notes.list()\`, \`.create()\`, \`.update(id, …)\`), so
+normal data needs no API file. Scope: \`owner()\` per user, \`group()\` per team,
+\`appRole()\` for staff; \`client\` names the browser's columns, and
+\`publicRead: { where }\` opens rows to visitors. When one write does not fit,
+such as a public form filing a row for an owner, keep the client and add one
+function for that write; do not make every table \`serverOnly()\`. Store the
+owner you look up from the public reference, never one from the body:
+
+\`\`\`ts
+const { data: [profile] } = await sw.db.server.from('profiles', { where: { handle }, limit: 1 });
+if (!profile) return Response.json({ error: 'unknown handle' }, { status: 404 });
+await sw.db.server.insert('entries', { user_id: profile.user_id, title });
+\`\`\`
+
+The sender is not the owner. Validation, rate limits and the alert:
+\`somewhere docs recipe-signed-in-app\`. \`serverOnly()\` is for tables no browser
+reads.
 Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw SQL \`sw.db.query(sql, params)\` runs as written (add \`WHERE
