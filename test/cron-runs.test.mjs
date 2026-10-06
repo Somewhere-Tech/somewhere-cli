@@ -192,7 +192,7 @@ test('an overdue next run says whether that occurrence has a recorded run', asyn
   await withFixture(fixture(cronRow({ next_run_at: PAST }), [scheduledJob, manualJob], []), async (url) => {
     const out = await run(['cron', 'runs', 'cron_digest'], env(url));
     assert.equal(out.status, 0, out.stderr);
-    assert.match(out.stdout, /No run is recorded for the overdue occurrence yet/);
+    assert.match(out.stdout, /No matching run appears in this recent history\./);
   });
 });
 

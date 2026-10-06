@@ -294,8 +294,9 @@ function isOverdue(row: Record<string, unknown>, now: number): boolean {
   return Number.isFinite(at) && at <= now;
 }
 
-/** For an overdue trigger, the run recorded for that exact occurrence, if the
- *  history has one. */
+/** For an overdue trigger, the run for that exact occurrence if it appears in
+ *  the recent history. job_get returns only the latest N runs, so absence there
+ *  does not prove no run exists. */
 export function overdueOccurrenceLine(
   cron: Record<string, unknown>,
   jobs: Record<string, unknown>[],
@@ -308,7 +309,7 @@ export function overdueOccurrenceLine(
     && Date.parse(candidate.cron_scheduled_at) === due);
   return job
     ? `The overdue occurrence has a recorded run: job ${String(job.job_id)} (${String(job.status)}).`
-    : 'No run is recorded for the overdue occurrence yet.';
+    : 'No matching run appears in this recent history.';
 }
 
 function isoSeconds(value: unknown): string {
@@ -476,7 +477,8 @@ export function registerCron(program: Command): void {
       '\nTRIGGER is "scheduled" for a run the schedule started (SCHEDULED FOR is the occurrence it\n'
         + 'served) and "manual" for `cron run`. Times are UTC. A scheduled run is recorded shortly after\n'
         + 'its scheduled time, not exactly on it; until the schedule advances, the next run shows as\n'
-        + 'overdue, and this command says whether a run is already recorded for that occurrence.\n',
+        + 'overdue, and this command says whether a run for that occurrence appears in the recent\n'
+        + 'history shown.\n',
     )
     .action(async (target: string, opts: CronRunsOptions) => {
       try {
