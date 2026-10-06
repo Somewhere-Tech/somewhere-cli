@@ -108,3 +108,47 @@ test('role vocabulary changes update written declarations; invalid schema remove
     assert.equal(existsSync(path), false, 'invalid roles cannot leave stale generated permissions');
   }
 });
+
+test('invitation options and automatic-completion outcomes follow the CLI writer', async t => {
+  const root = fixture(t, rolesSchema, `export async function invite(req: Request, sw: SomewhereRuntimeContext) {
+    const sent = await sw.groups.invite(req, 'crew', {
+      email: 'friend@example.invalid', role: 'editor', redirect_uri: '/join', expires_in: 3600,
+    });
+    if (sent.error === null) {
+      const role: SomewhereGroupRole = sent.data.group.role;
+      const status: 'pending' = sent.data.invite.status;
+      const delivery: 'sent' | 'pending' = sent.data.delivery;
+      const expiry: number = sent.data.invite.expires_at;
+      void [role, status, delivery, expiry];
+    }
+    await sw.groups.invite(req, 'crew', { email: 'other@example.invalid', role: 'member', redirect_uri: '/join' });
+    const page = await sw.groups.list(req, { limit: 10 });
+    if (page.error === null) for (const outcome of page.data.invitations) {
+      const state: 'completed' | 'pending' | 'refused' = outcome.state;
+      const code: string | undefined = outcome.code;
+      const role: SomewhereGroupRole = outcome.role;
+      const id: string = outcome.invite_id;
+      void [state, code, role, id];
+    }
+  }`);
+  const prepared = prepareDeclaredData(root);
+  assert.ok(readFileSync(prepared.declarationPath, 'utf8').includes(
+    generator.runtimeDeclarationFromFiles({ 'db/schema.ts': rolesSchema })));
+  const good = await check(root);
+  assert.equal(good.ok, true, good.raw);
+  writeFileSync(join(root, 'src/bad.ts'), `export async function wrong(req: Request, sw: SomewhereRuntimeContext) {
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'staff', redirect_uri: '/join' });
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'unknown', redirect_uri: '/join' });
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'member' });
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'member', redirect_uri: '/join', expires_in: '3600' });
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'member', redirect_uri: '/join', actor: 'other' });
+    await sw.groups.invite(req, 'g', { email: 'x', role: 'member', redirect_uri: '/join', data: { group: 'other' } });
+    await sw.groups.acceptInvitation(req, 'invite');
+    const page = await sw.groups.list(req);
+    if (page.error === null) { const state: 'sent' = page.data.invitations[0].state; void state; }
+  }`);
+  const bad = await check(root);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.length, 8, bad.raw);
+  assert.ok(bad.errors.every(error => error.file === 'src/bad.ts'), bad.raw);
+});

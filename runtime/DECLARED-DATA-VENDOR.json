@@ -2,7 +2,7 @@
   "esbuild": "0.24.0",
   "source_files": {
     "worker/containers/compile/declared-data-contract.cjs": "bf2d7d56252e1f64ded67c322acf7fa0f2dc722d79f3965211a3442859d26d9f",
-    "worker/containers/compile/groups-types.cjs": "a6c8ac36a78ccd742b4a1bc986723da028ed1080db092da452ad2c6bc21bb614",
+    "worker/containers/compile/groups-types.cjs": "44b37c03c05dd8bbb07e0dd8c9e2d7f48dda6882666283d4dfa3cde926871731",
     "worker/containers/compile/runtime-types.cjs": "43b15bc33a8b55a4233627cab5a802257c6b60de1a1da380981710d4fbc8f0ec",
     "worker/containers/compile/schema-types.cjs": "1c5a0b3ad6b506dc178de7f031080426558cab055f1c1620eb949c524e5546f8",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
@@ -26,5 +26,5 @@
     "worker/src/utils/managed-groups/errors.ts": "2ea002d5bb2890492fbe470e0dabb6681060780e94b89e2c30d37cabe6484383",
     "worker/src/utils/managed-groups/policy.ts": "2259a883645c8bfd607ead7c37387f3ffd42ac9dfb86722c72b224adb498511e"
   },
-  "sha256": "cb3b638e84f4ea2073091ecad0c332b99d1a5fc619737b9afef1c8ffa43b813c"
+  "sha256": "bdd35454de450860372ae9010e6d0a8c73855777c0472e560443ac4970d1ea52"
 }

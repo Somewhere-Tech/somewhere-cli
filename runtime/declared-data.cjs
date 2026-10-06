@@ -451,6 +451,26 @@ interface SomewhereAppRoleGrant {
   created_at: number;
 }
 
+/** A sent group invitation: one email; acceptance completes the membership. */
+interface SomewhereGroupInvitation {
+  invite: { id: string; email: string; status: 'pending'; redirect_uri: string; expires_at: number; created_at: number };
+  group: { group_id: string; role: SomewhereGroupRole };
+  delivery: 'sent' | 'pending';
+}
+
+/**
+ * Where an accepted invitation's membership stands. pending: not confirmed
+ * yet (the platform retries on this user's next list); refused: it will not
+ * complete (code says why, e.g. INVITATION_REVOKED, INVITATION_AUTHORITY_LOST).
+ */
+interface SomewhereGroupInvitationOutcome {
+  invite_id: string;
+  group_id: string;
+  role: SomewhereGroupRole;
+  state: 'completed' | 'pending' | 'refused';
+  code?: string;
+}
+
 /** retry is false when a change's outcome could not be confirmed (GROUPS_OUTCOME_UNKNOWN). */
 interface SomewhereGroupsError {
   code: string;
@@ -472,9 +492,13 @@ type SomewhereGroupsResult<T> = { data: T; error: null } | { data: null; error: 
  */
 interface SomewhereGroups {
   create(req: Request, input: { name: string }): Promise<SomewhereGroupsResult<SomewhereGroupDetail>>;
-  list(req: Request, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereGroup>>>;
+  /** Also completes (and reports) up to 3 of the signed-in user's accepted invitations. */
+  list(req: Request, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereGroup> & { invitations: SomewhereGroupInvitationOutcome[] }>>;
   get(req: Request, groupId: string): Promise<SomewhereGroupsResult<SomewhereGroupDetail>>;
   members(req: Request, groupId: string, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereGroupMember>>>;
+  /** Invite by email with a role the signed-in user may grant. The platform
+   *  sends one email and adds the member when they accept; no app call is needed. */
+  invite(req: Request, groupId: string, input: { email: string; role: SomewhereGroupRole; redirect_uri: string; expires_in?: number }): Promise<SomewhereGroupsResult<SomewhereGroupInvitation>>;
   leave(req: Request, groupId: string): Promise<SomewhereGroupsResult<{ left: true }>>;
   remove(req: Request, groupId: string, userId: string): Promise<SomewhereGroupsResult<{ removed: true }>>;
   setRole(req: Request, groupId: string, userId: string, role: SomewhereGroupRole): Promise<SomewhereGroupsResult<{ user_id: string; role: SomewhereGroupRole }>>;
