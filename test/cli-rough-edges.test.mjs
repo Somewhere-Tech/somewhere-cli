@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createServer, request as httpRequest } from 'node:http';
 import { spawn } from 'node:child_process';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { closeSync, mkdtempSync, mkdirSync, openSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -208,6 +208,49 @@ test('env set reads stdin without echoing it and rejects conflicting input or vi
     assert.notEqual(conflictingInput.status, 0);
     assert.equal(calls.length, before);
     assert.doesNotMatch(conflictingVisibility.stdout + conflictingVisibility.stderr + conflictingInput.stdout + conflictingInput.stderr, /a-secret-value-for-test|another-secret/);
+  });
+});
+
+// tsk_0e470633: --stdin removes exactly one final LF or CRLF, from a pipe or a
+// redirected file (`< file`), and keeps every other byte.
+test('env set --stdin removes one final line ending and keeps everything else', async () => {
+  await withPlatform(async ({ calls, env }) => {
+    const cwd = linkedDir();
+    const cases = [
+      ['lf', 'value-lf\n', 'value-lf'],
+      ['crlf', 'value-crlf\r\n', 'value-crlf'],
+      ['none', 'value-none', 'value-none'],
+      ['one-of-two', 'value-two\n\n', 'value-two\n'],
+      ['whitespace', '  value-ws \t\n', '  value-ws \t'],
+      ['lone-cr', 'value-cr\r', 'value-cr\r'],
+      ['empty', '', ''],
+    ];
+    for (const [label, input, stored] of cases) {
+      const piped = await run(['env', 'set', 'SERVICE_KEY', '--stdin'], { cwd, env, stdin: input });
+      assert.equal(piped.status, 0, `${label}: ${piped.stderr}`);
+      assert.equal(calls.at(-1).body.value, stored, label);
+    }
+
+    // The reported shape: a 41-byte file ending "F\n" redirected into --stdin.
+    const file = join(cwd, 'token.txt');
+    writeFileSync(file, `${'0123456789ABCDEF'.repeat(2)}0123456F\n`);
+    const fd = openSync(file, 'r');
+    const redirected = await new Promise((resolvePromise) => {
+      const child = spawn(process.execPath, [distIndex, 'env', 'set', 'ADMIN_TOKEN', '--stdin'], {
+        cwd,
+        env: { ...process.env, SOMEWHERE_MCP_URL: 'http://127.0.0.1:1/mcp', ...env, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' },
+        stdio: [fd, 'pipe', 'pipe'],
+      });
+      let output = '';
+      child.stdout.on('data', (c) => (output += c));
+      child.stderr.on('data', (c) => (output += c));
+      child.on('close', (status) => resolvePromise({ status, output }));
+    });
+    closeSync(fd);
+    assert.equal(redirected.status, 0, redirected.output);
+    assert.equal(calls.at(-1).body.value, `${'0123456789ABCDEF'.repeat(2)}0123456F`);
+    assert.equal(calls.at(-1).body.value.length, 40);
+    assert.doesNotMatch(redirected.output, /0123456789ABCDEF/);
   });
 });
 
