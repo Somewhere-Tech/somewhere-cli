@@ -48,6 +48,10 @@ interface CronRunOptions extends ProjectOptions {
   timeout?: string;
 }
 
+interface CronRunsOptions extends ProjectOptions {
+  limit?: string;
+}
+
 interface CronRunResult extends Record<string, unknown> {
   cron_id: string;
   job_id: string;
@@ -240,8 +244,7 @@ function cronProjectScope(explicit: string | undefined): string | undefined {
   return explicit ?? loadProjectConfig()?.project_id;
 }
 
-async function resolveCronRunId(target: string, explicit: string | undefined): Promise<string> {
-  if (target.startsWith('cron_')) return target;
+async function findNamedCronRow(target: string, explicit: string | undefined): Promise<CronRow & { cron_id: string }> {
   const project = cronProjectScope(explicit);
   const rows = cronRows(await callPlatformTool('cron_list', compactRecord([
     ['project_id', project],
@@ -255,7 +258,84 @@ async function resolveCronRunId(target: string, explicit: string | undefined): P
   }
   const id = cronRowId(matches[0]);
   if (!id) throw new Error('cron_list returned a scheduled task without a cron_id.');
-  return id;
+  return { ...matches[0], cron_id: id };
+}
+
+async function resolveCronRunId(target: string, explicit: string | undefined): Promise<string> {
+  if (target.startsWith('cron_')) return target;
+  return (await findNamedCronRow(target, explicit)).cron_id;
+}
+
+/** The trigger row for `cron runs`, so its next run can be shown with the
+ *  history. A cron ID is looked up in --project when given, otherwise across
+ *  the account; a row that cannot be found leaves only the history. */
+async function findCronRow(target: string, explicit: string | undefined): Promise<CronRow & { cron_id: string }> {
+  if (!target.startsWith('cron_')) return findNamedCronRow(target, explicit);
+  const rows = cronRows(await callPlatformTool('cron_list', compactRecord([
+    ['project_id', explicit],
+  ]), { allTools: true }));
+  const row = rows.find((candidate) => cronRowId(candidate) === target);
+  return { ...(row ?? {}), cron_id: target };
+}
+
+/** next_run_at as shown in `cron list` / `cron runs`. A past next run on an
+ *  enabled trigger is overdue: the schedule has not advanced it yet. Whether a
+ *  run was recorded for it is only known from the run history (`cron runs`). */
+export function nextRunLabel(row: Record<string, unknown>, now = Date.now()): string {
+  if (row.enabled === false) return 'paused';
+  if (typeof row.next_run_at !== 'string' || !row.next_run_at) return '—';
+  const shown = isoSeconds(row.next_run_at);
+  return isOverdue(row, now) ? `${shown} (overdue)` : shown;
+}
+
+function isOverdue(row: Record<string, unknown>, now: number): boolean {
+  if (row.enabled === false || typeof row.next_run_at !== 'string') return false;
+  const at = Date.parse(row.next_run_at);
+  return Number.isFinite(at) && at <= now;
+}
+
+/** For an overdue trigger, the run recorded for that exact occurrence, if the
+ *  history has one. */
+export function overdueOccurrenceLine(
+  cron: Record<string, unknown>,
+  jobs: Record<string, unknown>[],
+  now = Date.now(),
+): string | null {
+  if (!isOverdue(cron, now)) return null;
+  const due = Date.parse(cron.next_run_at as string);
+  const job = jobs.find((candidate) => candidate.trigger === 'scheduled'
+    && typeof candidate.cron_scheduled_at === 'string'
+    && Date.parse(candidate.cron_scheduled_at) === due);
+  return job
+    ? `The overdue occurrence has a recorded run: job ${String(job.job_id)} (${String(job.status)}).`
+    : 'No run is recorded for the overdue occurrence yet.';
+}
+
+function isoSeconds(value: unknown): string {
+  return typeof value === 'string' && value ? value.replace(/\.\d{3}Z$/, 'Z') : '—';
+}
+
+function parseRunsLimit(value: string | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  const limit = Number(value);
+  if (!Number.isInteger(limit) || limit < 1 || limit > 100) {
+    throw new Error(`USAGE_ERROR: --limit must be a whole number from 1 to 100, got "${value}".`);
+  }
+  return limit;
+}
+
+function jobRows(value: unknown): Record<string, unknown>[] {
+  const data = unwrapPlatformData(value);
+  if (!isRecord(data) || !Array.isArray(data.jobs)) throw new Error('job_get returned an unexpected response.');
+  return data.jobs.filter(isRecord);
+}
+
+function jobOutcome(job: Record<string, unknown>): string {
+  if (typeof job.error === 'string' && job.error) {
+    return truncateText(`${typeof job.error_code === 'string' && job.error_code ? `${job.error_code}: ` : ''}${job.error}`, 48);
+  }
+  if (job.result === undefined || job.result === null) return '—';
+  return truncateText(formatJobValue(job.result), 48);
 }
 
 function printCronMutation(verb: string, value: unknown): void {
@@ -278,6 +358,7 @@ export function registerCron(program: Command): void {
         + '  somewhere cron create "0 8 * * *" /api/daily-digest --project my-app\n'
         + '  somewhere cron create "0 9 * * *" /api/daily-digest --project my-app --timezone America/Los_Angeles\n'
         + '  somewhere cron run daily-digest --wait   # queue one run now and wait for its result\n'
+        + '  somewhere cron runs daily-digest         # recent scheduled and manual runs, and the next run\n'
         + '\nA new schedule is read in UTC unless --timezone names an IANA zone. `cron list` shows the\n'
         + 'zone each trigger is stored in, and `cron update --schedule` keeps that zone unless --timezone changes it.\n',
     );
@@ -307,13 +388,14 @@ export function registerCron(program: Command): void {
           console.log(dim('No scheduled triggers.'));
         } else {
           // Each trigger's schedule is read in its own stored zone (tsk_b07f1dac).
-          table(['ID', 'Name', 'Schedule', 'Time zone', 'Handler', 'Enabled'], rows.map((row) => [
+          table(['ID', 'Name', 'Schedule', 'Time zone', 'Handler', 'Enabled', 'Next run (UTC)'], rows.map((row) => [
             cronRowId(row) ?? '—',
             truncateText(row.name, 32),
             typeof row.schedule === 'string' ? row.schedule : '—',
             typeof row.timezone === 'string' && row.timezone ? row.timezone : '—',
             truncateText(row.handler, 48),
             row.enabled === false ? 'no' : 'yes',
+            nextRunLabel(row),
           ]));
         }
         const policy = cronPolicyLine(value);
@@ -378,6 +460,57 @@ export function registerCron(program: Command): void {
           printTypedCronError('CRON_RUN_NOT_AVAILABLE', CRON_RUN_UNAVAILABLE, opts.json);
           return;
         }
+        const { code, message, extra } = platformErrorParts(err);
+        printTypedCronError(code, message, opts.json, extra);
+      }
+    });
+
+  cron
+    .command('runs <cron-id-or-name>')
+    .description('Show recent runs of a scheduled task, scheduled and manual, with its next run')
+    .option('-p, --project <project>', 'Project slug or ID used to resolve a task name; defaults to the linked project')
+    .option('--limit <n>', 'How many recent runs to show, 1-100 (default 20)')
+    .option('--json', 'Print the trigger and its runs as JSON')
+    .addHelpText(
+      'after',
+      '\nTRIGGER is "scheduled" for a run the schedule started (SCHEDULED FOR is the occurrence it\n'
+        + 'served) and "manual" for `cron run`. Times are UTC. A scheduled run is recorded shortly after\n'
+        + 'its scheduled time, not exactly on it; until the schedule advances, the next run shows as\n'
+        + 'overdue, and this command says whether a run is already recorded for that occurrence.\n',
+    )
+    .action(async (target: string, opts: CronRunsOptions) => {
+      try {
+        const limit = parseRunsLimit(opts.limit);
+        const cron = await findCronRow(target, opts.project);
+        const projectId = typeof cron.project_id === 'string' && cron.project_id ? cron.project_id : opts.project;
+        const jobs = jobRows(await callPlatformTool('job_get', compactRecord([
+          ['cron_id', cron.cron_id],
+          ['project_id', projectId],
+          ['limit', limit],
+        ]), { allTools: true }));
+        if (opts.json) {
+          printJson({ ok: true, data: { cron, jobs } });
+          return;
+        }
+        const name = typeof cron.name === 'string' && cron.name ? `${cron.name} (${cron.cron_id})` : cron.cron_id;
+        console.log(`${name}${typeof cron.schedule === 'string' ? `  ${cron.schedule}${typeof cron.timezone === 'string' && cron.timezone ? ` ${cron.timezone}` : ''}` : ''}`);
+        if ('next_run_at' in cron || 'enabled' in cron) console.log(dim(`Next run (UTC): ${nextRunLabel(cron)}`));
+        const occurrence = overdueOccurrenceLine(cron, jobs);
+        if (occurrence) console.log(dim(occurrence));
+        if (jobs.length === 0) {
+          console.log(dim('No runs yet.'));
+          return;
+        }
+        table(['Job', 'Trigger', 'Scheduled for', 'Status', 'Started', 'Finished', 'Result'], jobs.map((job) => [
+          typeof job.job_id === 'string' ? job.job_id : '—',
+          typeof job.trigger === 'string' ? job.trigger : '—',
+          isoSeconds(job.cron_scheduled_at),
+          typeof job.status === 'string' ? job.status : '—',
+          isoSeconds(job.started_at),
+          isoSeconds(job.completed_at),
+          jobOutcome(job),
+        ]));
+      } catch (err) {
         const { code, message, extra } = platformErrorParts(err);
         printTypedCronError(code, message, opts.json, extra);
       }
