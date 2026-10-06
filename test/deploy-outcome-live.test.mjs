@@ -34,7 +34,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
-import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -153,12 +153,23 @@ test(
     const projectId = created.payload?.data?.id ?? created.payload?.id;
     assert.ok(projectId, `no project id in create response: ${JSON.stringify(created.payload)}`);
 
+    // The test key lives only in this temporary HOME: owner-only, removed in
+    // the finally below, and at process exit if the test times out before the
+    // finally runs. A hard kill (SIGKILL, power loss) runs no cleanup. The
+    // deployed source tree below is kept for failure diagnosis.
+    let home = null;
+    const removeHome = () => {
+      if (home) rmSync(home, { recursive: true, force: true });
+      home = null;
+    };
+    process.once('exit', removeHome);
     try {
-      const home = mkdtempSync(join(tmpdir(), 'sw-deploy-outcome-home-'));
-      mkdirSync(join(home, '.somewhere'), { recursive: true });
+      home = mkdtempSync(join(tmpdir(), 'sw-deploy-outcome-home-'));
+      mkdirSync(join(home, '.somewhere'), { recursive: true, mode: 0o700 });
       writeFileSync(
         join(home, '.somewhere', 'config.json'),
         JSON.stringify({ token: credential.token, user: { email: '', username: '' } }) + '\n',
+        { mode: 0o600 },
       );
 
       const cwd = mkdtempSync(join(tmpdir(), 'sw-deploy-outcome-tree-'));
@@ -203,6 +214,8 @@ test(
       );
 
     } finally {
+      removeHome();
+      process.off('exit', removeHome);
       await purge(projectId, subdomain);
     }
   },
