@@ -499,6 +499,8 @@ interface SomewhereGroups {
   /** Invite by email with a role the signed-in user may grant. The platform
    *  sends one email and adds the member when they accept; no app call is needed. */
   invite(req: Request, groupId: string, input: { email: string; role: SomewhereGroupRole; redirect_uri: string; expires_in?: number }): Promise<SomewhereGroupsResult<SomewhereGroupInvitation>>;
+  /** Revoke in the invitation's own group, as its sender or a member who may grant its role. */
+  revokeInvitation(req: Request, inviteId: string): Promise<SomewhereGroupsResult<{ revoked: true }>>;
   leave(req: Request, groupId: string): Promise<SomewhereGroupsResult<{ left: true }>>;
   remove(req: Request, groupId: string, userId: string): Promise<SomewhereGroupsResult<{ removed: true }>>;
   setRole(req: Request, groupId: string, userId: string, role: SomewhereGroupRole): Promise<SomewhereGroupsResult<{ user_id: string; role: SomewhereGroupRole }>>;

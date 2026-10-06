@@ -122,6 +122,8 @@ test('invitation options and automatic-completion outcomes follow the CLI writer
       void [role, status, delivery, expiry];
     }
     await sw.groups.invite(req, 'crew', { email: 'other@example.invalid', role: 'member', redirect_uri: '/join' });
+    const revoked = await sw.groups.revokeInvitation(req, 'invite');
+    if (revoked.error === null) { const done: true = revoked.data.revoked; void done; }
     const page = await sw.groups.list(req, { limit: 10 });
     if (page.error === null) for (const outcome of page.data.invitations) {
       const state: 'completed' | 'pending' | 'refused' = outcome.state;
@@ -144,11 +146,12 @@ test('invitation options and automatic-completion outcomes follow the CLI writer
     await sw.groups.invite(req, 'g', { email: 'x', role: 'member', redirect_uri: '/join', actor: 'other' });
     await sw.groups.invite(req, 'g', { email: 'x', role: 'member', redirect_uri: '/join', data: { group: 'other' } });
     await sw.groups.acceptInvitation(req, 'invite');
+    await sw.groups.revokeInvitation(req, 123);
     const page = await sw.groups.list(req);
     if (page.error === null) { const state: 'sent' = page.data.invitations[0].state; void state; }
   }`);
   const bad = await check(root);
   assert.equal(bad.ok, false);
-  assert.equal(bad.errors.length, 8, bad.raw);
+  assert.equal(bad.errors.length, 9, bad.raw);
   assert.ok(bad.errors.every(error => error.file === 'src/bad.ts'), bad.raw);
 });
