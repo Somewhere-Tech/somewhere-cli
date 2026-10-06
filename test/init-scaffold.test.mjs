@@ -49,11 +49,11 @@ function generateGreen() {
   return { dir, result };
 }
 
-test('auth template SDK defaults adopt 0.11.6 (email verification routes) and preserve exact versus caret policy', () => {
+test('auth template SDK defaults adopt 0.12.0 (browser-bound social sign-in and email verification routes) and preserve exact versus caret policy', () => {
   const selection = { requested: ['auth'], added: [], modules: ['auth'], ui: 'styled' };
   for (const [files, expected] of [
-    [createFeatureTemplate(selection, { appName: 'Starter' }), '0.11.6'],
-    [createHappyPathTemplate(), '^0.11.3'],
+    [createFeatureTemplate(selection, { appName: 'Starter' }), '0.12.0'],
+    [createHappyPathTemplate(), '^0.12.0'],
   ]) {
     const manifest = JSON.parse(files.find((file) => file.path === 'package.json').content);
     assert.equal(manifest.dependencies['@somewhere-tech/sdk'], expected);
@@ -239,7 +239,7 @@ test('default starter is the auth module: SDK client, packaged handler, hooks, r
   assert.doesNotMatch(app, /fetch\(/, 'components never fetch; services do');
   assert.match(app, /Checking your session/, 'a visible loading state, never a blank gate');
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.6');
+  assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.12.0');
   for (const version of [...Object.values(pkg.dependencies), ...Object.values(pkg.devDependencies)]) {
     assert.match(version, /^\d+\.\d+\.\d+$/, `dependency is not pinned: ${version}`);
   }
@@ -396,7 +396,7 @@ test('one generated template consumes the SDK auth adapter and server data/files
   assert.match('JWT rotation remains SDK-owned.', authMechanicsTerms);
 
   const packageJson = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'));
-  assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.11.3');
+  assert.equal(packageJson.dependencies['@somewhere-tech/sdk'], '^0.12.0');
   assert.equal(packageJson.scripts.build, undefined);
 
   const approvedAuthGuidance =

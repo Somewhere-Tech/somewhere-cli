@@ -162,7 +162,7 @@ test('every combination separates types, services, hooks, pages and presentation
     assert.doesNotMatch(all, /fonts\.googleapis|@import url|https?:\/\/[^\s'"`]*\.(woff2?|ttf)/, `${label}: no remote fonts`);
     const pkg = JSON.parse(read('package.json'));
     assert.deepEqual(Object.keys(pkg.dependencies).sort(), ['@somewhere-tech/sdk', 'react', 'react-dom']);
-    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.11.6', 'the SDK release with the email verification routes');
+    assert.equal(pkg.dependencies['@somewhere-tech/sdk'], '0.12.0', 'the SDK release with the browser-bound social sign-in and email verification routes');
     assert.equal(pkg.scripts.build, undefined);
   }
 });
