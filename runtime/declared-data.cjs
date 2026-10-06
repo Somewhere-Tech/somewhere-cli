@@ -54,7 +54,7 @@ var require_declared_data_contract = __commonJS({
       if (result.some((field) => typeof field !== "string" || !columns.has(field)) || new Set(result).size !== result.length) fail(name);
       return result.sort();
     }
-    function policy(value, label) {
+    function policy(value, label, edges = 0) {
       record(value, label);
       const keys = Object.keys(value).sort().join(",");
       if (value.k === "o" && keys === "c,k" && identifier.test(value.c)) return { k: "o", c: value.c };
@@ -71,12 +71,30 @@ var require_declared_data_contract = __commonJS({
         if (left.k !== "o" || right.k !== "m") fail(label);
         return { k: "a", p: [left, right] };
       }
+      if (value.k === "g" && ["c,k,roles", "c,generation,k,roles"].includes(keys) && identifier.test(value.c)) {
+        return { k: "g", c: value.c, roles: policyRoles(value.roles, label) };
+      }
+      if (value.k === "r" && ["k,roles", "generation,k,roles"].includes(keys)) {
+        return { k: "r", roles: policyRoles(value.roles, label) };
+      }
       if (value.k === "p" && keys === "k,p,pk,t,v" && [value.v, value.t, value.pk].every((item) => typeof item === "string" && identifier.test(item))) {
-        const inherited = policy(value.p, label);
-        if (!["o", "m", "a"].includes(inherited.k)) fail(label);
+        if (edges + 1 > 4) fail(label);
+        const inherited = policy(value.p, label, edges + 1);
+        if (!["o", "m", "a", "p", "g", "r"].includes(inherited.k)) fail(label);
         return { k: "p", v: value.v, t: value.t, pk: value.pk, p: inherited };
       }
       fail(label);
+    }
+    function policyRoles(value, label) {
+      record(value, label + ".roles");
+      if (Object.keys(value).sort().join(",") !== "create,delete,read,update") fail(label);
+      const roles = {};
+      for (const op of ["read", "create", "update", "delete"]) {
+        const list = value[op];
+        if (!Array.isArray(list) || list.some((role) => typeof role !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(role)) || new Set(list).size !== list.length) fail(label);
+        roles[op] = [...list].sort();
+      }
+      return roles;
     }
     function policyMembershipTables(value, out) {
       if (!value || typeof value !== "object") return;
@@ -164,7 +182,8 @@ var require_declared_data_contract = __commonJS({
           member = { g: [...g], m, u, mg: [...mg], ...normalizedOperations !== void 0 ? { o: [...normalizedOperations] } : {} };
         }
         const normalizedPolicy = intent === "policy" ? policy(table.policy, `${name}.policy`) : null;
-        if (normalizedPolicy && !["a", "p"].includes(normalizedPolicy.k)) fail(`${name}.policy root`);
+        if (normalizedPolicy && !["a", "p", "g", "r"].includes(normalizedPolicy.k)) fail(`${name}.policy root`);
+        if (normalizedPolicy?.k === "g" && create !== null && !create.includes(normalizedPolicy.c)) fail(`${name}.policy group create`);
         if (normalizedPolicy?.k === "a") {
           owner = normalizedPolicy.p[0].c;
           if ([...create || [], ...update || []].includes(owner) || (update || []).some((field) => normalizedPolicy.p[1].m.g.includes(field))) fail(`${name}.policy identity writes`);
@@ -337,11 +356,149 @@ var require_typed_data = __commonJS({
   }
 });
 
+// worker/containers/compile/groups-types.cjs
+var require_groups_types = __commonJS({
+  "worker/containers/compile/groups-types.cjs"(exports2, module2) {
+    "use strict";
+    var ROLE_NAME2 = /^[a-z][a-z0-9_]{0,63}$/;
+    var BUILT_IN_GROUP_ROLES3 = ["owner", "admin", "member"];
+    function fail(detail) {
+      throw new Error(`Invalid declared roles: ${detail}`);
+    }
+    function roleList(value, field) {
+      if (!Array.isArray(value)) fail(`${field} must be an array`);
+      const seen = /* @__PURE__ */ new Set();
+      for (const name of value) {
+        if (typeof name !== "string" || !ROLE_NAME2.test(name)) fail(`${field} has an invalid role name`);
+        if (seen.has(name)) fail(`${field} repeats ${name}`);
+        seen.add(name);
+      }
+      return [...value];
+    }
+    function declaredRoles2(text) {
+      if (text === void 0) return {};
+      if (typeof text !== "string") fail("expected canonical JSON text");
+      let value;
+      try {
+        value = JSON.parse(text);
+      } catch {
+        fail("not JSON");
+      }
+      if (!value || typeof value !== "object" || Array.isArray(value) || value.v !== 1) fail("expected { v: 1 }");
+      const keys = Object.keys(value).sort().join(",");
+      if (keys !== "adminGrantableGroupRoles,appRoles,groupRoles,v") fail("unexpected fields");
+      const groupRoles = roleList(value.groupRoles, "groupRoles");
+      if (groupRoles.some((name) => BUILT_IN_GROUP_ROLES3.includes(name))) fail("groupRoles repeats a built-in role");
+      const grantable = roleList(value.adminGrantableGroupRoles, "adminGrantableGroupRoles");
+      if (grantable.some((name) => !groupRoles.includes(name))) fail("adminGrantableGroupRoles names an undeclared role");
+      if (!Array.isArray(value.appRoles)) fail("appRoles must be an array");
+      const appRoles = roleList(value.appRoles.map((role) => {
+        if (!role || typeof role !== "object" || Array.isArray(role) || Object.keys(role).sort().join(",") !== "grantableBy,name") fail("appRoles entry");
+        return role.name;
+      }), "appRoles");
+      for (const role of value.appRoles) {
+        if (roleList(role.grantableBy, "grantableBy").some((name) => !appRoles.includes(name))) fail("grantableBy names an undeclared app role");
+      }
+      return { groupRoles, appRoles };
+    }
+    function groupsTypeDeclarations(roles = {}) {
+      const literal = (names) => names.map((name) => JSON.stringify(name)).join(" | ");
+      const groupRoles = literal([...BUILT_IN_GROUP_ROLES3, ...roles.groupRoles || []]);
+      const appRoles = (roles.appRoles || []).length ? literal(roles.appRoles) : "never";
+      return `
+type SomewhereGroupRole = ${groupRoles};
+type SomewhereAppRole = ${appRoles};
+
+interface SomewhereGroup {
+  id: string;
+  name: string;
+  created_by: string;
+  created_at: number;
+  updated_at: number;
+  /** The signed-in user's role in this group. */
+  role: SomewhereGroupRole;
+}
+
+interface SomewhereGroupMember {
+  user_id: string;
+  role: SomewhereGroupRole;
+  created_at: number;
+}
+
+/** The group plus the FIRST roster page; continue with members(req, id, { cursor: members_next_cursor }). */
+interface SomewhereGroupDetail extends SomewhereGroup {
+  members: SomewhereGroupMember[];
+  members_next_cursor: string | null;
+}
+
+/** One keyset page; next_cursor is null when nothing follows. No total count. */
+interface SomewhereGroupsPage<T> {
+  items: T[];
+  next_cursor: string | null;
+}
+
+/** limit 1\u2013100 (default 50); cursor is a previous page's next_cursor. */
+interface SomewhereGroupsPageOptions {
+  cursor?: string;
+  limit?: number;
+}
+
+interface SomewhereAppRoleGrant {
+  user_id: string;
+  role: SomewhereAppRole;
+  granted_by: string;
+  grant_source: 'platform_admin' | 'delegation';
+  created_at: number;
+}
+
+/** retry is false when a change's outcome could not be confirmed (GROUPS_OUTCOME_UNKNOWN). */
+interface SomewhereGroupsError {
+  code: string;
+  message: string;
+  status: number;
+  retry?: false;
+  data?: Record<string, unknown>;
+}
+
+type SomewhereGroupsResult<T> = { data: T; error: null } | { data: null; error: SomewhereGroupsError };
+
+/**
+ * Every method acts as the user signed in on the request this function was
+ * invoked with, read once from that original request. The \`req\` argument is
+ * accepted for compatibility and never read: passing another Request cannot
+ * change who acts, and no method accepts an acting user. Groups are available
+ * on the live app only; a preview, a dev run, a job delivery or a signed-out
+ * request throws before any change.
+ */
+interface SomewhereGroups {
+  create(req: Request, input: { name: string }): Promise<SomewhereGroupsResult<SomewhereGroupDetail>>;
+  list(req: Request, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereGroup>>>;
+  get(req: Request, groupId: string): Promise<SomewhereGroupsResult<SomewhereGroupDetail>>;
+  members(req: Request, groupId: string, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereGroupMember>>>;
+  leave(req: Request, groupId: string): Promise<SomewhereGroupsResult<{ left: true }>>;
+  remove(req: Request, groupId: string, userId: string): Promise<SomewhereGroupsResult<{ removed: true }>>;
+  setRole(req: Request, groupId: string, userId: string, role: SomewhereGroupRole): Promise<SomewhereGroupsResult<{ user_id: string; role: SomewhereGroupRole }>>;
+  appRoles: {
+    list(req: Request, userId?: string, opts?: SomewhereGroupsPageOptions): Promise<SomewhereGroupsResult<SomewhereGroupsPage<SomewhereAppRoleGrant>>>;
+    grant(req: Request, userId: string, role: SomewhereAppRole): Promise<SomewhereGroupsResult<SomewhereAppRoleGrant>>;
+    revoke(req: Request, userId: string, role: SomewhereAppRole): Promise<SomewhereGroupsResult<{ revoked: boolean }>>;
+  };
+}
+
+interface SomewhereRuntimeContext {
+  readonly groups: SomewhereGroups;
+}
+`;
+    }
+    module2.exports = { groupsTypeDeclarations, declaredRoles: declaredRoles2 };
+  }
+});
+
 // worker/containers/compile/runtime-types.cjs
 var require_runtime_types = __commonJS({
   "worker/containers/compile/runtime-types.cjs"(exports2, module2) {
     "use strict";
-    var RUNTIME_CONTEXT_DECLARATION2 = `
+    var BASE_RUNTIME_CONTEXT_DECLARATION = `
 type __SomewhereJsonPrimitive = string | number | boolean | null;
 type __SomewhereJson = __SomewhereJsonPrimitive | { [key: string]: __SomewhereJson } | __SomewhereJson[];
 type SomewhereDbScalar = string | number | boolean | null;
@@ -2944,6 +3101,11 @@ type ServerFunction<Contract extends { input: unknown; output: unknown }> =
 interface Response { readonly webSocket: WebSocket | null }
 interface WebSocket { accept(): void }
 `;
+    var { groupsTypeDeclarations } = require_groups_types();
+    function runtimeContextDeclaration2(roles) {
+      return BASE_RUNTIME_CONTEXT_DECLARATION + groupsTypeDeclarations(roles);
+    }
+    var RUNTIME_CONTEXT_DECLARATION2 = runtimeContextDeclaration2({});
     var ENDPOINT_DECLARATION2 = `
 interface SomewhereEndpointUser {
   id: string;
@@ -3017,7 +3179,7 @@ interface SomewhereEndpointConfig<Auth extends SomewhereEndpointAuth, Schema ext
       });
       return "interface SomewhereDeclaredTables {\n" + entries.join("") + "}\n";
     }
-    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2, ENDPOINT_DECLARATION: ENDPOINT_DECLARATION2, declaredTablesDeclaration: declaredTablesDeclaration2 };
+    module2.exports = { RUNTIME_CONTEXT_DECLARATION: RUNTIME_CONTEXT_DECLARATION2, ENDPOINT_DECLARATION: ENDPOINT_DECLARATION2, declaredTablesDeclaration: declaredTablesDeclaration2, runtimeContextDeclaration: runtimeContextDeclaration2 };
   }
 });
 
@@ -3038,20 +3200,32 @@ var require_typed_files = __commonJS({
       const scope = collection.scope || {};
       return scope.kind === "member" || scope.kind === "owner_or_member" ? scope.member : null;
     }
-    function describeCollection(collection) {
+    function fieldOf(collection) {
       const member = memberOf(collection);
-      const groupKey = member ? JSON.stringify(member.group) : null;
-      const meta = member ? `FileMeta & { ${groupKey}: string }` : "FileMeta";
-      const groupOption = member ? `${groupKey}: string | number; ` : "";
+      if (member) return { name: member.group, input: "string | number", meta: "string", parent: false };
+      const scope = collection.scope || {};
+      if (scope.kind === "parent") {
+        const type = scope.parent.keyType === "text" ? "string" : "number";
+        return { name: scope.parent.via, input: type, meta: type, parent: true };
+      }
+      return null;
+    }
+    function describeCollection(collection) {
+      const field = fieldOf(collection);
+      const fieldKey = field ? JSON.stringify(field.name) : null;
+      const meta = field ? `FileMeta & { ${fieldKey}: ${field.meta} }` : "FileMeta";
+      const fieldOption = field ? `${fieldKey}: ${field.input}; ` : "";
+      const listOptions = field && field.parent ? `options: { ${fieldOption}limit?: number; cursor?: string | null }` : `options?: { ${field ? `${fieldKey}?: ${field.input}; ` : ""}limit?: number; cursor?: string | null }`;
       const ops = [];
       if (collection.client.read) {
-        ops.push(`list(options?: { ${groupOption.replace(": string | number; ", "?: string | number; ")}limit?: number; cursor?: string | null }): Promise<FileResult<{ items: Array<${meta}>; next: string | null; has_more: boolean }>>`);
+        ops.push(`list(${listOptions}): Promise<FileResult<{ items: Array<${meta}>; next: string | null; has_more: boolean }>>`);
         ops.push(`get(id: string): Promise<FileResult<${meta}>>`);
         ops.push("url(id: string): string");
         ops.push("shareLink(id: string, options?: { expiresIn?: number }): Promise<FileResult<{ url: string; expires_at: string; expires_in: number }>>");
       }
-      if (collection.client.upload) ops.push(`upload(file: Blob, options${member ? "" : "?"}: { ${groupOption}name?: string; contentType?: string; onProgress?: (progress: { loaded: number; total: number }) => void }): Promise<FileResult<UploadedFile>>`);
+      if (collection.client.upload) ops.push(`upload(file: Blob, options${field ? "" : "?"}: { ${fieldOption}name?: string; contentType?: string; onProgress?: (progress: { loaded: number; total: number }) => void }): Promise<FileResult<UploadedFile>>`);
       if (collection.client.replace) ops.push("replace(id: string, file: Blob, options?: { contentType?: string; onProgress?: (progress: { loaded: number; total: number }) => void }): Promise<FileResult<UploadedFile>>");
+      if (collection.client.replace && field && field.parent) ops.push(`move(id: string, to: { ${fieldOption}}): Promise<FileResult<${meta}>>`);
       if (collection.client.delete) ops.push("delete(id: string): Promise<FileResult<{ id: string; deleted: true }>>");
       if (collection.public) {
         ops.push(collection.scope.kind === "server_only" ? "publicUrl(path: string): string" : "publicUrl(id: string, name: string): string");
@@ -3071,13 +3245,14 @@ var require_typed_files = __commonJS({
 }
 `;
       const shapes = collections.map((c) => {
-        const member = memberOf(c);
+        const field = fieldOf(c);
         return {
           name: c.name,
           root: c.path,
           ops: Object.keys(c.client).filter((op) => c.client[op]),
           public: c.public ? c.scope.kind === "server_only" ? "path" : "id" : null,
-          group: member ? member.group : null,
+          group: field ? field.name : null,
+          move: Boolean(field && field.parent && c.client.replace),
           maxSize: c.limits.maxSize,
           types: c.limits.types
         };
@@ -3150,6 +3325,7 @@ function makeCollection(shape){
   if(has("upload"))c.upload=(file,options)=>put("upload",null,file,options);
   if(has("replace"))c.replace=(id,file,options)=>put("replace",id,file,options);
   if(has("delete"))c.delete=id=>call(shape.name,"delete",{id});
+  if(shape.move)c.move=(id,to)=>{const input={id};if(to&&to[shape.group]!==undefined)input[shape.group]=to[shape.group];return call(shape.name,"move",input)};
   if(shape.public)c.publicUrl=publicUrl;
   return Object.freeze(c);
 }
@@ -3205,13 +3381,20 @@ var require_schema_types = __commonJS({
     client?: Partial<Record<FileOperation, boolean>>;
     limits?: { maxSize?: string | number; types?: string[] };
   }
+  type RowOperation = 'read' | 'update' | 'delete';
+  interface PaymentBinding {
+    table: string; amount: string; currency: string;
+    onPaid: Record<string, { from: string[]; to: string }>;
+  }
+  interface JobBinding { table: string; operations: RowOperation[]; maxDurationSeconds: number }
+  interface ServiceRole { tables: Record<string, Array<'read' | 'create' | 'update' | 'delete'>> }
   interface TableOptions<Field extends string> {
     scope?: Scope; client?: ClientPermissions<Field>; indexes?: string[][];
     unique?: string[][]; relations?: Record<string, Relation>;
   }
 }
 `;
-    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search?: SomewhereSchemaDeclaration.OwnerScope; files?: Record<string, SomewhereSchemaDeclaration.FileCollection> }): unknown;
+    var signatures = `function schema(tables: Record<string, SomewhereSchemaDeclaration.Table | SomewhereSchemaDeclaration.TableMarker>, options?: { search?: SomewhereSchemaDeclaration.OwnerScope; files?: Record<string, SomewhereSchemaDeclaration.FileCollection>; groups?: { roles?: string[]; adminGrantableRoles?: string[] }; appRoles?: Record<string, { grantableBy?: string[] }>; payments?: Record<string, SomewhereSchemaDeclaration.PaymentBinding>; jobs?: Record<string, SomewhereSchemaDeclaration.JobBinding>; serviceRoles?: Record<string, SomewhereSchemaDeclaration.ServiceRole> }): unknown;
 function table<Columns extends Record<string, SomewhereSchemaDeclaration.Column | SomewhereSchemaDeclaration.ColumnMarker>>(columns: Columns, options?: SomewhereSchemaDeclaration.TableOptions<Extract<keyof Columns, string>>): SomewhereSchemaDeclaration.Table;
 function id(options?: { uuid?: boolean }): SomewhereSchemaDeclaration.Column;
 function text(options?: SomewhereSchemaDeclaration.ColumnOptions<string>): SomewhereSchemaDeclaration.Column;
@@ -3235,7 +3418,9 @@ function exported(): SomewhereSchemaDeclaration.TableMarker;
 `;
     var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, member: SomewhereSchemaDeclaration.MemberScope): SomewhereSchemaDeclaration.Scope;
 function anyOf(member: SomewhereSchemaDeclaration.MemberScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
-function parent(options: { via: string }): SomewhereSchemaDeclaration.Scope;
+function parent(options: { via: string; table?: string }): SomewhereSchemaDeclaration.Scope;
+function group(options?: { column?: string; roles?: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.Scope;
+function appRole(options: { roles: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.Scope;
 `;
     var SCHEMA_DECLARATION2 = types + signatures.replace(/^function /gm, "declare function ") + `declare module 'somewhere/db' {
 ${(signatures + policySignatures).replace(/^function /gm, "  export function ")}}
@@ -3253,7 +3438,8 @@ __export(declared_data_vendor_entry_exports, {
   SCHEMA_DECLARATION: () => import_schema_types.SCHEMA_DECLARATION,
   declaredTablesFromFiles: () => declaredTablesFromFiles,
   filesDeclarationFromFiles: () => filesDeclarationFromFiles,
-  generateFromFiles: () => generateFromFiles
+  generateFromFiles: () => generateFromFiles,
+  runtimeDeclarationFromFiles: () => runtimeDeclarationFromFiles
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
 
@@ -3386,8 +3572,236 @@ function parseClientPermissions(value, columns, scope) {
   return { ok: true, permissions: { identity, read, publicRead, ...writes, delete: remove } };
 }
 
+// worker/src/services/jobs/limits.ts
+var STALE_JOB_WINDOW_MS = 45 * 60 * 1e3;
+
+// worker/src/utils/db-schema-deploy/extract-schema-bindings.ts
+var BINDING_OPERATIONS = ["read", "create", "update", "delete"];
+var ROW_OPERATIONS = ["read", "update", "delete"];
+var MAX_JOB_BINDING_SECONDS = STALE_JOB_WINDOW_MS / 1e3;
+var NAME = /^[a-z][a-z0-9_]{0,63}$/;
+var BUILT_IN_GROUP_ROLES = ["admin", "member", "owner"];
+var lines = /* @__PURE__ */ new WeakMap();
+var byName = (list) => list.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+function readString(r, fail, ctx) {
+  const t = r.next();
+  if (t.kind !== "string") fail(t.line, `${ctx} must be a quoted literal string.`);
+  return t;
+}
+function readStrings(r, fail, ctx) {
+  const open = r.next();
+  if (open.kind !== "punct" || open.value !== "[") fail(open.line, `${ctx} must be a list of quoted literal strings, such as ['read'].`);
+  const out = [];
+  while (!r.tryPunct("]")) {
+    const t = r.next();
+    if (t.kind !== "string") fail(t.line, `${ctx} must be a list of quoted literal strings.`);
+    if (out.some((seen) => seen.value === t.value)) fail(t.line, `${ctx} lists "${t.value}" twice.`);
+    out.push(t);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("]", `closing ${ctx}`);
+      break;
+    }
+  }
+  return out;
+}
+function readOperations(r, fail, ctx, allowed) {
+  const list = readStrings(r, fail, ctx);
+  if (list.length === 0) fail(r.peek().line, `${ctx} must name at least one operation.`);
+  for (const t of list) {
+    if (!allowed.includes(t.value)) fail(t.line, `${ctx} has an unknown operation "${t.value}". Allowed: ${allowed.join(", ")}.`);
+  }
+  const ops = BINDING_OPERATIONS.filter((op) => list.some((t) => t.value === op));
+  if (!ops.includes("read") && (ops.includes("update") || ops.includes("delete"))) {
+    fail(list[0].line, `${ctx} allows ${ops.filter((op) => op !== "create").join(" and ")} without read. Update and delete return the existing row, so they also need read; create alone is allowed because it returns only the row it created.`);
+  }
+  return ops;
+}
+function readNamed(r, fail, option, kind, keys, readField) {
+  r.expectPunct("{", `opening schema option ${option}`);
+  const out = [];
+  while (!r.tryPunct("}")) {
+    const key = r.readKey(`for a ${kind} name`);
+    if (!NAME.test(key.name)) fail(key.line, `${kind} name "${key.name}" must be lowercase letters, digits and underscores, starting with a letter (at most 64).`);
+    if (out.some((entry) => entry.name === key.name)) fail(key.line, `${kind} "${key.name}" is declared twice.`);
+    r.expectPunct(":", `after ${kind} "${key.name}"`);
+    r.expectPunct("{", `opening ${kind} "${key.name}"`);
+    const fields = {};
+    const fieldLines = { "": key.line };
+    const seen = /* @__PURE__ */ new Set();
+    while (!r.tryPunct("}")) {
+      const opt = r.readKey(`for an option of ${kind} "${key.name}"`);
+      if (!keys.includes(opt.name)) fail(opt.line, `${kind} "${key.name}" has an unknown option "${opt.name}". Allowed: ${keys.join(", ")}.`);
+      if (seen.has(opt.name)) fail(opt.line, `${kind} "${key.name}" declares ${opt.name} twice.`);
+      seen.add(opt.name);
+      r.expectPunct(":", `after ${option}.${key.name}.${opt.name}`);
+      fieldLines[opt.name] = r.peek().line;
+      readField(opt.name, fields, key.name);
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing ${kind} "${key.name}"`);
+        break;
+      }
+    }
+    const missing = keys.filter((k) => !seen.has(k));
+    if (missing.length) fail(key.line, `${kind} "${key.name}" is missing ${missing.join(", ")}.`);
+    lines.set(fields, fieldLines);
+    out.push({ name: key.name, line: key.line, fields });
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", `closing schema option ${option}`);
+      break;
+    }
+  }
+  return out;
+}
+function readPaymentBindings(r, fail) {
+  const entries = readNamed(r, fail, "payments", "payment binding", ["table", "amount", "currency", "onPaid"], (key, fields, name) => {
+    if (key !== "onPaid") {
+      fields[key] = readString(r, fail, `payments.${name}.${key}`).value.toLowerCase();
+      return;
+    }
+    r.expectPunct("{", `opening payments.${name}.onPaid \u2014 declare one transition, { status: { from: [...], to: '...' } }`);
+    const column = r.readKey(`for the status column in payments.${name}.onPaid`);
+    r.expectPunct(":", `after payments.${name}.onPaid.${column.name}`);
+    r.expectPunct("{", `opening payments.${name}.onPaid.${column.name} \u2014 declare { from: [...], to: '...' }`);
+    const transition = {};
+    while (!r.tryPunct("}")) {
+      const opt = r.readKey(`for an option of payments.${name}.onPaid.${column.name}`);
+      if (opt.name !== "from" && opt.name !== "to") fail(opt.line, `payments.${name}.onPaid.${column.name} has an unknown option "${opt.name}". Allowed: from, to.`);
+      if (transition[opt.name]) fail(opt.line, `payments.${name}.onPaid.${column.name} declares ${opt.name} twice.`);
+      r.expectPunct(":", `after ${opt.name}`);
+      if (opt.name === "from") transition.from = readStrings(r, fail, `payments.${name}.onPaid.${column.name}.from`);
+      else transition.to = readString(r, fail, `payments.${name}.onPaid.${column.name}.to`);
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing payments.${name}.onPaid.${column.name}`);
+        break;
+      }
+    }
+    if (!transition.from || !transition.to) fail(column.line, `payments.${name}.onPaid.${column.name} needs both from and to.`);
+    r.tryPunct(",");
+    if (!r.tryPunct("}")) {
+      const extra = r.peek();
+      fail(extra.line, `payments.${name}.onPaid declares one status transition only; remove the second entry. Other paid effects run from the signed payment event.`);
+    }
+    const values = [...transition.from, transition.to];
+    for (const t of values) {
+      if (t.value.length < 1 || t.value.length > 64 || /[\u0000-\u001f]/.test(t.value)) fail(t.line, `payments.${name}.onPaid.${column.name} status values must be 1 to 64 characters, without control characters.`);
+    }
+    if (transition.from.length === 0) fail(column.line, `payments.${name}.onPaid.${column.name}.from must list at least one unpaid state.`);
+    if (transition.from.some((t) => t.value === transition.to.value)) fail(transition.to.line, `payments.${name}.onPaid.${column.name}.to must differ from every from state.`);
+    fields.status = { column: column.name.toLowerCase(), from: transition.from.map((t) => t.value).sort(), to: transition.to.value };
+  });
+  return byName(entries.map(({ name, fields }) => {
+    const binding = { name, ...fields };
+    lines.set(binding, lines.get(fields));
+    return binding;
+  }));
+}
+function readJobBindings(r, fail) {
+  const entries = readNamed(r, fail, "jobs", "job binding", ["table", "operations", "maxDurationSeconds"], (key, fields, name) => {
+    if (key === "table") fields.table = readString(r, fail, `jobs.${name}.table`).value.toLowerCase();
+    else if (key === "operations") fields.operations = readOperations(r, fail, `jobs.${name}.operations`, ROW_OPERATIONS);
+    else {
+      const t = r.next();
+      if (t.kind !== "number" || !/^[1-9][0-9]{0,9}$/.test(t.value) || Number(t.value) > MAX_JOB_BINDING_SECONDS) {
+        fail(t.line, `jobs.${name}.maxDurationSeconds must be a whole number of seconds from 1 to ${MAX_JOB_BINDING_SECONDS}: how long the row grant lasts from the job's scheduled start, retries included.`);
+      }
+      fields.maxDurationSeconds = Number(t.value);
+    }
+  });
+  return byName(entries.map(({ name, fields }) => {
+    const binding = { name, ...fields };
+    lines.set(binding, lines.get(fields));
+    return binding;
+  }));
+}
+function readServiceRoles(r, fail) {
+  const entries = readNamed(r, fail, "serviceRoles", "service role", ["tables"], (_key, fields, name) => {
+    r.expectPunct("{", `opening serviceRoles.${name}.tables \u2014 declare { table: ['read', ...] }`);
+    const tables = [];
+    const tableLines = {};
+    while (!r.tryPunct("}")) {
+      const t = r.readKey(`for a table in serviceRoles.${name}.tables`);
+      const table = t.name.toLowerCase();
+      if (tables.some((entry) => entry.table === table)) fail(t.line, `serviceRoles.${name}.tables names "${t.name}" twice.`);
+      r.expectPunct(":", `after serviceRoles.${name}.tables.${t.name}`);
+      tables.push({ table, operations: readOperations(r, fail, `serviceRoles.${name}.tables.${t.name}`, BINDING_OPERATIONS) });
+      tableLines[table] = t.line;
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing serviceRoles.${name}.tables`);
+        break;
+      }
+    }
+    if (tables.length === 0) fail(r.peek().line, `serviceRoles.${name}.tables must grant at least one table.`);
+    fields.tables = tables.sort((a, b) => a.table < b.table ? -1 : a.table > b.table ? 1 : 0);
+    lines.set(fields.tables, tableLines);
+  });
+  return byName(entries.map(({ name, fields }) => {
+    const role = { name, tables: fields.tables };
+    lines.set(role, lines.get(fields));
+    return role;
+  }));
+}
+function validateBindings(input, tableInfo, errors) {
+  const at = (entry, field) => `line ${lines.get(entry)?.[field] ?? lines.get(entry)?.[""] ?? 0}: `;
+  const rowTable = (entry, kind) => {
+    const info = tableInfo(entry.table);
+    if (!info) {
+      errors.push(`${at(entry, "table")}${kind} "${entry.name}" names table "${entry.table}", which is not declared in db/schema.ts.`);
+      return null;
+    }
+    if (!info.privateUser) errors.push(`${at(entry, "table")}${kind} "${entry.name}" names table "${entry.table}", whose scope is not owner(), member(), anyOf(), group(), appRole() or parent(). It binds rows a signed-in user holds; use a server function for other tables.`);
+    if (!info.key) errors.push(`${at(entry, "table")}${kind} "${entry.name}" names table "${entry.table}", which needs exactly one id() key.`);
+    return info;
+  };
+  for (const p of input.payments ?? []) {
+    const info = rowTable(p, "payment binding");
+    if (!info) continue;
+    const column = (name) => info.table.columns.find((c) => c.name === name);
+    const checks = [
+      ["amount", p.amount, "integer", "a required integer() column holding the amount in minor units (cents)"],
+      ["currency", p.currency, "text", "a required text() column holding the currency code"],
+      ["onPaid", p.status.column, "text", "a required text() status column"]
+    ];
+    for (const [field, name, helper, what] of checks) {
+      const c = column(name);
+      if (!c) {
+        errors.push(`${at(p, field)}payment binding "${p.name}" names "${name}", which is not a declared column of "${p.table}".`);
+        continue;
+      }
+      if (c.helper !== helper || c.nullable) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" must be ${what}.`);
+      if (info.identity.includes(name)) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" is the table's access column; a payment never moves a row.`);
+      const writable = [...info.table.client?.create ?? [], ...info.table.client?.update ?? []];
+      if (writable.includes(name)) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" is browser-writable through client.create or client.update. Remove it there; the server sets prices and the payment sets the status.`);
+    }
+    if ((/* @__PURE__ */ new Set([p.amount, p.currency, p.status.column])).size !== 3) errors.push(`${at(p, "")}payment binding "${p.name}" must name three different columns for amount, currency and status.`);
+    const status = column(p.status.column);
+    if (status && !(status.hasDefault && typeof status.default === "string" && p.status.from.includes(status.default))) {
+      errors.push(`${at(p, "onPaid")}payment binding "${p.name}": "${p.table}"."${p.status.column}" must declare a default that is one of its unpaid from states (${p.status.from.join(", ")}), so a new row starts unpaid.`);
+    }
+  }
+  for (const j of input.jobs ?? []) rowTable(j, "job binding");
+  const taken = /* @__PURE__ */ new Set([...BUILT_IN_GROUP_ROLES, ...input.groups?.roles ?? [], ...(input.appRoles ?? []).map((role) => role.name)]);
+  for (const s of input.serviceRoles ?? []) {
+    if (taken.has(s.name)) errors.push(`${at(s, "")}service role "${s.name}" has the name of a group or app role. Service roles are a separate namespace for unattended work; pick another name.`);
+    const tableLines = lines.get(s.tables) ?? {};
+    for (const grant of s.tables) {
+      if (!tableInfo(grant.table)) errors.push(`line ${tableLines[grant.table] ?? 0}: service role "${s.name}" grants table "${grant.table}", which is not declared in db/schema.ts.`);
+    }
+  }
+}
+
 // worker/src/utils/authority/scope-enforcement.ts
 var SAFE_SCOPE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var GROUP_ROLE_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+function validGroupRoles(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const roles = value;
+  return exactKeys(roles, ["read", "create", "update", "delete"]) && ["read", "create", "update", "delete"].every((op) => Array.isArray(roles[op]) && roles[op].every((role) => typeof role === "string" && GROUP_ROLE_NAME.test(role)) && new Set(roles[op]).size === roles[op].length);
+}
+function exactKeys(value, keys) {
+  const actual = Object.keys(value).sort();
+  return actual.length === keys.length && actual.every((key, index) => key === [...keys].sort()[index]);
+}
+var MAX_PARENT_EDGES = 4;
 function bakedTableSchemaFromDeclared(declaredJson) {
   let shape;
   try {
@@ -3462,7 +3876,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
   }
   if (scope !== null && typeof scope === "object" && scope.kind === "policy") {
     const policy = bakedPolicyFromDeclared(scope.policy);
-    if (!policy || policy.k !== "a" && policy.k !== "p") return null;
+    if (!policy || policy.k !== "a" && policy.k !== "p" && policy.k !== "g" && policy.k !== "r") return null;
     return relations ? { columns: out, policy, relations, ...browser } : { columns: out, policy, ...browser };
   }
   const author = scope !== null && typeof scope === "object" && scope.kind === "shared" ? SHARED_AUTHOR_COLUMN : void 0;
@@ -3479,8 +3893,8 @@ function declaredPolicyIdentity(value) {
   }
   return {};
 }
-function bakedPolicyFromDeclared(value, depth = 0) {
-  if (depth > 2 || value === null || typeof value !== "object") return null;
+function bakedPolicyFromDeclared(value, depth = 0, edges = 0, underParent = false) {
+  if (edges > MAX_PARENT_EDGES || value === null || typeof value !== "object") return null;
   const node = value;
   if (node.kind === "owner") {
     return typeof node.column === "string" && SAFE_SCOPE_IDENTIFIER.test(node.column) ? { k: "o", c: node.column.toLowerCase() } : null;
@@ -3490,14 +3904,26 @@ function bakedPolicyFromDeclared(value, depth = 0) {
     return member ? { k: "m", m: member } : null;
   }
   if (node.kind === "any_of" && Array.isArray(node.policies) && node.policies.length === 2) {
-    if (depth > 1 || node.policies[0]?.kind !== "owner" || node.policies[1]?.kind !== "member") return null;
+    if (depth !== 0 && !underParent || node.policies[0]?.kind !== "owner" || node.policies[1]?.kind !== "member") return null;
     const left = bakedPolicyFromDeclared(node.policies[0], depth + 1);
     const right = bakedPolicyFromDeclared(node.policies[1], depth + 1);
     return left && right ? { k: "a", p: [left, right] } : null;
   }
+  if (node.kind === "group") {
+    if (depth !== 0 && !underParent) return null;
+    const roles = node.roles;
+    const baked = { read: roles?.read, create: roles?.create, update: roles?.update, delete: roles?.delete };
+    return typeof node.column === "string" && SAFE_SCOPE_IDENTIFIER.test(node.column) && validGroupRoles(baked) ? { k: "g", c: node.column.toLowerCase(), roles: { read: [...baked.read], create: [...baked.create], update: [...baked.update], delete: [...baked.delete] }, generation: 0 } : null;
+  }
+  if (node.kind === "app_role") {
+    if (depth !== 0 && !underParent || !exactKeys(node, ["kind", "roles"]) || !validGroupRoles(node.roles)) return null;
+    const roles = node.roles;
+    const sorted3 = (list) => list.every((role, i) => i === 0 || list[i - 1] < role);
+    return ["read", "create", "update", "delete"].every((op) => sorted3(roles[op])) ? { k: "r", roles: { read: [...roles.read], create: [...roles.create], update: [...roles.update], delete: [...roles.delete] }, generation: 0 } : null;
+  }
   if (node.kind === "parent" && typeof node.via === "string" && SAFE_SCOPE_IDENTIFIER.test(node.via) && typeof node.table === "string" && SAFE_SCOPE_IDENTIFIER.test(node.table) && typeof node.parentKey === "string" && SAFE_SCOPE_IDENTIFIER.test(node.parentKey)) {
-    if (depth !== 0 || node.policy?.kind === "parent") return null;
-    const inherited = bakedPolicyFromDeclared(node.policy, depth + 1);
+    if (depth !== 0 && !underParent || edges + 1 > MAX_PARENT_EDGES) return null;
+    const inherited = bakedPolicyFromDeclared(node.policy, depth + 1, edges + 1, true);
     return inherited ? { k: "p", v: node.via.toLowerCase(), t: node.table.toLowerCase(), pk: node.parentKey.toLowerCase(), p: inherited } : null;
   }
   return null;
@@ -3777,6 +4203,90 @@ function matchingClose(tokens, open) {
   return -1;
 }
 
+// worker/src/utils/db-schema-deploy/extract-schema-parents.ts
+var MAX_PARENT_EDGES2 = 4;
+var parentScopeLines = /* @__PURE__ */ new WeakMap();
+function rememberParentLine(sentinel, line) {
+  parentScopeLines.set(sentinel, line);
+}
+function resolveParentChains(tables, tableByName, privatePolicy, errors) {
+  const parentEdges = /* @__PURE__ */ new Map();
+  const resolvingParents = /* @__PURE__ */ new Set();
+  const resolveParent = (t) => {
+    if (t.scope.kind !== "policy" || t.scope.policy.kind !== "parent") return 0;
+    if (parentEdges.has(t.name)) return parentEdges.get(t.name);
+    const pending = t.scope.policy;
+    const at = parentScopeLines.get(pending);
+    const where = at === void 0 ? "" : `line ${at}: `;
+    if (resolvingParents.has(t.name)) {
+      errors.push(`${where}Table "${t.name}" uses parent({ via: '${pending.via}' }), but its parent chain leads back to "${t.name}". Parent chains cannot form a cycle.`);
+      parentEdges.set(t.name, null);
+      return null;
+    }
+    resolvingParents.add(t.name);
+    const fail = (message) => {
+      errors.push(where + message);
+      parentEdges.set(t.name, null);
+      resolvingParents.delete(t.name);
+      return null;
+    };
+    const fk = t.columns.find((column) => column.name === pending.via);
+    if (!fk || !fk.references) {
+      return fail(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but "${pending.via}" is not a declared scalar foreign key.`);
+    }
+    const parentTable = tableByName.get(fk.references);
+    const parentKeys = parentTable ? parentTable.columns.filter((column) => column.helper === "id") : [];
+    const parentKey = parentKeys.length === 1 ? parentKeys[0] : void 0;
+    let inherited = null;
+    let edges = 1;
+    if (parentTable && parentTable.scope.kind === "policy" && parentTable.scope.policy.kind === "parent") {
+      const above = resolveParent(parentTable);
+      if (above === null) {
+        if (parentEdges.get(t.name) !== null) parentEdges.set(t.name, null);
+        resolvingParents.delete(t.name);
+        return null;
+      }
+      inherited = parentTable.scope.policy;
+      edges = above + 1;
+    } else if (parentTable) {
+      inherited = privatePolicy(parentTable.scope);
+    }
+    if (!parentTable || !parentKey || !inherited) {
+      return fail(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but its referenced parent must have exactly one id() key and a direct owner(), group(), appRole(), member(), anyOf(owner(), member()) or parent() private scope.`);
+    }
+    if (edges > MAX_PARENT_EDGES2) {
+      return fail(`Table "${t.name}" uses parent({ via: '${pending.via}' }), which makes a parent chain of ${edges} edges. At most ${MAX_PARENT_EDGES2} are allowed; inherit from a table nearer the root of the chain.`);
+    }
+    const compatible = fk.helper === parentKey.helper && (fk.helper !== "id" || fk.uuid === parentKey.uuid) || fk.helper === "integer" && parentKey.helper === "id" && !parentKey.uuid || fk.helper === "text" && parentKey.helper === "id" && parentKey.uuid;
+    if (!compatible) {
+      return fail(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but that foreign key does not have the same scalar type as "${parentTable.name}"."${parentKey.name}".`);
+    }
+    t.scope.policy = { kind: "parent", via: pending.via, table: parentTable.name, parentKey: parentKey.name, policy: inherited };
+    if (t.client?.create && !t.client.create.includes(pending.via)) {
+      errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }) and client.create must include "${pending.via}" so every new row explicitly selects an authorized parent.`);
+    }
+    resolvingParents.delete(t.name);
+    parentEdges.set(t.name, edges);
+    return edges;
+  };
+  for (const t of tables) resolveParent(t);
+}
+function policyEdges(policy) {
+  return policy.kind === "parent" ? 1 + policyEdges(policy.policy) : 0;
+}
+function fileParentTarget(t) {
+  const keys = t.columns.filter((column) => column.helper === "id");
+  const key = keys.length === 1 ? keys[0] : null;
+  const scope = t.scope;
+  const privateUserPolicy = scope.kind === "owner" && !scope.visitors || scope.kind === "member" || scope.kind === "policy" && ["owner", "member", "any_of", "parent", "group", "app_role"].includes(scope.policy.kind);
+  return {
+    key: key ? key.name : null,
+    keyType: key?.uuid ? "text" : "integer",
+    privateUserPolicy,
+    edges: scope.kind === "policy" ? policyEdges(scope.policy) : 0
+  };
+}
+
 // worker/src/utils/db-schema-deploy/extract-schema-relations.ts
 function validateDeclaredRelations(tables, tableByName, knownColumns, markedGone, errors) {
   const columnByName = (t, col) => t.columns.find((c) => c.name === col);
@@ -3938,11 +4448,37 @@ function readFileOwner(r, fail, name) {
   }
   fail(key.line, `owner() on file collection "${name}" takes no options \u2014 the owner is always the signed-in uploader.`);
 }
+function readFileParent(r, fail, name, line) {
+  r.expectPunct("(", 'after "parent"');
+  r.expectPunct("{", `in parent() for file collection "${name}" \u2014 parent() needs { table, via }`);
+  const seen = /* @__PURE__ */ new Map();
+  while (!r.tryPunct("}")) {
+    const key = r.readKey(`for a parent() option of file collection "${name}"`);
+    r.expectPunct(":", `after "${key.name}" in parent() for file collection "${name}"`);
+    if (key.name !== "table" && key.name !== "via") {
+      fail(key.line, `parent() on file collection "${name}" has an unknown option "${key.name}". Allowed: table, via.`);
+    }
+    const t = r.next();
+    if (t.kind !== "string") fail(t.line, `parent({ ${key.name} }) on file collection "${name}" must be one quoted name.`);
+    if (!COLUMN_NAME.test(t.value)) fail(t.line, `parent({ ${key.name} }) on file collection "${name}" names an invalid ${key.name === "table" ? "table" : "field"} "${t.value}".`);
+    if (seen.has(key.name)) fail(key.line, `parent() on file collection "${name}" declares ${key.name} twice.`);
+    seen.set(key.name, key.name === "table" ? t.value.toLowerCase() : t.value);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", `closing parent() for file collection "${name}"`);
+      break;
+    }
+  }
+  r.tryPunct(",");
+  r.expectPunct(")", "closing parent()");
+  const missing = ["table", "via"].filter((k) => !seen.has(k));
+  if (missing.length > 0) {
+    fail(line, `parent() on file collection "${name}" is missing ${missing.join(" and ")}. It needs parent({ table: 'expenses', via: 'expenseId' }).`);
+  }
+  return { table: seen.get("table"), via: seen.get("via"), key: "", keyType: "integer" };
+}
 function readFileScope(r, fail, name) {
   const tok = r.expectIdent(`for the scope of file collection "${name}"`);
-  if (tok.value === "parent") {
-    fail(tok.line, `parent() is not available for file collections yet. Use owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
-  }
+  if (tok.value === "parent") return { kind: "parent", parent: readFileParent(r, fail, name, tok.line) };
   if (tok.value === "owner") {
     readFileOwner(r, fail, name);
     return { kind: "owner" };
@@ -3971,7 +4507,7 @@ function readFileScope(r, fail, name) {
     if (owners !== 1 || !member) fail(tok.line, `anyOf() on file collection "${name}" requires exactly one owner() and one member().`);
     return { kind: "owner_or_member", member };
   }
-  return fail(tok.line, `unknown scope "${tok.value}" on file collection "${name}". Use owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
+  return fail(tok.line, `unknown scope "${tok.value}" on file collection "${name}". Use owner(), member(), anyOf(owner(), member()), parent({ table, via }), shared(), or serverOnly().`);
 }
 function readCollection(r, fail, name, errors) {
   const callee = r.expectIdent(`for file collection "${name}"`);
@@ -4045,7 +4581,7 @@ function readCollection(r, fail, name, errors) {
   }
   r.tryPunct(",");
   r.expectPunct(")", "closing files()");
-  if (!scope) return fail(callee.line, `files() for "${name}" needs a scope: owner(), member(), anyOf(owner(), member()), shared(), or serverOnly().`);
+  if (!scope) return fail(callee.line, `files() for "${name}" needs a scope: owner(), member(), anyOf(owner(), member()), parent({ table, via }), shared(), or serverOnly().`);
   const rootError = fileCollectionRootError(name, path);
   if (rootError) errors.push(rootError);
   const declaresClient = FILE_OPERATIONS.some((op) => client[op]);
@@ -4058,8 +4594,12 @@ function readCollection(r, fail, name, errors) {
   if (isPublic && (scope.kind === "member" || scope.kind === "owner_or_member")) {
     errors.push(`File collection "${name}" is public: true on a member() scope, which would let anyone read team files. Remove public, or use owner() or serverOnly().`);
   }
+  if (isPublic && scope.kind === "parent") {
+    errors.push(`File collection "${name}" is public: true on a parent() scope, which would let anyone read files that follow a private row. Remove public.`);
+  }
   return { name, path: typeof path === "string" ? path : "", scope, public: isPublic, client, limits };
 }
+var MAX_FILE_PARENT_EDGES = 4;
 function readFileCollections(r, fail, errors) {
   r.expectPunct("{", "opening schema option files");
   const out = [];
@@ -4086,6 +4626,30 @@ function validateFileCollections(collections, table, errors) {
       if (a.path === b.path && a.name < b.name) errors.push(`File collections "${a.name}" and "${b.name}" both use the path "${a.path}". Each collection needs its own folder.`);
       else if (b.path.startsWith(a.path + "/")) errors.push(`File collection "${b.name}" (${b.path}) is nested inside "${a.name}" (${a.path}). Collection folders cannot overlap.`);
     }
+    if (a.scope.kind === "parent") {
+      const parent = a.scope.parent;
+      const target = table(parent.table);
+      const facts = target?.parentTarget;
+      if (!target || !facts) {
+        errors.push(`File collection "${a.name}" uses parent({ table: '${parent.table}' }), which is not a table declared in db/schema.ts.`);
+        continue;
+      }
+      if (!facts.privateUserPolicy) {
+        errors.push(`File collection "${a.name}" uses parent({ table: '${parent.table}' }), but that table's scope is not owner(), member(), anyOf(owner(), member()), group(), appRole() or parent(). Files can follow only rows a signed-in user holds.`);
+        continue;
+      }
+      if (!facts.key) {
+        errors.push(`File collection "${a.name}" uses parent({ table: '${parent.table}' }), but that table needs exactly one id() key for files to point at.`);
+        continue;
+      }
+      if (facts.edges + 1 > MAX_FILE_PARENT_EDGES) {
+        errors.push(`File collection "${a.name}" uses parent({ table: '${parent.table}' }), which makes a chain of ${facts.edges + 1} parent edges counting the file. At most ${MAX_FILE_PARENT_EDGES} are allowed; attach the files to a table nearer the root of the chain.`);
+        continue;
+      }
+      parent.key = facts.key;
+      parent.keyType = facts.keyType;
+      continue;
+    }
     if (a.scope.kind !== "member" && a.scope.kind !== "owner_or_member") continue;
     const m = a.scope.member;
     const membership = table(m.membership);
@@ -4106,7 +4670,7 @@ function canonicalFileCollectionsJson(collections) {
     collections: [...collections].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).map((c) => ({
       name: c.name,
       path: c.path,
-      scope: c.scope.kind === "member" || c.scope.kind === "owner_or_member" ? {
+      scope: c.scope.kind === "parent" ? { kind: "parent", parent: { table: c.scope.parent.table, via: c.scope.parent.via, key: c.scope.parent.key, keyType: c.scope.parent.keyType } } : c.scope.kind === "member" || c.scope.kind === "owner_or_member" ? {
         kind: c.scope.kind,
         member: {
           group: c.scope.member.group,
@@ -4121,6 +4685,405 @@ function canonicalFileCollectionsJson(collections) {
       limits: { maxSize: c.limits.maxSize, types: [...c.limits.types] }
     }))
   });
+}
+
+// worker/src/utils/managed-groups/policy.ts
+var BUILT_IN_GROUP_ROLES2 = ["owner", "admin", "member"];
+var ROLE_NAME = /^[a-z][a-z0-9_]{0,63}$/;
+function isPrototypeName(name) {
+  return name === "prototype" || Object.prototype.hasOwnProperty.call(Object.prototype, name);
+}
+function roleVocabularyErrors(policy) {
+  const errors = [];
+  const dupes = (list, what) => {
+    const seen = /* @__PURE__ */ new Set();
+    for (const name of list) {
+      if (seen.has(name)) errors.push(`${what} lists "${name}" twice.`);
+      seen.add(name);
+    }
+  };
+  for (const [list, what] of [[policy.groupRoles, "Group role"], [policy.appRoles, "App role"]]) {
+    for (const role of list) {
+      if (!ROLE_NAME.test(role)) errors.push(`${what} "${role}" must be lowercase letters, digits and underscores, starting with a letter (at most 64).`);
+      else if (isPrototypeName(role)) errors.push(`${what} "${role}" is a reserved name.`);
+    }
+  }
+  dupes(policy.groupRoles, "groups.roles");
+  dupes(policy.adminGrantableGroupRoles, "groups.adminGrantableRoles");
+  dupes(policy.appRoles, "appRoles");
+  for (const role of policy.groupRoles) {
+    if (BUILT_IN_GROUP_ROLES2.includes(role)) errors.push(`"${role}" is a built-in group role; declare only additional roles.`);
+  }
+  for (const role of policy.adminGrantableGroupRoles) {
+    if (!policy.groupRoles.includes(role)) errors.push(`groups.adminGrantableRoles names "${role}", which is not in groups.roles.`);
+  }
+  for (const role of Object.keys(policy.appRoleDelegation)) {
+    const grantors = policy.appRoleDelegation[role];
+    if (!policy.appRoles.includes(role)) errors.push(`App role delegation names undeclared app role "${role}".`);
+    dupes(grantors, `appRoles.${role}.grantableBy`);
+    for (const grantor of grantors) {
+      if (!policy.appRoles.includes(grantor)) errors.push(`appRoles.${role}.grantableBy names "${grantor}", which is not a declared app role.`);
+    }
+  }
+  return errors;
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-groups.ts
+var GROUP_OPERATIONS = ["read", "create", "update", "delete"];
+var DEFAULT_GROUP_COLUMN = "group_id";
+var IDENT = /^[A-Za-z_][A-Za-z0-9_]*$/;
+var declaredGroupRoles = /* @__PURE__ */ new WeakMap();
+function readRoleList(r, fail, ctx) {
+  const open = r.next();
+  if (open.kind !== "punct" || open.value !== "[") fail(open.line, `${ctx} must be a list of quoted role names, such as ['owner', 'admin'].`);
+  const out = [];
+  while (!r.tryPunct("]")) {
+    const t = r.next();
+    if (t.kind !== "string") fail(t.line, `${ctx} must be a list of quoted role names; values must be literal strings.`);
+    if (out.includes(t.value)) fail(t.line, `${ctx} lists "${t.value}" twice.`);
+    out.push(t.value);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("]", `closing ${ctx}`);
+      break;
+    }
+  }
+  return out;
+}
+function readGroupScope(r, tableName, line, fail) {
+  r.expectPunct("(", 'after "group"');
+  let column = DEFAULT_GROUP_COLUMN;
+  const explicit = {};
+  if (!r.tryPunct(")")) {
+    r.expectPunct("{", `in group() options for table "${tableName}"`);
+    const seen = /* @__PURE__ */ new Set();
+    while (!r.tryPunct("}")) {
+      const key = r.readKey(`for a group() option of table "${tableName}"`);
+      if (seen.has(key.name)) fail(key.line, `group() on table "${tableName}" declares ${key.name} twice.`);
+      seen.add(key.name);
+      r.expectPunct(":", `after "${key.name}" in group() for table "${tableName}"`);
+      if (key.name === "column") {
+        const t = r.next();
+        if (t.kind !== "string" || !IDENT.test(t.value) || t.value.length > 64) fail(t.line, `group({ column }) on table "${tableName}" must name a declared text column.`);
+        column = t.value.toLowerCase();
+      } else if (key.name === "roles") {
+        r.expectPunct("{", `opening group({ roles }) on table "${tableName}"`);
+        while (!r.tryPunct("}")) {
+          const op = r.readKey(`for an operation in group({ roles }) on table "${tableName}"`);
+          if (!GROUP_OPERATIONS.includes(op.name)) {
+            fail(op.line, `group({ roles }) on table "${tableName}" has an unknown operation "${op.name}". Allowed: read, create, update, delete.`);
+          }
+          if (explicit[op.name]) fail(op.line, `group({ roles }) on table "${tableName}" declares ${op.name} twice.`);
+          r.expectPunct(":", `after "${op.name}" in group({ roles }) on table "${tableName}"`);
+          explicit[op.name] = readRoleList(r, fail, `group({ roles: { ${op.name} } }) on table "${tableName}"`);
+          if (!r.tryPunct(",")) {
+            r.expectPunct("}", `closing group({ roles }) on table "${tableName}"`);
+            break;
+          }
+        }
+      } else {
+        fail(key.line, `group() on table "${tableName}" has an unknown option "${key.name}". Allowed: column, roles.`);
+      }
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing group() options for table "${tableName}"`);
+        break;
+      }
+    }
+    r.tryPunct(",");
+    r.expectPunct(")", "closing group()");
+  }
+  const node = { kind: "group", column, roles: { read: [], create: [], update: [], delete: [] } };
+  declaredGroupRoles.set(node, { line, explicit });
+  return node;
+}
+var sorted = (list) => [...list].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+function resolveGroupScopes(tables, vocabulary, errors) {
+  const allRoles = [...BUILT_IN_GROUP_ROLES2, ...vocabulary?.roles ?? []];
+  for (const t of tables) {
+    if (t.scope.kind !== "policy" || t.scope.policy.kind !== "group") continue;
+    const node = t.scope.policy;
+    const declared = declaredGroupRoles.get(node);
+    if (!declared) continue;
+    const where = `line ${declared.line}: `;
+    const column = t.columns.find((c) => c.name === node.column);
+    if (!column) {
+      errors.push(`${where}Table "${t.name}" uses group({ column: '${node.column}' }), but "${node.column}" is not one of its declared columns. Declare it as ${node.column}: text().`);
+    } else if (column.helper !== "text" || column.nullable) {
+      errors.push(`${where}Table "${t.name}" uses group({ column: '${node.column}' }), which must be a non-nullable text() column: every row belongs to exactly one group.`);
+    }
+    for (const op of GROUP_OPERATIONS) {
+      const list = declared.explicit[op] ?? allRoles;
+      for (const role of list) {
+        if (!allRoles.includes(role)) {
+          errors.push(`${where}group({ roles: { ${op} } }) on table "${t.name}" names "${role}", which is not a group role. Use owner, admin, member, or a role declared in groups.roles.`);
+        }
+      }
+      node.roles[op] = sorted(list);
+    }
+    for (const op of ["update", "delete"]) {
+      const missing = node.roles[op].filter((role) => !node.roles.read.includes(role));
+      if (missing.length) {
+        errors.push(`${where}group() on table "${t.name}" lets ${missing.join(", ")} ${op} rows they cannot read. A role that may ${op} must also read, because the write returns the row.`);
+      }
+    }
+    if (t.client?.create && !t.client.create.includes(node.column)) {
+      errors.push(`${where}Table "${t.name}" uses group() and client.create must include "${node.column}" so every new row names the group it belongs to.`);
+    }
+    declaredGroupRoles.delete(node);
+  }
+}
+function groupLeafOf(t) {
+  if (t.scope.kind !== "policy") return null;
+  let policy = t.scope.policy;
+  let inherited = false;
+  while (policy.kind === "parent") {
+    policy = policy.policy;
+    inherited = true;
+  }
+  return policy.kind === "group" ? { node: policy, inherited } : null;
+}
+function resolveGroupReferences(tables, errors) {
+  const byName2 = new Map(tables.map((t) => [t.name, t]));
+  for (const t of tables) {
+    const own = groupLeafOf(t);
+    const refs = [];
+    const via = t.scope.kind === "policy" && t.scope.policy.kind === "parent" ? t.scope.policy.via : null;
+    for (const column of t.columns) {
+      if (!column.references) continue;
+      const target = byName2.get(column.references);
+      if (!target) continue;
+      const theirs = groupLeafOf(target);
+      if (!own || !theirs || column.name === via) continue;
+      const keys = target.columns.filter((c) => c.helper === "id");
+      if (keys.length !== 1) {
+        errors.push(`Table "${t.name}" references the group-owned table "${target.name}" through "${column.name}", which needs exactly one id() key on "${target.name}".`);
+        continue;
+      }
+      if (own.inherited || theirs.inherited) continue;
+      refs.push({ column: column.name, group: own.node.column, table: target.name, targetGroup: theirs.node.column, targetKey: keys[0].name });
+    }
+    if (refs.length > 0) t.groupRefs = refs.sort((a, b) => a.column < b.column ? -1 : a.column > b.column ? 1 : 0);
+  }
+}
+function resolveGroupsAndParents(tables, tableByName, privatePolicy, vocabulary, errors) {
+  resolveGroupScopes(tables, vocabulary, errors);
+  resolveParentChains(tables, tableByName, privatePolicy, errors);
+  resolveGroupReferences(tables, errors);
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-app-roles.ts
+var APP_ROLE_OPERATIONS = ["read", "create", "update", "delete"];
+var declaredLines = /* @__PURE__ */ new WeakMap();
+function readAppRoleScope(r, tableName, line, fail) {
+  const where = `appRole() on table "${tableName}"`;
+  r.expectPunct("(", 'after "appRole"');
+  r.expectPunct("{", `in ${where} \u2014 it needs appRole({ roles: { read: [...], ... } })`);
+  const node = { kind: "app_role", roles: { read: [], create: [], update: [], delete: [] } };
+  const names = [];
+  let sawRoles = false;
+  while (!r.tryPunct("}")) {
+    const key = r.readKey(`for an option of ${where}`);
+    if (key.name !== "roles") fail(key.line, `${where} has an unknown option "${key.name}". Allowed: roles.`);
+    if (sawRoles) fail(key.line, `${where} declares roles twice.`);
+    sawRoles = true;
+    r.expectPunct(":", `after "roles" in ${where}`);
+    r.expectPunct("{", `opening appRole({ roles }) on table "${tableName}"`);
+    const seenOps = /* @__PURE__ */ new Set();
+    while (!r.tryPunct("}")) {
+      const op = r.readKey(`for an operation in appRole({ roles }) on table "${tableName}"`);
+      if (!APP_ROLE_OPERATIONS.includes(op.name)) {
+        fail(op.line, `appRole({ roles }) on table "${tableName}" has an unknown operation "${op.name}". Allowed: read, create, update, delete.`);
+      }
+      if (seenOps.has(op.name)) fail(op.line, `appRole({ roles }) on table "${tableName}" declares ${op.name} twice.`);
+      seenOps.add(op.name);
+      r.expectPunct(":", `after "${op.name}" in appRole({ roles }) on table "${tableName}"`);
+      const ctx = `appRole({ roles: { ${op.name} } }) on table "${tableName}"`;
+      const open = r.next();
+      if (open.kind !== "punct" || open.value !== "[") fail(open.line, `${ctx} must be a list of quoted app role names, such as ['staff'].`);
+      const list = [];
+      while (!r.tryPunct("]")) {
+        const t = r.next();
+        if (t.kind !== "string") fail(t.line, `${ctx} must be a list of quoted app role names; values must be literal strings.`);
+        if (list.includes(t.value)) fail(t.line, `${ctx} lists "${t.value}" twice.`);
+        list.push(t.value);
+        names.push({ op: op.name, name: t.value, line: t.line });
+        if (!r.tryPunct(",")) {
+          r.expectPunct("]", `closing ${ctx}`);
+          break;
+        }
+      }
+      node.roles[op.name] = [...list].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing appRole({ roles }) on table "${tableName}"`);
+        break;
+      }
+    }
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", `closing ${where}`);
+      break;
+    }
+  }
+  r.tryPunct(",");
+  r.expectPunct(")", "closing appRole()");
+  if (!sawRoles) fail(line, `${where} needs roles: appRole({ roles: { read: [...], ... } }). An omitted operation allows nobody.`);
+  declaredLines.set(node, { line, names });
+  return node;
+}
+function resolveAppRoleScopes(tables, appRoles, errors) {
+  const vocabulary = new Set((appRoles ?? []).map((role) => role.name));
+  for (const t of tables) {
+    if (t.scope.kind !== "policy" || t.scope.policy.kind !== "app_role") continue;
+    const node = t.scope.policy;
+    const declared = declaredLines.get(node);
+    if (!declared) continue;
+    for (const { op, name, line } of declared.names) {
+      if (!vocabulary.has(name)) {
+        errors.push(`line ${line}: appRole({ roles: { ${op} } }) on table "${t.name}" names "${name}", which is not declared in the schema's appRoles option. List only app roles declared there; group roles and admin do not apply.`);
+      }
+    }
+    for (const op of ["update", "delete"]) {
+      const missing = node.roles[op].filter((role) => !node.roles.read.includes(role));
+      if (missing.length) {
+        errors.push(`line ${declared.line}: appRole() on table "${t.name}" lets ${missing.join(", ")} ${op} rows they cannot read. A role that may ${op} must also read, because the write returns the row.`);
+      }
+    }
+    declaredLines.delete(node);
+  }
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-roles.ts
+var GROUP_KEYS = ["roles", "adminGrantableRoles"];
+var APP_ROLE_KEYS = ["grantableBy"];
+function readStringList2(r, fail, ctx) {
+  const open = r.peek();
+  if (open.kind !== "punct" || open.value !== "[") fail(open.line, `${ctx} must be a list of quoted role names, such as ['viewer'].`);
+  r.next();
+  const out = [];
+  while (!r.tryPunct("]")) {
+    const t = r.next();
+    if (t.kind !== "string") fail(t.line, `${ctx} must be a list of quoted role names; found ${t.kind === "eof" ? "the end of the file" : `"${t.value}"`}. Values must be literal strings.`);
+    out.push(t.value);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("]", `closing ${ctx}`);
+      break;
+    }
+  }
+  return out;
+}
+function readGroupRoles(r, fail) {
+  r.expectPunct("{", "opening schema option groups");
+  const seen = /* @__PURE__ */ new Set();
+  const out = { roles: [], adminGrantableRoles: [] };
+  while (!r.tryPunct("}")) {
+    const key = r.readKey("for a groups option");
+    if (!GROUP_KEYS.includes(key.name)) {
+      fail(key.line, `groups has an unknown option "${key.name}". Allowed: ${GROUP_KEYS.join(", ")}. owner, admin and member are built in.`);
+    }
+    if (seen.has(key.name)) fail(key.line, `groups declares ${key.name} twice.`);
+    seen.add(key.name);
+    r.expectPunct(":", `after groups.${key.name}`);
+    out[key.name] = readStringList2(r, fail, `groups.${key.name}`);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", "closing schema option groups");
+      break;
+    }
+  }
+  return out;
+}
+function readAppRoles(r, fail) {
+  r.expectPunct("{", "opening schema option appRoles");
+  const out = [];
+  while (!r.tryPunct("}")) {
+    const key = r.readKey("for an app role name");
+    if (out.some((role2) => role2.name === key.name)) fail(key.line, `app role "${key.name}" is declared twice.`);
+    r.expectPunct(":", `after app role "${key.name}"`);
+    r.expectPunct("{", `opening app role "${key.name}" \u2014 declare it as { grantableBy: [...] }`);
+    const role = { name: key.name, grantableBy: [] };
+    const seen = /* @__PURE__ */ new Set();
+    while (!r.tryPunct("}")) {
+      const opt = r.readKey(`for an option of app role "${key.name}"`);
+      if (!APP_ROLE_KEYS.includes(opt.name)) {
+        fail(opt.line, `app role "${key.name}" has an unknown option "${opt.name}". Allowed: ${APP_ROLE_KEYS.join(", ")}.`);
+      }
+      if (seen.has(opt.name)) fail(opt.line, `app role "${key.name}" declares ${opt.name} twice.`);
+      seen.add(opt.name);
+      r.expectPunct(":", `after appRoles.${key.name}.${opt.name}`);
+      role.grantableBy = readStringList2(r, fail, `appRoles.${key.name}.grantableBy`);
+      if (!r.tryPunct(",")) {
+        r.expectPunct("}", `closing app role "${key.name}"`);
+        break;
+      }
+    }
+    out.push(role);
+    if (!r.tryPunct(",")) {
+      r.expectPunct("}", "closing schema option appRoles");
+      break;
+    }
+  }
+  return out.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
+}
+var sorted2 = (list) => [...list].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+function canonicalRoleVocabulary(groups, appRoles) {
+  return {
+    v: 1,
+    groupRoles: sorted2(groups?.roles ?? []),
+    adminGrantableGroupRoles: sorted2(groups?.adminGrantableRoles ?? []),
+    appRoles: [...appRoles ?? []].sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0).map((role) => ({ name: role.name, grantableBy: sorted2(role.grantableBy) }))
+  };
+}
+function validateDeclaredRoles(groups, appRoles) {
+  const delegation = /* @__PURE__ */ Object.create(null);
+  for (const role of appRoles ?? []) delegation[role.name] = role.grantableBy;
+  return roleVocabularyErrors({
+    groupRoles: groups?.roles ?? [],
+    adminGrantableGroupRoles: groups?.adminGrantableRoles ?? [],
+    appRoles: (appRoles ?? []).map((role) => role.name),
+    appRoleDelegation: delegation
+  });
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-options.ts
+function readSchemaOptions(reader, fail, fileErrors) {
+  const o = {};
+  if (!reader.tryPunct(",") || reader.peek().kind === "punct" && reader.peek().value === ")") return o;
+  reader.expectPunct("{", "opening schema options");
+  while (!reader.tryPunct("}")) {
+    const option = reader.readKey("for a schema option");
+    const after = () => reader.expectPunct(":", `after schema option "${option.name}"`);
+    if (option.name === "files" && !o.fileCollections) {
+      after();
+      o.fileCollections = readFileCollections(reader, fail, fileErrors);
+    } else if (option.name === "groups" && !o.groupRoles) {
+      after();
+      o.groupRoles = readGroupRoles(reader, fail);
+    } else if (option.name === "appRoles" && !o.appRoles) {
+      after();
+      o.appRoles = readAppRoles(reader, fail);
+    } else if (option.name === "payments" && !o.payments) {
+      after();
+      o.payments = readPaymentBindings(reader, fail);
+    } else if (option.name === "jobs" && !o.jobs) {
+      after();
+      o.jobs = readJobBindings(reader, fail);
+    } else if (option.name === "serviceRoles" && !o.serviceRoles) {
+      after();
+      o.serviceRoles = readServiceRoles(reader, fail);
+    } else if (option.name === "search" && !o.managedSearch) {
+      after();
+      const helper = reader.expectIdent('for schema option "search"');
+      if (helper.value !== "owner") fail(helper.line, "search ownership must be declared with owner().");
+      reader.expectPunct("(", "after search: owner");
+      reader.expectPunct(")", "closing search: owner()");
+      o.managedSearch = { kind: "owner" };
+    } else {
+      fail(option.line, `unknown schema option "${option.name}". The schema-level options are search: owner(), files: { \u2026 }, groups: { \u2026 }, appRoles: { \u2026 }, payments: { \u2026 }, jobs: { \u2026 } and serviceRoles: { \u2026 }, each at most once.`);
+    }
+    if (!reader.tryPunct(",")) {
+      reader.expectPunct("}", "closing schema options");
+      break;
+    }
+  }
+  reader.tryPunct(",");
+  return o;
 }
 
 // worker/src/utils/db-schema-deploy/extract-schema-ts.ts
@@ -4138,6 +5101,13 @@ function declaredOwnerColumn(scope) {
 function declaredScopeIntent(scope) {
   return scope.kind === "owner" ? "scoped" : scope.kind;
 }
+function declaredScopeIdentityColumns(scope) {
+  if (scope.kind === "owner") return [scope.column];
+  if (scope.kind === "member") return [...scope.group];
+  if (scope.kind !== "policy") return [];
+  const collect = (policy) => policy.kind === "owner" ? [policy.column] : policy.kind === "member" ? [...policy.group] : policy.kind === "any_of" ? policy.policies.flatMap(collect) : policy.kind === "group" ? [policy.column] : policy.kind === "app_role" ? [] : [policy.via];
+  return [...new Set(collect(scope.policy))];
+}
 var COLUMN_HELPERS = /* @__PURE__ */ new Set([
   "id",
   "text",
@@ -4149,7 +5119,7 @@ var COLUMN_HELPERS = /* @__PURE__ */ new Set([
   "json",
   "blob"
 ]);
-var SCOPE_HELPERS = /* @__PURE__ */ new Set(["owner", "shared", "serverOnly", "member", "anyOf", "parent"]);
+var SCOPE_HELPERS = /* @__PURE__ */ new Set(["owner", "shared", "serverOnly", "member", "anyOf", "parent", "group", "appRole"]);
 var TABLE_MARKER_HELPERS = /* @__PURE__ */ new Set(["removedTable", "exported"]);
 var SCHEMA_CALLABLE = /* @__PURE__ */ new Set([
   ...COLUMN_HELPERS,
@@ -4703,7 +5673,9 @@ function readParentScope(r, tableName, line) {
   if (typeof value !== "string" || !SAFE_IDENT.test(value) || value.length > MAX_NAME_LENGTH) {
     throw new SchemaTsError(`line ${opts.get("via").line}: parent({ via }) on table "${tableName}" must name a valid declared foreign-key column.`);
   }
-  return { kind: "policy", policy: { kind: "parent", via: value.toLowerCase(), table: "", parentKey: "", policy: { kind: "owner", column: "" } } };
+  const sentinel = { kind: "parent", via: value.toLowerCase(), table: "", parentKey: "", policy: { kind: "owner", column: "" } };
+  rememberParentLine(sentinel, line);
+  return { kind: "policy", policy: sentinel };
 }
 function readRelations(r, tableName) {
   r.expectPunct("{", `for "relations" of table "${tableName}"`);
@@ -4753,11 +5725,16 @@ function readScope(r, tableName) {
   const tok = r.expectIdent(`for the scope of table "${tableName}"`);
   if (!SCOPE_HELPERS.has(tok.value)) {
     throw new SchemaTsError(
-      `line ${tok.line}: unknown scope "${tok.value}" on table "${tableName}". Use owner(), member(), anyOf(), parent(), shared(), or serverOnly().`
+      `line ${tok.line}: unknown scope "${tok.value}" on table "${tableName}". Use owner(), group(), appRole(), member(), anyOf(), parent(), shared(), or serverOnly().`
     );
   }
   if (tok.value === "anyOf") return readAnyOfScope(r, tableName, tok.line);
   if (tok.value === "parent") return readParentScope(r, tableName, tok.line);
+  const failAt = (line, message) => {
+    throw new SchemaTsError(`line ${line}: ${message}`);
+  };
+  if (tok.value === "group") return { kind: "policy", policy: readGroupScope(r, tableName, tok.line, failAt) };
+  if (tok.value === "appRole") return { kind: "policy", policy: readAppRoleScope(r, tableName, tok.line, failAt) };
   if (tok.value === "member") {
     r.expectPunct("(", 'after "member"');
     const scope = readMemberScope(r, tableName, tok.line);
@@ -5077,37 +6054,11 @@ function extractSchemaTs(source) {
         break;
       }
     }
-    let managedSearch;
-    let fileCollections;
     const fileErrors = [];
-    if (reader.tryPunct(",") && !(reader.peek().kind === "punct" && reader.peek().value === ")")) {
-      reader.expectPunct("{", "opening schema options");
-      while (!reader.tryPunct("}")) {
-        const option = reader.readKey("for a schema option");
-        if (option.name === "files" && !fileCollections) {
-          reader.expectPunct(":", 'after schema option "files"');
-          fileCollections = readFileCollections(reader, (line, message) => {
-            throw new SchemaTsError(`line ${line}: ${message}`);
-          }, fileErrors);
-        } else if (option.name === "search" && !managedSearch) {
-          reader.expectPunct(":", 'after schema option "search"');
-          const helper = reader.expectIdent('for schema option "search"');
-          if (helper.value !== "owner") {
-            throw new SchemaTsError(`line ${helper.line}: search ownership must be declared with owner().`);
-          }
-          reader.expectPunct("(", "after search: owner");
-          reader.expectPunct(")", "closing search: owner()");
-          managedSearch = { kind: "owner" };
-        } else {
-          throw new SchemaTsError(`line ${option.line}: unknown schema option "${option.name}". The schema-level options are search: owner() and files: { \u2026 }, each at most once.`);
-        }
-        if (!reader.tryPunct(",")) {
-          reader.expectPunct("}", "closing schema options");
-          break;
-        }
-      }
-      reader.tryPunct(",");
-    }
+    const fail = (line, message) => {
+      throw new SchemaTsError(`line ${line}: ${message}`);
+    };
+    const { managedSearch, fileCollections, groupRoles, appRoles, payments, jobs, serviceRoles } = readSchemaOptions(reader, fail, fileErrors);
     reader.expectPunct(")", "closing schema(\u2026)");
     reader.tryPunct(";");
     if (!reader.atEof()) {
@@ -5146,31 +6097,8 @@ function extractSchemaTs(source) {
       if (scope.kind === "policy" && scope.policy.kind !== "parent") return scope.policy;
       return null;
     };
-    for (const t of tables) {
-      if (t.scope.kind !== "policy" || t.scope.policy.kind !== "parent") continue;
-      const pending = t.scope.policy;
-      const fk = t.columns.find((column) => column.name === pending.via);
-      if (!fk || !fk.references) {
-        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but "${pending.via}" is not a declared scalar foreign key.`);
-        continue;
-      }
-      const parentTable = tableByName.get(fk.references);
-      const parentKey = parentTable?.columns.find((column) => column.helper === "id");
-      const inherited = parentTable ? privatePolicy(parentTable.scope) : null;
-      if (!parentTable || !parentKey || !inherited) {
-        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but its referenced parent must have one id() key and a direct owner(), member(), or anyOf(owner(), member()) private scope.`);
-        continue;
-      }
-      const compatible = fk.helper === parentKey.helper && (fk.helper !== "id" || fk.uuid === parentKey.uuid) || fk.helper === "integer" && parentKey.helper === "id" && !parentKey.uuid || fk.helper === "text" && parentKey.helper === "id" && parentKey.uuid;
-      if (!compatible) {
-        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }), but that foreign key does not have the same scalar type as "${parentTable.name}"."${parentKey.name}".`);
-        continue;
-      }
-      t.scope.policy = { kind: "parent", via: pending.via, table: parentTable.name, parentKey: parentKey.name, policy: inherited };
-      if (t.client?.create && !t.client.create.includes(pending.via)) {
-        errors.push(`Table "${t.name}" uses parent({ via: '${pending.via}' }) and client.create must include "${pending.via}" so every new row explicitly selects an authorized parent.`);
-      }
-    }
+    resolveAppRoleScopes(tables, appRoles, errors);
+    resolveGroupsAndParents(tables, tableByName, privatePolicy, groupRoles, errors);
     const memberPolicies = (scope) => {
       const out = [];
       const visit = (node) => {
@@ -5221,9 +6149,14 @@ function extractSchemaTs(source) {
       errors.push(...fileErrors);
       validateFileCollections(fileCollections, (name) => {
         const t = tableByName.get(name);
-        return t ? { columns: knownColumns(t), clientWrites: Boolean(t.client && (t.client.create !== null || t.client.update !== null || t.client.delete)) } : null;
+        return t ? { columns: knownColumns(t), clientWrites: Boolean(t.client && (t.client.create !== null || t.client.update !== null || t.client.delete)), parentTarget: fileParentTarget(t) } : null;
       }, errors);
     }
+    if (groupRoles || appRoles) errors.push(...validateDeclaredRoles(groupRoles, appRoles));
+    validateBindings({ payments, jobs, serviceRoles, groups: groupRoles, appRoles }, (name) => {
+      const t = tableByName.get(name);
+      return t ? { table: t, key: fileParentTarget(t).key, privateUser: fileParentTarget(t).privateUserPolicy, identity: declaredScopeIdentityColumns(t.scope) } : null;
+    }, errors);
     if (errors.length > 0) return { ok: false, errors };
     return {
       ok: true,
@@ -5232,7 +6165,12 @@ function extractSchemaTs(source) {
         removedTables: removedTables.sort(),
         exportedTables: exportedTables.sort(),
         ...managedSearch ? { search: managedSearch } : {},
-        ...fileCollections ? { files: fileCollections } : {}
+        ...fileCollections ? { files: fileCollections } : {},
+        ...groupRoles ? { groups: groupRoles } : {},
+        ...appRoles ? { appRoles } : {},
+        ...payments ? { payments } : {},
+        ...jobs ? { jobs } : {},
+        ...serviceRoles ? { serviceRoles } : {}
       }
     };
   } catch (err) {
@@ -5264,6 +6202,9 @@ function canonicalTableShape(t) {
     indexes: t.indexes,
     uniques: t.uniques,
     ...t.removedColumns.length > 0 ? { removedColumns: t.removedColumns } : {},
+    // conditional: only a group() table with direct group references gains
+    // it, so every other table keeps its generation id.
+    ...t.groupRefs && t.groupRefs.length > 0 ? { groupRefs: t.groupRefs } : {},
     // conditional: a relation-free table keeps its slice-1 generation id. Ordered
     // by name (readRelations sorts) so the shape is deterministic. `kind` is
     // likewise conditional — absent means hasMany, so a declaration that uses
@@ -5313,10 +6254,18 @@ function declaredFilesFromSource(files) {
   const parsed = extractSchemaTs(source);
   return parsed.ok && parsed.declaration.files?.length ? canonicalFileCollectionsJson(parsed.declaration.files) : void 0;
 }
+function declaredRolesFromSource(files) {
+  const source = files["db/schema.ts"];
+  if (source === void 0) return void 0;
+  const parsed = extractSchemaTs(source);
+  if (!parsed.ok || !parsed.declaration.groups && !parsed.declaration.appRoles) return void 0;
+  return JSON.stringify(canonicalRoleVocabulary(parsed.declaration.groups, parsed.declaration.appRoles));
+}
 
 // declared-data-vendor-entry.js
 var import_typed_data = __toESM(require_typed_data());
 var import_runtime_types = __toESM(require_runtime_types());
+var import_groups_types = __toESM(require_groups_types());
 var import_typed_files = __toESM(require_typed_files());
 var import_schema_types = __toESM(require_schema_types());
 var import_runtime_types2 = __toESM(require_runtime_types());
@@ -5324,6 +6273,9 @@ var import_typed_files2 = __toESM(require_typed_files());
 function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? (0, import_typed_data.generateDataClient)(authority) : void 0;
+}
+function runtimeDeclarationFromFiles(files) {
+  return (0, import_runtime_types.runtimeContextDeclaration)((0, import_groups_types.declaredRoles)(declaredRolesFromSource(files)));
 }
 function declaredTablesFromFiles(files) {
   return (0, import_runtime_types.declaredTablesDeclaration)(schemaAuthorityFromSource(files));
@@ -5340,5 +6292,6 @@ function filesDeclarationFromFiles(files) {
   SCHEMA_DECLARATION,
   declaredTablesFromFiles,
   filesDeclarationFromFiles,
-  generateFromFiles
+  generateFromFiles,
+  runtimeDeclarationFromFiles
 });

@@ -1,20 +1,30 @@
 {
   "esbuild": "0.24.0",
   "source_files": {
-    "worker/containers/compile/declared-data-contract.cjs": "f8a4d1353773f34881aaffbe7ad74aa1eb1458628f2da46cda961e6dd352eb40",
-    "worker/containers/compile/runtime-types.cjs": "2ea89ebdf25073a70b69c76cbe78502d8a29f6e89b55323c8bc84ed6651c94eb",
-    "worker/containers/compile/schema-types.cjs": "f31099146c91e38e0b526ea4b59b33d4d83f7cdafe79f9805769df850e101848",
+    "worker/containers/compile/declared-data-contract.cjs": "bf2d7d56252e1f64ded67c322acf7fa0f2dc722d79f3965211a3442859d26d9f",
+    "worker/containers/compile/groups-types.cjs": "a6c8ac36a78ccd742b4a1bc986723da028ed1080db092da452ad2c6bc21bb614",
+    "worker/containers/compile/runtime-types.cjs": "43b15bc33a8b55a4233627cab5a802257c6b60de1a1da380981710d4fbc8f0ec",
+    "worker/containers/compile/schema-types.cjs": "1c5a0b3ad6b506dc178de7f031080426558cab055f1c1620eb949c524e5546f8",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
-    "worker/containers/compile/typed-files.cjs": "0e17085a38d2c40f84849ebdd5c892a838b9d18d6a5111c0b224f4d389872e90",
-    "worker/src/utils/authority/scope-enforcement.ts": "77133d3026c26a7a842952221f54703916322dbccb7d744c98e3f69dec56e5f0",
+    "worker/containers/compile/typed-files.cjs": "a0b1818afbc7673f84583c76436a3b3ca1d1fdf63d8d8db138b36646103f0708",
+    "worker/src/services/jobs/limits.ts": "f806f045dcb92f7da1e830aab65b74185ebd3071aeade368db776f3a0546de38",
+    "worker/src/utils/authority/scope-enforcement.ts": "b972c0433c9db1f9f84eb7084a5fd2fe313ff66f86c2ee6556dceac0c8e7683e",
     "worker/src/utils/db-schema-deploy/bigint-text.ts": "ef3f581daeecb234d2c1e288bc09495a6facd7b0354b300134918f6c0cf10cc2",
-    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "92b9fc756f88b9c26159b6e1785bd2229b788bfc1f62af13aed1bc66c277ff14",
+    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "25916e9e5174a3959e5b3f61ee1bc4a3ff3c0de01b155e19be97c836431cb8ec",
     "worker/src/utils/db-schema-deploy/client-permissions.ts": "1ec99e9b5e9c575460253f8d4a656228919aca6da09d43065e2b34bcbb633b0c",
-    "worker/src/utils/db-schema-deploy/extract-schema-files.ts": "5923d30040251b3ec4481d38f3f4ddbbd4889129d77bb08843d9dd7992467a0a",
+    "worker/src/utils/db-schema-deploy/extract-schema-app-roles.ts": "2172aa1fb36e248d50c7024dd212ea6292bfd810b2e72a778793247a61ba4487",
+    "worker/src/utils/db-schema-deploy/extract-schema-bindings.ts": "34a2bf98da533afa60cc3fe46c3ff029300f06fef0bfecd98e028bff181ca1b3",
+    "worker/src/utils/db-schema-deploy/extract-schema-files.ts": "dddbb2d914a112e2820598d64f9da781aecec55e121f10de3501c3a7b4238f36",
+    "worker/src/utils/db-schema-deploy/extract-schema-groups.ts": "ec99b8fbc05dae3f5891924fae006481cf5317db76fe56201a04c85a86f6ddad",
+    "worker/src/utils/db-schema-deploy/extract-schema-options.ts": "0998748a953fa9df742a7bdcbbce01f4fc56f9735ddbe3adf9e01facd82f87ad",
+    "worker/src/utils/db-schema-deploy/extract-schema-parents.ts": "eaec77c4db2c9a1903bd07fb265fc4f3fa8941f23724ab568ccdbf9569dc7a78",
     "worker/src/utils/db-schema-deploy/extract-schema-relations.ts": "3984683d3227e964845836079476687a7295e6907b525ef21b9eebc488825bf8",
-    "worker/src/utils/db-schema-deploy/extract-schema-ts.ts": "405a8d9da80cdb3dbc2dfc93a70e0ed475a93393c14214c9f288b7c58ffd402b",
+    "worker/src/utils/db-schema-deploy/extract-schema-roles.ts": "1b2d7c7279679c726053c5d1586221476587273fc24ce93bde72a4a8ef8e7582",
+    "worker/src/utils/db-schema-deploy/extract-schema-ts.ts": "7612fe1eebf9431e9a4e30815cf4f8fc5212084324f419e9c13a296213c312fe",
     "worker/src/utils/db-schema-deploy/schema-constants.ts": "07e648748409207fa4b97367b8942463c047a0bb0e27a36f16f696f90f2b550d",
-    "worker/src/utils/db-schema-deploy/schema-ownership.ts": "e6c811a87bc657707be3518dfe547c6d97718ac073108b126eb7f791c9c08202"
+    "worker/src/utils/db-schema-deploy/schema-ownership.ts": "e6c811a87bc657707be3518dfe547c6d97718ac073108b126eb7f791c9c08202",
+    "worker/src/utils/managed-groups/errors.ts": "2ea002d5bb2890492fbe470e0dabb6681060780e94b89e2c30d37cabe6484383",
+    "worker/src/utils/managed-groups/policy.ts": "2259a883645c8bfd607ead7c37387f3ffd42ac9dfb86722c72b224adb498511e"
   },
-  "sha256": "786df868aee907143e2b3e9c0497792c5d8eb9bf7d2582860db7ad0107eaba40"
+  "sha256": "cb3b638e84f4ea2073091ecad0c332b99d1a5fc619737b9afef1c8ffa43b813c"
 }

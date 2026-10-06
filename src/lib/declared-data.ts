@@ -34,6 +34,7 @@ const require = createRequire(import.meta.url);
 interface DeclaredDataGenerator {
   generateFromFiles(files: Record<string, string>): DeclaredDataClient | undefined;
   declaredTablesFromFiles(files: Record<string, string>): string;
+  runtimeDeclarationFromFiles(files: Record<string, string>): string;
   filesDeclarationFromFiles(files: Record<string, string>): string | undefined;
   SCHEMA_DECLARATION: string;
   RUNTIME_CONTEXT_DECLARATION: string;
@@ -88,12 +89,14 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
   let client: DeclaredDataClient | undefined;
   // Server reads and writes of the declared tables are typed from the same schema.
   let tables: string;
+  let runtimeDeclaration: string;
   let filesDeclaration: string | undefined;
   const generator = require('../../runtime/declared-data.cjs') as DeclaredDataGenerator;
   try {
     const files = { 'db/schema.ts': readFileSync(schemaPath, 'utf8') };
     client = generator.generateFromFiles(files);
     tables = generator.declaredTablesFromFiles(files);
+    runtimeDeclaration = generator.runtimeDeclarationFromFiles(files);
     filesDeclaration = generator.filesDeclarationFromFiles(files);
   }
   catch (error) {
@@ -102,7 +105,7 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
     if (previousFiles !== undefined) rmSync(filesPath);
     throw error;
   }
-  const declaration = GENERATED_DATA_HEADER + generator.RUNTIME_CONTEXT_DECLARATION + tables
+  const declaration = GENERATED_DATA_HEADER + runtimeDeclaration + tables
     + generator.ENDPOINT_DECLARATION + SW_ENDPOINT_GLOBAL + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
   if (declaration !== previous) writeFileSync(declarationPath, declaration);
   // Only declared collections exist on somewhere:files; with none, the module is

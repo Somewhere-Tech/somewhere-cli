@@ -19,9 +19,10 @@ if (esbuild.version !== pinned) throw new Error(`Install the platform compiler's
 const result = await esbuild.build({
   absWorkingDir: root,
   stdin: {
-    contents: `import { clientAuthorityFromSource, declaredFilesFromSource, schemaAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
+    contents: `import { clientAuthorityFromSource, declaredFilesFromSource, declaredRolesFromSource, schemaAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
 import { generateDataClient } from './worker/containers/compile/typed-data.cjs';
-import { declaredTablesDeclaration } from './worker/containers/compile/runtime-types.cjs';
+import { declaredTablesDeclaration, runtimeContextDeclaration } from './worker/containers/compile/runtime-types.cjs';
+import { declaredRoles } from './worker/containers/compile/groups-types.cjs';
 import { describeFilesClient } from './worker/containers/compile/typed-files.cjs';
 export { SCHEMA_DECLARATION } from './worker/containers/compile/schema-types.cjs';
 export { ENDPOINT_DECLARATION, RUNTIME_CONTEXT_DECLARATION } from './worker/containers/compile/runtime-types.cjs';
@@ -29,6 +30,9 @@ export { CLIENT_FILE as FILES_DECLARATION_FILE } from './worker/containers/compi
 export function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? generateDataClient(authority) : undefined;
+}
+export function runtimeDeclarationFromFiles(files) {
+  return runtimeContextDeclaration(declaredRoles(declaredRolesFromSource(files)));
 }
 export function declaredTablesFromFiles(files) {
   return declaredTablesDeclaration(schemaAuthorityFromSource(files));
