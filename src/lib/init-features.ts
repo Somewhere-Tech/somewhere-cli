@@ -17,12 +17,12 @@ interface InitModuleDefinition {
 const MODULES: readonly InitModuleDefinition[] = [
   {
     id: 'auth',
-    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, auth hooks over the SDK provider, a sign-in page, a "Verify your email" code panel for password accounts (the session decides the account; no token in page code), and a per-user private boundary behind a loading state. This is what plain `somewhere init` writes.',
+    summary: 'Email/password sign-up, sign-in and sign-out through the SDK cookie session: the packaged /api/auth route, auth hooks over the SDK provider, a sign-in page, a "Verify your email" code panel for password accounts (the session decides the account; no token in page code), the /auth/magic page that sign-in and sw.auth.invite (group) invitation links open, routed in front of the sign-in gate (it redeems the one-time token once and opens the link\'s redirect_uri only when it is a page of this app), and a per-user private boundary behind a loading state. This is what plain `somewhere init` writes.',
     requires: [],
   },
   {
     id: 'magic-link',
-    summary: 'Passwordless sign-in links on the sign-in page: an "email me a sign-in link" form (auth.sendMagicLink through the packaged /api/auth route), the /auth/magic page the email opens, routed in front of the sign-in gate, which redeems the one-time token for the same cookie session and then opens the link\'s redirect_uri only when it is a page of this app. sw.auth.invite links land on the same page.',
+    summary: 'Passwordless sign-in links on the sign-in page: an "email me a sign-in link" form (auth.sendMagicLink through the packaged /api/auth route). The email opens the /auth/magic page that auth already routes in front of the sign-in gate.',
     requires: ['auth'],
   },
   {

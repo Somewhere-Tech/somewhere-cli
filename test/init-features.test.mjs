@@ -85,12 +85,14 @@ test('catalog is machine-readable and lists module files from the generator', ()
   assert.equal(catalog.version, 1);
   assert.deepEqual(catalog.modules.map((m) => [m.id, m.requires]), [['auth', []], ['magic-link', ['auth']], ['private-data', ['auth']], ['agent', ['auth']]]);
   assert.ok(catalog.modules[0].files.includes('api/auth/[...path].ts'));
-  assert.deepEqual(catalog.modules[1].files, [
-    'src/auth/magic-link.ts',
-    'src/pages/MagicLinkPage.tsx',
-    'src/ui/MagicLink.tsx',
-    'types/magic-link.ts',
-  ]);
+  // tsk_28753a0e: the /auth/magic landing is part of auth; magic-link adds
+  // only the link form, inside files auth already writes.
+  for (const path of ['src/auth/magic-link.ts', 'src/pages/MagicLinkPage.tsx', 'src/ui/MagicLink.tsx', 'types/magic-link.ts']) {
+    assert.ok(catalog.modules[0].files.includes(path), path);
+  }
+  assert.deepEqual(catalog.modules[1].files, []);
+  assert.match(catalog.modules[0].summary, /\/auth\/magic/);
+  assert.match(catalog.modules[1].summary, /auth already routes/);
   assert.ok(catalog.modules[0].files.includes('src/auth/useEmailVerification.ts') && catalog.modules[0].files.includes('src/ui/VerifyEmail.tsx'),
     'email verification is part of the auth module');
   assert.deepEqual(catalog.modules[2].files, [
@@ -193,29 +195,41 @@ test('views take props only, and both UI modes share pages, hooks and view signa
   }
 });
 
-test('magic-link routes /auth/magic before the gate and adds the link form without changing the plain starter', () => {
+test('every auth starter routes /auth/magic before the gate; magic-link adds only the link form (tsk_28753a0e)', () => {
   for (const ui of ['styled', 'headless']) {
     const plain = generate('auth', ui);
     const magic = generate('magic-link', ui);
     assert.deepEqual(magic.selection.modules, ['auth', 'magic-link']);
-    const app = magic.read('src/App.tsx');
-    const route = app.indexOf("if (pathname === '/auth/magic') return <MagicLinkPage />;");
-    assert.ok(route > 0, 'the landing page is routed');
-    assert.ok(route < app.indexOf("session.status === 'loading'"), 'it is decided before the session gate');
+    for (const starter of [plain, magic]) {
+      const app = starter.read('src/App.tsx');
+      const route = app.indexOf("if (pathname === '/auth/magic') return <MagicLinkPage />;");
+      assert.ok(route > 0, 'the landing page is routed');
+      assert.ok(route < app.indexOf("session.status === 'loading'"), 'it is decided before the session gate');
+      assert.ok(app.indexOf('const session = useAuthState();') < route, 'hooks run before the early return');
+      const hooks = starter.read('src/auth/magic-link.ts');
+      assert.equal(hooks.match(/auth\.verifyMagicLink\(/g)?.length, 1, 'one verify call site');
+      assert.match(hooks, /started\.current/, 'the one-time token is verified once, even under StrictMode');
+      assert.match(hooks, /history\.replaceState/, 'the token is removed from the address bar');
+      assert.match(starter.read('src/ui/MagicLink.tsx'), /export function MagicLinkStatus/);
+    }
+    // The landing is the same code with or without the module.
+    for (const path of ['src/App.tsx', 'src/pages/MagicLinkPage.tsx']) assert.equal(plain.read(path), magic.read(path), path);
+    const landing = (source) => source.slice(source.indexOf('/**\n * Where to go after signing in'));
+    assert.equal(landing(plain.read('src/auth/magic-link.ts')), landing(magic.read('src/auth/magic-link.ts')));
+
+    // Only magic-link sends links.
     assert.match(magic.read('src/pages/SignInPage.tsx'), /<MagicLinkForm request=\{magicLink\} \/>/);
     assert.match(magic.read('src/ui/AuthCard.tsx'), /children\?: ReactNode/);
     assert.match(magic.read('src/ui/AuthCard.tsx'), /\{children\}/);
-    const hooks = magic.read('src/auth/magic-link.ts');
-    assert.match(hooks, /auth\.sendMagicLink\(\{ email: address \}\)/);
-    assert.match(hooks, /auth\.verifyMagicLink\(\{ token \}\)/);
-    assert.match(hooks, /started\.current/, 'the one-time token is verified once, even under StrictMode');
-    assert.match(hooks, /history\.replaceState/, 'the token is removed from the address bar');
-    // Without the module the starter is byte-identical to before.
-    for (const path of ['src/App.tsx', 'src/pages/SignInPage.tsx', 'src/ui/AuthCard.tsx']) {
-      assert.equal(plain.read(path), generate('auth', ui).read(path));
+    assert.match(magic.read('src/auth/magic-link.ts'), /auth\.sendMagicLink\(\{ email: address \}\)/);
+    for (const path of ['src/pages/SignInPage.tsx', 'src/ui/AuthCard.tsx']) {
       assert.doesNotMatch(plain.read(path), /MagicLink|children/, `${ui} ${path}`);
     }
-    assert.ok(!plain.result.created.some((path) => /magic/i.test(path)));
+    for (const path of ['src/auth/magic-link.ts', 'src/ui/MagicLink.tsx', 'types/magic-link.ts']) {
+      assert.doesNotMatch(plain.read(path), /sendMagicLink|MagicLinkForm|MagicLinkRequest|FormEvent/, `${ui} ${path}`);
+    }
+    assert.match(plain.read('README.md'), /## Sign-in and invitation links/);
+    assert.match(plain.read('README.md'), /sw\.auth\.invite/);
   }
 });
 

@@ -2491,14 +2491,48 @@ function authCard(styled: boolean, magicLink: boolean): string {
 }
 
 /** App.tsx with /auth/magic in front of the sign-in gate: the person is not
- *  signed in yet when the emailed link opens it. */
-function appTsx(magicLink: boolean): string {
-  if (!magicLink) return APP;
+ *  signed in yet when the emailed sign-in or invitation link opens it. */
+function appTsx(): string {
   let out = replaceOnce(APP, "import { HomePage } from './pages/HomePage';\n",
     "import { HomePage } from './pages/HomePage';\nimport { MagicLinkPage } from './pages/MagicLinkPage';\n");
   out = replaceOnce(out, '  const session = useAuthState();\n\n',
-    "  const pathname = usePathname();\n  const session = useAuthState();\n\n  // The emailed sign-in link lands here before a session exists.\n  if (pathname === '/auth/magic') return <MagicLinkPage />;\n");
+    "  const pathname = usePathname();\n  const session = useAuthState();\n\n  // An emailed sign-in or invitation link lands here before a session exists.\n  if (pathname === '/auth/magic') return <MagicLinkPage />;\n");
   return out;
+}
+
+/** Cut the text from `start` up to (not including) `end`; both must occur once. */
+function cutBetween(text: string, start: string, end: string): string {
+  const from = text.indexOf(start);
+  const to = text.indexOf(end);
+  if (from === -1 || to <= from || text.indexOf(start, from + 1) !== -1 || text.indexOf(end, to + 1) !== -1) {
+    throw new Error(`init template: expected one ${JSON.stringify(start)} before one ${JSON.stringify(end)}`);
+  }
+  return text.slice(0, from) + text.slice(to);
+}
+
+// The plain auth starter keeps the /auth/magic landing (sign-in and
+// invitation links open it, tsk_28753a0e) and leaves out only the
+// "email me a sign-in link" form, which the magic-link module adds.
+function magicLinkTypes(request: boolean): string {
+  return request ? MAGIC_LINK_TYPES : cutBetween(MAGIC_LINK_TYPES, '/** The "email me a sign-in link" form', '/**\n * The /auth/magic page');
+}
+
+function magicLinkHooks(request: boolean): string {
+  if (request) return MAGIC_LINK_HOOKS;
+  let out = replaceOnce(MAGIC_LINK_HOOKS, "import type { MagicLinkLanding, MagicLinkRequest } from '../../types/magic-link';",
+    "import type { MagicLinkLanding } from '../../types/magic-link';");
+  out = replaceOnce(out, '// Sign-in links. The packaged route api/auth/[...path].ts sends the email\n// (POST /api/auth/magic-link) and redeems it (/api/auth/magic-link/verify).\n',
+    '// Sign-in and invitation links. The packaged route api/auth/[...path].ts\n// redeems them (/api/auth/magic-link/verify).\n');
+  return cutBetween(out, 'export function useMagicLinkRequest', '/**\n * Where to go after signing in');
+}
+
+function magicLinkViews(styled: boolean, request: boolean): string {
+  const views = styled ? STYLED_MAGIC_LINK : PLAIN_MAGIC_LINK;
+  if (request) return views;
+  let out = replaceOnce(views, "import type { FormEvent } from 'react';\n", '');
+  out = replaceOnce(out, "import type { MagicLinkLanding, MagicLinkRequest } from '../../types/magic-link';",
+    "import type { MagicLinkLanding } from '../../types/magic-link';");
+  return cutBetween(out, 'export function MagicLinkForm', 'export function MagicLinkStatus');
 }
 
 const MAGIC_LINK_CSS = `/* Sign-in links: delete with src/ui/MagicLink.tsx. */
@@ -2674,9 +2708,9 @@ function readme(selection: InitSelection): string {
       : '- Look: `src/ui/` holds plain semantic views. Replace them with your own components; keep their props, or change the pages that pass them.',
     '- Sign-in: `src/auth/hooks.ts` (state and actions) over the SDK client in `src/services/auth.ts` and the SDK route `api/auth/[...path].ts`. Email verification: `src/auth/useEmailVerification.ts` and `src/ui/VerifyEmail.tsx`.',
   ];
-  if (magicLink) {
-    lines.push('- Sign-in links: `src/auth/magic-link.ts` (send and redeem), `src/pages/MagicLinkPage.tsx` (the `/auth/magic` page the email opens), `src/ui/MagicLink.tsx` (views).');
-  }
+  lines.push(magicLink
+    ? '- Sign-in links: `src/auth/magic-link.ts` (send and redeem), `src/pages/MagicLinkPage.tsx` (the `/auth/magic` page the email opens), `src/ui/MagicLink.tsx` (views).'
+    : '- Sign-in and invitation links: `src/auth/magic-link.ts` (redeem), `src/pages/MagicLinkPage.tsx` (the `/auth/magic` page the email opens), `src/ui/MagicLink.tsx` (view).');
   if (privateData) {
     lines.push('- Data: `db/schema.ts` (tables and browser permissions), `src/services/notes.ts` (calls), `src/data/useNotes.ts` (state). The notes example is removable.');
   }
@@ -2699,19 +2733,22 @@ function readme(selection: InitSelection): string {
     'code the platform emails it (`auth.requestEmailVerification` / `auth.verifyEmail`',
     'through the same SDK route; the session cookie decides the account).',
     'Password reset, OAuth and MFA are not generated.',
+    '',
+    '## Sign-in and invitation links',
+    '',
+    'An emailed link opens `/auth/magic?token=…`, which `src/App.tsx` routes in front',
+    'of the sign-in gate. The page exchanges the one-time token for the same cookie',
+    'session (`auth.verifyMagicLink`, once per page load; a failure is shown, never',
+    'retried) and then opens the link\'s `redirect_uri` when it is a page of this app,',
+    'otherwise `/`. Invitations from `sw.auth.invite` (including group invitations)',
+    'land here; redeeming one signs the invitee in and accepts the invitation.',
   );
   if (magicLink) {
     lines.push(
       '',
-      '## Sign-in links',
-      '',
-      'The sign-in page also emails a one-time link (`auth.sendMagicLink`). It opens',
-      '`/auth/magic?token=…`, which `src/App.tsx` routes in front of the sign-in gate;',
-      'the page exchanges the token for the same cookie session (`auth.verifyMagicLink`)',
-      'and then opens the link\'s `redirect_uri` when it is a page of this app, otherwise',
-      '`/`. The first link creates the account. Invitations from `sw.auth.invite` land',
-      'on the same page. The email shows the project name: create the project with',
-      '`somewhere init --name "Your App" --subdomain your-app`.',
+      'The sign-in page also emails a one-time sign-in link (`auth.sendMagicLink`).',
+      'The first link creates the account. The email shows the project name: create',
+      'the project with `somewhere init --name "Your App" --subdomain your-app`.',
       'Test it with `<name>@<subdomain>.test.somewhere.site`, then',
       '`somewhere email test-inbox <address>` prints the link. `somewhere docs sw.auth`',
     );
@@ -2800,7 +2837,7 @@ export function extensionPoints(selection: InitSelection): Record<string, string
     look: selection.ui === 'styled' ? 'src/styles/tokens.css, src/styles/app.css, src/ui/' : 'src/ui/',
     auth: 'src/auth/hooks.ts',
   };
-  if (selection.modules.includes('magic-link')) points.magic_link = 'src/auth/magic-link.ts, src/pages/MagicLinkPage.tsx';
+  points.magic_link = 'src/auth/magic-link.ts, src/pages/MagicLinkPage.tsx';
   if (selection.modules.includes('private-data')) points.data = 'db/schema.ts, src/services/notes.ts, src/data/useNotes.ts';
   if (selection.modules.includes('agent')) points.assistant = 'api/chat.ts, api/proposals.ts, src/data/useAssistant.ts, src/fixtures/assistant.ts';
   return points;
@@ -2827,7 +2864,7 @@ export function createFeatureTemplate(
     { path: 'api/auth/[...path].ts', content: AUTH_API },
     { path: 'types/auth.ts', content: AUTH_TYPES },
     { path: 'src/main.tsx', content: mainTsx(styled, agent) },
-    { path: 'src/App.tsx', content: appTsx(magicLink) },
+    { path: 'src/App.tsx', content: appTsx() },
     { path: 'src/config.ts', content: configTs(options.appName) },
     { path: 'src/routes.ts', content: ROUTES },
     { path: 'src/services/auth.ts', content: AUTH_SERVICE },
@@ -2841,19 +2878,15 @@ export function createFeatureTemplate(
     { path: 'src/ui/feedback.tsx', content: styled ? STYLED_FEEDBACK : PLAIN_FEEDBACK },
     { path: 'src/ui/AuthCard.tsx', content: authCard(styled, magicLink) },
     { path: 'src/ui/AppShell.tsx', content: styled ? STYLED_APP_SHELL : PLAIN_APP_SHELL },
+    { path: 'types/magic-link.ts', content: magicLinkTypes(magicLink) },
+    { path: 'src/auth/magic-link.ts', content: magicLinkHooks(magicLink) },
+    { path: 'src/pages/MagicLinkPage.tsx', content: MAGIC_LINK_PAGE },
+    { path: 'src/ui/MagicLink.tsx', content: magicLinkViews(styled, magicLink) },
   ];
   if (styled) {
     files.push(
       { path: 'src/styles/tokens.css', content: TOKENS_CSS },
       { path: 'src/styles/app.css', content: [APP_CSS, VERIFY_EMAIL_CSS, ...(magicLink ? [MAGIC_LINK_CSS] : []), ...(privateData ? [NOTES_CSS] : []), ...(agent ? [privateData ? ASSISTANT_CSS : ASSISTANT_SHARED_CSS + ASSISTANT_CSS] : [])].join('\n') },
-    );
-  }
-  if (magicLink) {
-    files.push(
-      { path: 'types/magic-link.ts', content: MAGIC_LINK_TYPES },
-      { path: 'src/auth/magic-link.ts', content: MAGIC_LINK_HOOKS },
-      { path: 'src/pages/MagicLinkPage.tsx', content: MAGIC_LINK_PAGE },
-      { path: 'src/ui/MagicLink.tsx', content: styled ? STYLED_MAGIC_LINK : PLAIN_MAGIC_LINK },
     );
   }
   if (privateData || agent) files.push({ path: 'db/schema.ts', content: schemaTs(privateData, agent) });
