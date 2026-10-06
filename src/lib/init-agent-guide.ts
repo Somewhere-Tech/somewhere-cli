@@ -58,8 +58,9 @@ normal data needs no API file. Scope: \`owner()\` per user, \`group()\` per team
 \`appRole()\` for staff; \`client\` names the browser's columns, and
 \`publicRead: { where }\` opens rows to visitors. When one write does not fit,
 such as a public form filing a row for an owner, keep the client and add one
-function for that write; do not make every table \`serverOnly()\`. Store the
-owner you look up from the public reference, never one from the body:
+function for that write; do not make every table \`serverOnly()\`. Its
+ownership step, where \`handle\` is the public intake address an owner opted
+into by claiming it (a private profile is not a recipient):
 
 \`\`\`ts
 const { data: [profile] } = await sw.db.server.from('profiles', { where: { handle }, limit: 1 });
@@ -67,9 +68,10 @@ if (!profile) return Response.json({ error: 'unknown handle' }, { status: 404 })
 await sw.db.server.insert('entries', { user_id: profile.user_id, title });
 \`\`\`
 
-The sender is not the owner. Validation, rate limits and the alert:
-\`somewhere docs recipe-signed-in-app\`. \`serverOnly()\` is for tables no browser
-reads.
+The owner comes from that lookup, never the body; the sender is not the
+owner. These lines are not a handler: validation, rate limits and the alert
+are in \`somewhere docs recipe-signed-in-app\`. Use \`serverOnly()\` only when every
+operation needs a function's own access check.
 Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw SQL \`sw.db.query(sql, params)\` runs as written (add \`WHERE
