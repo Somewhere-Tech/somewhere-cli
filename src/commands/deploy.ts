@@ -1186,8 +1186,10 @@ export function formatDeploySuccess(
   if (options.scope === 'functions') {
     headline = `${formatPublishSurface({ staticFiles: null, functions: options.functionCount })} deployed — site left untouched`;
   } else if (options.scope === 'static') {
+    // "uploaded", not "deployed": the count is the source this command sent,
+    // and the platform may keep some of it private (tsk_1108097a).
     headline =
-      `${staticLabel} deployed (${formatBytes(options.totalBytes)}) — functions left untouched`;
+      `${staticLabel} uploaded (${formatBytes(options.totalBytes)}) — functions left untouched`;
   } else {
     // The whole surface, in the shape preview and promote also print.
     const both = formatPublishSurface({
@@ -1195,7 +1197,7 @@ export function formatDeploySuccess(
       functions: options.functionCount,
     });
     headline =
-      `${staticFileCount === null && options.functionCount === 0 ? staticLabel : both} deployed (${formatBytes(options.totalBytes)})`;
+      `${staticFileCount === null && options.functionCount === 0 ? staticLabel : both} uploaded (${formatBytes(options.totalBytes)})`;
   }
 
   const responseUrl =
@@ -1404,9 +1406,9 @@ export function printExcludedFiles(
   if (publishNoticeSeen(targetDir)) return;
   info(
     dim(
-      'A deploy publishes your app — index.html, src/, public/, api/, db/, package.json and ' +
-        'the files they use. Notes, logs and scratch files in your project root stay on your machine. ' +
-        'To publish one on purpose: somewhere deploy --include <file>, or add a "!<file>" line to .somewhereignore.',
+      'Notes, logs and scratch files in your project root that nothing in your app uses stay on your machine. ' +
+        'Every other file in this folder, subfolders included, is uploaded with your app. ' +
+        'To publish one of these root files on purpose: somewhere deploy --include <file>, or add a "!<file>" line to .somewhereignore.',
     ),
   );
   markPublishNoticeSeen(targetDir);
