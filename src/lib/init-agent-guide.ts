@@ -74,8 +74,7 @@ await sw.db.server.insert('entries', { user_id: profile.user_id, owner_email: pr
 
 The owner comes from that lookup, never the body; the sender is not the
 owner. Rate limits and the alert are in \`somewhere docs recipe-signed-in-app\`.
-Use \`serverOnly()\` only when every operation needs a function's own access
-check.
+Use \`serverOnly()\` only when every operation needs a function's own access check.
 Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw SQL uses a separate raw database, never managed tables.

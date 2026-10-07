@@ -150,7 +150,8 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
 
   const workflowOrder = [
     'somewhere init --name <slug>',
-    'extend it using the README file map. Minimal/bare starters omit auth.',
+    'The default has sign-in; minimal/bare omit it.',
+    'The README maps\nthe files.',
     'npx @somewhere-tech/cli deploy',
     'somewhere docs <topic> --section <id>',
     'somewhere typecheck',
@@ -180,8 +181,10 @@ test('minimal starter is a small typed frontend, function, and schema', () => {
   }
   assert.match(agents, /Promise\.all/);
   // tsk_c8e60ff7: the generated client for normal data, one function for the
-  // exceptional write, the owner from the lookup, and caller checks on raw access.
-  assert.match(agents, /pages use the generated\n`somewhere:data` client[\s\S]*`owner\(\)` per user[\s\S]*add one\nfunction for that write[\s\S]*The owner comes from that lookup, never the body[\s\S]*authorize the caller in your function/);
+  // exceptional write, lookup-derived owner, and authorized structured server access.
+  assert.match(agents, /pages use the generated\n`somewhere:data` client[\s\S]*`owner\(\)` per user[\s\S]*add one\nfunction for that write[\s\S]*The owner comes from that lookup, never the body[\s\S]*authorize the caller and use `sw\.db\.server\.from`/);
+  assert.match(agents, /Raw SQL uses a separate raw database, never managed tables\./);
+  assert.match(agents, /`sw\.db\.server\.from` \/\n`insert` \/ `update` \/ `remove`; keep `owner\(\)`\/`group\(\)`/);
   assert.doesNotMatch(
     Object.values(collectFiles(dir).files).join('\n'),
     /\bany\b/,
