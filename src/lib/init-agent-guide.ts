@@ -81,7 +81,10 @@ Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
 operator per column). Raw SQL \`sw.db.query(sql, params)\` runs as written (add \`WHERE
 user_id = ?\`; managed projects refuse it). Use \`sw.db.server.query\` for managed
-raw access; authorize the caller in your function. Parallel reads: \`Promise.all\`.`;
+raw access; authorize the caller in your function. Parallel reads: \`Promise.all\`.
+
+After creating a schedule, run it now with \`somewhere cron run <id> --wait\`;
+do not wait for its scheduled time.`;
 
 export const SKILLS_POINTER = `Skills: \`${SKILLS_DIR}/\` — `
   + skillNames(BUNDLED_SKILLS_PACK).map((name) => `\`${name}\``).join(', ')

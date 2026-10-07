@@ -11,6 +11,8 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { createFeatureTemplate } from '../dist/lib/init-feature-template.js';
+import { resolveInitSelection } from '../dist/lib/init-features.js';
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), '..');
 const distIndex = join(repoRoot, 'dist', 'index.js');
@@ -181,8 +183,11 @@ test('cron create uses the linked project and explicit project overrides it', as
     const env = {HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url};
     const inferred = await run(['cron', 'create', '0 9 * * *', '/api/tick'], env, project);
     assert.equal(inferred.status, 0, inferred.stderr);
+    assert.match(inferred.stdout, /somewhere cron run cron_new --project linked-project --wait/);
+    assert.match(inferred.stdout, /Run it now; do not wait for its scheduled time/);
     const explicit = await run(['cron', 'create', '0 9 * * *', '/api/tick', '-p', 'explicit-project'], env, project);
     assert.equal(explicit.status, 0, explicit.stderr);
+    assert.match(explicit.stdout, /somewhere cron run cron_new --project explicit-project --wait/);
     const missing = await run(['cron', 'create', '0 9 * * *', '/api/tick'], env, home);
     assert.notEqual(missing.status, 0);
     assert.match(missing.stderr, /No project/);
@@ -190,6 +195,31 @@ test('cron create uses the linked project and explicit project overrides it', as
   assert.equal(calls.length, 2);
   assert.equal(calls[0].project_id, 'linked-project');
   assert.equal(calls[1].project_id, 'explicit-project');
+});
+
+test('cron creation leaves JSON unchanged and never queues a run', async () => {
+  const home = credentialHome('sw-cron-breadcrumb-json-');
+  const calls = [];
+  const receipt = { cron_id: 'cron_actual', schedule: '0 9 * * *', timezone: 'UTC', next_run: '2026-10-08T09:00:00Z' };
+  await withFixture((params) => {
+    calls.push(params.name);
+    return toolSuccess(receipt);
+  }, async (url) => {
+    const result = await run(['cron', 'create', '0 9 * * *', '/api/tick', '--project', 'platform', '--json'],
+      { HOME: home, USERPROFILE: home, SOMEWHERE_MCP_URL: url });
+    assert.equal(result.status, 0, result.stderr);
+    assert.deepEqual(JSON.parse(result.stdout), { ok: true, data: receipt });
+    assert.doesNotMatch(result.stdout, /somewhere cron run|Run it now/);
+  });
+  assert.deepEqual(calls, ['cron_create']);
+});
+
+test('both starter UI modes point from creating a schedule to running it now', () => {
+  for (const ui of ['styled', 'headless']) {
+    const files = createFeatureTemplate(resolveInitSelection('auth', ui), { appName: 'Cron notes' });
+    const guide = files.find(file => file.path === 'AGENTS.md').content;
+    assert.match(guide, /After creating a schedule, run it now with `somewhere cron run <id> --wait`;\ndo not wait for its scheduled time\./);
+  }
 });
 
 // tsk_b07f1dac item 3: `cron list` labelled every schedule UTC and `cron update

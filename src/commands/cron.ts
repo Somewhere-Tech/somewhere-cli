@@ -1,5 +1,6 @@
 import { Command } from 'commander';
 import { loadProjectConfig } from '../lib/config.js';
+import { shellQuote } from '../lib/next-actions.js';
 import { callPlatformTool } from '../lib/platform-tools.js';
 import {
   compactRecord,
@@ -533,8 +534,9 @@ export function registerCron(program: Command): void {
     .option('--json', 'Print the complete response as JSON')
     .action(async (schedule: string, handler: string, opts: CronCreateOptions) => {
       try {
+        const project = resolveProjectRef(opts.project);
         const args = compactRecord([
-          ['project_id', resolveProjectRef(opts.project)],
+          ['project_id', project],
           ['schedule', schedule],
           ['handler', handler],
           ['name', opts.name],
@@ -544,7 +546,12 @@ export function registerCron(program: Command): void {
           // so the CLI never converts an offset or second-guesses the name.
           ['timezone', opts.timezone],
         ]);
-        await runCronTool('cron_create', args, opts.json, (value) => printCronMutation('Scheduled trigger created', value));
+        await runCronTool('cron_create', args, opts.json, (value) => {
+          printCronMutation('Scheduled trigger created', value);
+          const data = unwrapPlatformData(value);
+          const id = isRecord(data) ? cronRowId(data) : null;
+          if (id) console.log(dim(`Run it now; do not wait for its scheduled time:\n  somewhere cron run ${shellQuote(id)} --project ${shellQuote(project)} --wait`));
+        });
       } catch (err) {
         error(err instanceof Error ? err.message : String(err), err);
         process.exitCode = 1;
