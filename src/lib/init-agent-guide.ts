@@ -5,14 +5,13 @@ import { SKILLS_DIR, skillNames } from './skills-pack.js';
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
-\`somewhere init --name <slug>\` in an empty folder writes a local React +
-TypeScript starter without login. The default includes working sign-in;
-extend it using the README file map. Minimal/bare starters omit auth.
-\`init --catalog --json\` lists modules for \`--features\`. No account yet?
+\`somewhere init --name <slug>\` creates a React + TypeScript starter without
+logging in. The default has sign-in; minimal/bare omit it. The README maps
+the files. \`init --catalog --json\` lists \`--features\` modules.
 \`npx @somewhere-tech/cli deploy\` publishes a temporary app and prints its live
-URL, claim URL, and expiry. Login is needed for account-owned operations,
-the email test inbox and cron. On a hosted VM, after consent, \`somewhere login\` prints a
-code a human approves in their browser; the machine stays signed in.
+URL, claim URL and expiry. Login is needed for account-owned operations,
+the email test inbox and cron. On a hosted VM, \`somewhere login\` prints a code
+for human approval in a browser; the machine stays signed in.
 For a reference, use \`somewhere docs <topic> --section <id>\` (MCP: \`docs({ topic })\`, \`catalog\`).
 
 After every change:
@@ -79,13 +78,11 @@ Use \`serverOnly()\` only when every operation needs a function's own access
 check.
 Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
-operator per column). Raw SQL runs only against a separate raw database and
-never accesses managed tables. For an exceptional managed operation,
-authorize the caller and use \`sw.db.server.from\` / \`insert\` / \`update\` /
-\`remove\`; keep \`owner()\`/\`group()\` on the table. Parallel reads: \`Promise.all\`.
+operator per column). Raw SQL uses a separate raw database, never managed tables.
+For cross-user managed work, authorize the caller and use \`sw.db.server.from\` /
+\`insert\` / \`update\` / \`remove\`; keep \`owner()\`/\`group()\`. Parallel reads: \`Promise.all\`.
 
-After creating a schedule, run it now with \`somewhere cron run <id> --wait\`;
-do not wait for its scheduled time.`;
+Test schedules now: \`somewhere cron run <id> --wait\`. Do not wait for it to fire.`;
 
 export const SKILLS_POINTER = `Skills: \`${SKILLS_DIR}/\` — `
   + skillNames(BUNDLED_SKILLS_PACK).map((name) => `\`${name}\``).join(', ')
