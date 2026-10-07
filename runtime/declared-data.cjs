@@ -102,7 +102,12 @@ var require_declared_data_contract = __commonJS({
       else if (value.k === "a") value.p.forEach((item) => policyMembershipTables(item, out));
       else if (value.k === "p") policyMembershipTables(value.p, out);
     }
-    function canonicalize2(schema, intents, scopes) {
+    function validateInsertReceiptCapability(value) {
+      if (value !== void 0 && value !== "insert-v1") fail("insert receipt capability");
+      return value;
+    }
+    function canonicalize2(schema, intents, scopes, insertReceiptCapability) {
+      validateInsertReceiptCapability(insertReceiptCapability);
       record(schema, "schema");
       record(intents, "intents");
       record(scopes, "scopes");
@@ -258,7 +263,7 @@ var require_declared_data_contract = __commonJS({
           if (!relation || !child || child.policy?.k !== "p" || child.policy.v !== relation.fk || child.policy.t !== table.name) fail(`${table.name}.links.children`);
         }
       }
-      return JSON.stringify({ version: 1, tables });
+      return JSON.stringify({ version: 1, tables, ...insertReceiptCapability === void 0 ? {} : { insert_receipt: insertReceiptCapability } });
     }
     function columnType(column) {
       const type = { integer: "number", bigint: "string", number: "number", text: "string", timestamp: "string", boolean: "boolean", json: "Json", blob: "number[]" }[column.t];
@@ -273,11 +278,69 @@ var require_declared_data_contract = __commonJS({
       return values.length ? `{ ${values.join("; ")} }` : "Record<string, never>";
     }
     var LINK_CLIENT_RUNTIME = 'const b64url=s=>btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");const createLink=async(table,id,options={})=>{const result=await invoke(table,"link_create",{id,access:options.access,...(options.expiresInDays===undefined?{}:{expires_in_days:options.expiresInDays})});const route=typeof options.returnTo==="string"?options.returnTo:location.pathname+location.search+location.hash;return{link_id:result.link_id,url:location.origin+"/__sw/link#"+result.secret+"."+b64url(route),expires_at:result.expires_at}};const linkDoor=async(path,init)=>{const response=await fetch(path,{credentials:"same-origin",cache:"no-store",...init});const payload=await response.json().catch(()=>({error:"INVALID_DATA_RESPONSE",message:"Link operation returned an invalid response"}));if(!response.ok)throw new DataError(response.status,payload);return payload};const links=Object.freeze({opened:()=>{try{const list=JSON.parse(sessionStorage.getItem("__sw_links_opened")||"[]");return Array.isArray(list)?list:[]}catch(_){return[]}},sessions:async()=>{const payload=await linkDoor("/__sw/link/sessions",{method:"GET"});return{data:payload.data}},forget:async linkId=>{await linkDoor("/__sw/link/forget",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(linkId===undefined?{}:{link_id:linkId})})}});const linkedView=spec=>link=>{if(typeof link!=="string"||!/^lnk_[0-9a-f]{32}$/.test(link))throw new DataError(400,{error:"DATA_INPUT_INVALID",message:"linked() needs a link id"});const view={};for(const[table,canUpdate,children]of spec){const relations={};const root={get:id=>invoke(table,"get",{id,link})};if(canUpdate)root.update=(id,values)=>invoke(table,"update",{id,values,link});for(const[relation,child,canCreate,canUpdateChild]of children){relations[relation]=Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id,link})});const childOps={};if(canCreate)childOps.create=values=>invoke(child,"create",{values,link});if(canUpdateChild)childOps.update=(id,values)=>invoke(child,"update",{id,values,link});if(canCreate||canUpdateChild)view[child]=Object.freeze(childOps)}if(children.length)root.relations=Object.freeze(relations);view[table]=Object.freeze(root)}return Object.freeze(view)};\n';
-    function describeDataClient2(authority, contract_digest) {
-      const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes) : canonicalize2({}, {}, {});
+    var INSERT_CLIENT_RUNTIME = String.raw`
+function insertReceipt(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || Object.keys(value).sort().join(',') !== 'created_at,refuse_until,replayed,result_until'
+    || typeof value.replayed !== 'boolean' || !Number.isSafeInteger(value.created_at) || value.created_at <= 0
+    || value.result_until !== value.created_at + 86400000 || value.refuse_until !== value.created_at + 691200000) return null;
+  return Object.freeze({...value});
+}
+function insertError(status, payload) {
+  const error = new DataError(status, payload);
+  if (payload && ['committed', 'unknown', 'read_failed', 'not_committed'].includes(payload.outcome)) error.outcome = payload.outcome;
+  if (payload && payload.write_committed === true) error.write_committed = true;
+  error.retry = false; error.retryable = false;
+  const receipt = insertReceipt(payload && payload.idempotency);
+  if (receipt) error.idempotency = receipt;
+  return error;
+}
+async function createWithReceipt(table, values, extra, eligible) {
+  // create takes only values: the retry key is a private random nonce this client allocates,
+  // never a caller choice. Anything more refuses before the network.
+  if (extra.length !== 0) throw new DataError(400, {error:'DATA_INPUT_INVALID', message:'create takes only the values to insert. Nothing was sent.'});
+  if (!eligible) return invoke(table, 'create', {values});
+  // 128 random bits as 32 lowercase hex characters: the platform's exact client key format.
+  const key = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2,'0')).join('');
+  const createdAt = Date.now();
+  // Serialize once: retries never observe later caller mutations or re-run toJSON.
+  const body = JSON.stringify({values, contract, table, operation:'create', idempotency_key:key});
+  let handle;
+  const attach = target => { Object.defineProperty(target, 'request', {value:handle, enumerable:false, writable:false, configurable:false}); return target; };
+  const send = async () => {
+    const now = Date.now();
+    if (!Number.isFinite(createdAt) || !Number.isFinite(now) || now < createdAt || now >= createdAt + 691200000) {
+      throw attach(insertError(410, {error:'IDEMPOTENCY_RETRY_EXPIRED', message:'This request can no longer be retried safely. Nothing was sent.'}));
+    }
+    let response, payload;
+    try { response = await fetch('/__sw/data', {method:'POST', credentials:'same-origin', headers:{'Content-Type':'application/json'}, body}); }
+    catch (_) { throw attach(insertError(503, {error:'DB_WRITE_OUTCOME_UNKNOWN', message:'The write outcome could not be confirmed. Retry this request with its original key.', outcome:'unknown'})); }
+    try { payload = await response.json(); }
+    catch (_) { throw attach(insertError(response.status, {error:'INVALID_DATA_RESPONSE', message:'The write response could not be read. Retry this request with its original key.', outcome:'unknown'})); }
+    if (!response.ok) throw attach(insertError(response.status, payload));
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload) || !insertReceipt(payload.idempotency)) {
+      // A successful old/malformed response cannot establish receipt protection.
+      throw insertError(502, {error:'IDEMPOTENCY_RECEIPT_INVALID', message:'The write succeeded, but retry protection could not be confirmed. Do not retry it.', outcome:'committed', write_committed:true});
+    }
+    payload.idempotency = insertReceipt(payload.idempotency);
+    return attach(payload);
+  };
+  handle = Object.freeze({key, createdAt, retry:send});
+  return send();
+}
+`;
+    var INSERT_CLIENT_DECLARATIONS = `
+  export interface InsertReceipt { readonly replayed: boolean; readonly created_at: number; readonly result_until: number; readonly refuse_until: number; }
+  export interface InsertRequest<T> { readonly key: string; readonly createdAt: number; retry(): Promise<T>; }
+  export type InsertResult<T> = T & { readonly idempotency: InsertReceipt; readonly request: InsertRequest<InsertResult<T>> };
+`;
+    function describeDataClient2(authority, contract_digest, insertReceiptCapability, localTypes = false) {
+      const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes, insertReceiptCapability) : canonicalize2({}, {}, {}, insertReceiptCapability);
       const { tables } = JSON.parse(canonical);
       const declarations = [];
       const runtimeTables = [];
+      const receiptTables = [];
+      const receiptCapable = insertReceiptCapability === "insert-v1";
       const linkedDeclarations = [];
       const linkedSpec = [];
       for (const table of tables) {
@@ -310,7 +373,9 @@ var require_declared_data_contract = __commonJS({
         const mutation = client.read === false ? "{ count: number; changes: number }" : `{ data: ${row} | null; count: number; changes: number }`;
         if (client.create !== null) {
           const required = table.policy?.k === "p" ? /* @__PURE__ */ new Set([table.policy.v]) : /* @__PURE__ */ new Set();
-          operations.push(`create(values: ${shape(columns, client.create, "create", required)}): Promise<${mutation}>`);
+          const eligible = columns.some((column) => column.n === primaryKey && column.t === "integer") && !columns.some((column) => column.t === "blob");
+          if (receiptCapable && eligible) receiptTables.push(name);
+          operations.push(`create(values: ${shape(columns, client.create, "create", required)}): Promise<${receiptCapable && eligible ? `InsertResult<${mutation}>` : mutation}>`);
           methods.push("create");
         }
         if (client.update !== null) {
@@ -374,19 +439,22 @@ var require_declared_data_contract = __commonJS({
       }
       const declaration = `declare module ${JSON.stringify("somewhere:data")} {
   export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
-  export class DataError extends Error { readonly status: number; readonly code: string | null; constructor(status: number, payload: unknown); }
+${receiptCapable ? localTypes ? INSERT_CLIENT_DECLARATIONS.replace("readonly idempotency:", "readonly idempotency?:").replace("readonly request:", "readonly request?:") : INSERT_CLIENT_DECLARATIONS : ""}  export class DataError extends Error { readonly status: number; readonly code: string | null;${receiptCapable ? " readonly request?: InsertRequest<unknown>; readonly outcome?: string; readonly write_committed?: boolean; readonly retry?: false; readonly retryable?: false; readonly idempotency?: InsertReceipt;" : ""} constructor(status: number, payload: unknown); }
   export const data: { ${declarations.join(";\n    ")} };
 }
 `;
       const runtime = `const contract=${JSON.stringify(contract_digest)};
 class DataError extends Error{constructor(status,payload){super(payload&&typeof payload.message==="string"?payload.message:payload&&typeof payload.error==="string"?payload.error:"Data operation failed");this.name="DataError";this.status=status;this.code=payload&&typeof payload.error==="string"?payload.error:null}}
 const invoke=async(table,operation,input)=>{const response=await fetch("/__sw/data",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,contract,table,operation})});const payload=await response.json().catch(()=>{throw new DataError(response.status,{error:"INVALID_DATA_RESPONSE",message:"Data operation returned an invalid response"})});if(!response.ok)throw new DataError(response.status,payload);return payload};
-${linkedSpec.length ? LINK_CLIENT_RUNTIME : ""}const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):operation==="createLink"?(id,options)=>createLink(table,id,options):operation==="links"?id=>invoke(table,"link_list",{id}):operation==="revokeLink"?(id,link_id)=>invoke(table,"link_revoke",{id,link_id}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];}).concat(${linkedSpec.length ? `[["links",links],["linked",linkedView(${JSON.stringify(linkedSpec)})]]` : "[]"})));
+${receiptCapable ? INSERT_CLIENT_RUNTIME + "const receiptTables=" + JSON.stringify(receiptTables) + ";\n" : ""}${linkedSpec.length ? LINK_CLIENT_RUNTIME : ""}const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?${receiptCapable ? "(values,...extra)=>createWithReceipt(table,values,extra,receiptTables.includes(table))" : "values=>invoke(table,operation,{values})"}:operation==="update"?(id,values)=>invoke(table,operation,{id,values}):operation==="createLink"?(id,options)=>createLink(table,id,options):operation==="links"?id=>invoke(table,"link_list",{id}):operation==="revokeLink"?(id,link_id)=>invoke(table,"link_revoke",{id,link_id}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];}).concat(${linkedSpec.length ? `[["links",links],["linked",linkedView(${JSON.stringify(linkedSpec)})]]` : "[]"})));
 export{data,DataError};
 `;
-      return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration } };
+      return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration, ...insertReceiptCapability === void 0 ? {} : { insert_receipt: insertReceiptCapability } } };
     }
-    module2.exports = { canonicalize: canonicalize2, describeDataClient: describeDataClient2 };
+    function describeDataClientLocalDeclaration2(authority) {
+      return describeDataClient2(authority, "", "insert-v1", true).declaration;
+    }
+    module2.exports = { canonicalize: canonicalize2, describeDataClient: describeDataClient2, describeDataClientLocalDeclaration: describeDataClientLocalDeclaration2, validateInsertReceiptCapability };
   }
 });
 
@@ -399,9 +467,9 @@ var require_typed_data = __commonJS({
     var MODULE_NAME = "somewhere:data";
     var CLIENT_FILE2 = "__somewhere_data.d.ts";
     var MANIFEST_PATH = "_internal/declared-data.json";
-    function generateDataClient2(authority) {
-      const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes) : canonicalize2({}, {}, {});
-      return describeDataClient2(authority, crypto2.createHash("sha256").update(canonical).digest("hex"));
+    function generateDataClient2(authority, insertReceiptCapability) {
+      const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes, insertReceiptCapability) : canonicalize2({}, {}, {}, insertReceiptCapability);
+      return describeDataClient2(authority, crypto2.createHash("sha256").update(canonical).digest("hex"), insertReceiptCapability);
     }
     function virtualDataPlugin(analysis) {
       return {
@@ -619,7 +687,15 @@ interface SomewhereDbReadOptions {
   has?: Readonly<Record<string, SomewhereDbWhere>> | null;
 }
 interface SomewhereDbCountOptions { where?: SomewhereDbWhere | null }
-interface SomewhereDbInsertOptions { onConflict?: 'ignore' | 'update' | null }
+interface SomewhereDbPlainInsertOptions { onConflict?: 'ignore' | 'update' | null }
+// idempotencyKey: an explicit key (16-128 of A-Z a-z 0-9 - _) for a single plain insert by a
+// signed-in user or visitor on a table keyed by id() with no blob() column. Any other insert
+// given a key refuses before anything runs. Eligible inserts without one get a fresh key.
+interface SomewhereDbInsertOptions extends SomewhereDbPlainInsertOptions { idempotencyKey?: string }
+interface SomewhereDbReceipt { readonly replayed: boolean; readonly created_at: number; readonly result_until: number; readonly refuse_until: number }
+// Process-local: retry() repeats this exact request with the same key under the current
+// context's authority, until eight days after createdAt. It never runs by itself.
+interface SomewhereDbInsertRequest<R> { readonly key: string; readonly createdAt: number; retry(): Promise<R> }
 type SomewhereDbValues = Readonly<Record<string, __SomewhereJson>>;
 type SomewhereDbIncrement = Readonly<Record<string, number>>;
 type SomewhereDbUpdate = {
@@ -630,7 +706,7 @@ type SomewhereDbUpdate = {
 );
 interface SomewhereDbRemove { where?: SomewhereDbWhere | null }
 type SomewhereDbWriteIntent =
-  | { op: 'insert'; table: string; values: SomewhereDbValues; options?: SomewhereDbInsertOptions | null }
+  | { op: 'insert'; table: string; values: SomewhereDbValues; options?: SomewhereDbPlainInsertOptions | null }
   | ({ op: 'update'; table: string } & SomewhereDbUpdate)
   | { op: 'remove'; table: string; where?: SomewhereDbWhere | null };
 // db/schema.ts's tables, one entry each, generated beside this declaration
@@ -679,6 +755,12 @@ interface SomewhereDbResult<Row = Record<string, unknown>> {
   live_delivery?: { delivery: 'invalidated' }
     | { delivery: 'resync_required'; reason: string };
 }
+// A keyed insert's result (whether an insert is keyed is decided at run time): the receipt
+// bounds, and a non-enumerable request handle. A replay carries the original values.
+interface SomewhereDbInsertResult<Row = Record<string, unknown>> extends SomewhereDbResult<Row> {
+  idempotency?: SomewhereDbReceipt;
+  readonly request?: SomewhereDbInsertRequest<SomewhereDbInsertResult<Row>>;
+}
 interface SomewhereRawDbStatement {
   sql: string;
   params?: readonly unknown[];
@@ -695,7 +777,7 @@ interface SomewhereServerDb {
     table: T, options?: SomewhereDbReadOptionsFor<T, C, I> | null): Promise<SomewhereDbResult<SomewhereDbReadRow<T, C, I>>>;
   count(table: SomewhereDbTable, options?: SomewhereDbCountOptions | null): Promise<{ data: number; error: null }>;
   // Server authority names row identity (owner column or shared authorship) explicitly on insert.
-  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'serverInsert', SomewhereDbValues>, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'serverInsert', SomewhereDbValues>, options?: SomewhereDbPlainInsertOptions | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   update<T extends SomewhereDbTable>(table: T, spec: SomewhereDbUpdateFor<T, 'serverSet'>): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   remove<T extends SomewhereDbTable>(table: T, spec?: SomewhereDbRemove | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   // Closed atomic batch, 1-100 intents checked before execution. No callback,
@@ -705,7 +787,7 @@ interface SomewhereServerDb {
 }
 interface SomewhereCallerDb extends Omit<SomewhereServerDb, 'from' | 'count' | 'insert' | 'update'> {
   // The platform composes row identity from the verified user.
-  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'insert', SomewhereDbValues>, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
+  insert<T extends SomewhereDbTable>(table: T, values: __SomewhereDeclared<T, 'insert', SomewhereDbValues>, options?: SomewhereDbInsertOptions | null): Promise<SomewhereDbInsertResult<SomewhereDbRow<T>>>;
   update<T extends SomewhereDbTable>(table: T, spec: SomewhereDbUpdateFor<T, 'set'>): Promise<SomewhereDbResult<SomewhereDbRow<T>>>;
   from<T extends SomewhereDbTable, const C extends readonly SomewhereDbColumn<T>[] = readonly SomewhereDbColumn<T>[], const I extends readonly SomewhereDbRelationName<T>[] = []>(
     table: T, options?: (SomewhereDbReadOptionsFor<T, C, I> & { asServer?: true }) | null): Promise<SomewhereDbResult<SomewhereDbReadRow<T, C, I>>>;
@@ -3634,6 +3716,7 @@ __export(declared_data_vendor_entry_exports, {
   declaredTablesFromFiles: () => declaredTablesFromFiles,
   filesDeclarationFromFiles: () => filesDeclarationFromFiles,
   generateFromFiles: () => generateFromFiles,
+  localDeclarationFromFiles: () => localDeclarationFromFiles,
   runtimeDeclarationFromFiles: () => runtimeDeclarationFromFiles
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
@@ -4117,7 +4200,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     if (declaredScope.kind !== "owner" || typeof declaredScope.visitors !== "boolean") return null;
     if (declaredScope.visitors) visitors = true;
   }
-  let browser = {};
+  let browser = primaryKeys.length === 1 ? { primaryKey: primaryKeys[0] } : {};
   if (Object.prototype.hasOwnProperty.call(shape, "client")) {
     if (!scope || typeof scope !== "object" || primaryKeys.length !== 1) return null;
     const sc = scope;
@@ -4132,7 +4215,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     });
     if (!parsed.ok) return null;
     if (Array.isArray(parsed.permissions.read) && !parsed.permissions.read.includes(primaryKeys[0])) return null;
-    browser = { client: parsed.permissions, clientPrimaryKey: primaryKeys[0] };
+    browser = { ...browser, client: parsed.permissions, clientPrimaryKey: primaryKeys[0] };
   }
   if (scope !== null && typeof scope === "object" && scope.kind === "member") {
     const member = bakedMemberFromDeclared(scope);
@@ -6589,6 +6672,7 @@ function declaredRolesFromSource(files) {
 }
 
 // declared-data-vendor-entry.js
+var import_declared_data_contract2 = __toESM(require_declared_data_contract());
 var import_typed_data = __toESM(require_typed_data());
 var import_runtime_types = __toESM(require_runtime_types());
 var import_groups_types = __toESM(require_groups_types());
@@ -6599,6 +6683,10 @@ var import_typed_files2 = __toESM(require_typed_files());
 function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? (0, import_typed_data.generateDataClient)(authority) : void 0;
+}
+function localDeclarationFromFiles(files) {
+  const authority = clientAuthorityFromSource(files);
+  return authority ? (0, import_declared_data_contract2.describeDataClientLocalDeclaration)(authority) : void 0;
 }
 function runtimeDeclarationFromFiles(files) {
   return (0, import_runtime_types.runtimeContextDeclaration)((0, import_groups_types.declaredRoles)(declaredRolesFromSource(files)));
@@ -6619,5 +6707,6 @@ function filesDeclarationFromFiles(files) {
   declaredTablesFromFiles,
   filesDeclarationFromFiles,
   generateFromFiles,
+  localDeclarationFromFiles,
   runtimeDeclarationFromFiles
 });

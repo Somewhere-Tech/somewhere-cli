@@ -1,16 +1,16 @@
 {
   "esbuild": "0.24.0",
   "source_files": {
-    "worker/containers/compile/declared-data-contract.cjs": "abdf0a0f238f9d7ecccc8aa3ede7cd25778194d0b9c68cc6c44aa776de46d122",
+    "worker/containers/compile/declared-data-contract.cjs": "dc5597c4b138a8450927b9881982769e08d558f73bb2c635de5bcbe17da4fc2c",
     "worker/containers/compile/groups-types.cjs": "f0f38ca6f160561f997b20af44763bd07232deb2668a536cd52c1974fcfed2c8",
-    "worker/containers/compile/runtime-types.cjs": "7d2e647e6a7301b4158f8d45d5c52da9aac3b6fb6f8118be5a5cde62c40462fc",
+    "worker/containers/compile/runtime-types.cjs": "75e3e32654c3795915ddc56d5ff9f7088a305db8e2006c764f24b436cdae22b7",
     "worker/containers/compile/schema-types.cjs": "97941a4f80f50f4a48b828a6a2695f6f0c606ab6e74b4511fbb99e786dc4f0c4",
-    "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
+    "worker/containers/compile/typed-data.cjs": "1c8bec853fbee4ffd34c651076a4e1f4d8b18c0c2be5e99e31df7c9283207627",
     "worker/containers/compile/typed-files.cjs": "a0b1818afbc7673f84583c76436a3b3ca1d1fdf63d8d8db138b36646103f0708",
     "worker/src/services/jobs/limits.ts": "f806f045dcb92f7da1e830aab65b74185ebd3071aeade368db776f3a0546de38",
-    "worker/src/utils/authority/scope-enforcement.ts": "b219c1b38b4d5ffa7067b0ab9349efec17c1001195a23c323ec40ae6fe4f7da6",
+    "worker/src/utils/authority/scope-enforcement.ts": "35735e46295d3a6a38ebdf87e5325721e097355b90efd80deba520792828031f",
     "worker/src/utils/db-schema-deploy/bigint-text.ts": "ef3f581daeecb234d2c1e288bc09495a6facd7b0354b300134918f6c0cf10cc2",
-    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "25916e9e5174a3959e5b3f61ee1bc4a3ff3c0de01b155e19be97c836431cb8ec",
+    "worker/src/utils/db-schema-deploy/client-contract-source.ts": "b56cc7f2f6dd5c05e02534bc6fabdf8afe09595ab5e56fad882d51871423277e",
     "worker/src/utils/db-schema-deploy/client-permissions.ts": "9c0aecd4a9698a9813aa8ec3315c1a8c99ba2fd1150d6d820a86ea3ec7b9890b",
     "worker/src/utils/db-schema-deploy/extract-schema-app-roles.ts": "7f0e6ce3e213d56b678a60de133d10ed6f51f3a42ba73071d821d42a48c676a2",
     "worker/src/utils/db-schema-deploy/extract-schema-bindings.ts": "34a2bf98da533afa60cc3fe46c3ff029300f06fef0bfecd98e028bff181ca1b3",
@@ -27,5 +27,5 @@
     "worker/src/utils/managed-groups/errors.ts": "4830b1ad7357a79760b0bcc68884e562cfbc07d12a37cc73651a6fcb256d682f",
     "worker/src/utils/managed-groups/policy.ts": "2259a883645c8bfd607ead7c37387f3ffd42ac9dfb86722c72b224adb498511e"
   },
-  "sha256": "849e3664a55c1c5fb67faf54b0866db9b1d10b10807dd8a5631893a775a626d8"
+  "sha256": "b1331bdb68e3d6c564986351609f7ebe8276001036e40281521de2fedfd71ee9"
 }

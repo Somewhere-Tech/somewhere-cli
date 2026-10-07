@@ -20,6 +20,7 @@ const result = await esbuild.build({
   absWorkingDir: root,
   stdin: {
     contents: `import { clientAuthorityFromSource, declaredFilesFromSource, declaredRolesFromSource, schemaAuthorityFromSource } from './worker/src/utils/db-schema-deploy/client-contract-source.ts';
+import { describeDataClientLocalDeclaration } from './worker/containers/compile/declared-data-contract.cjs';
 import { generateDataClient } from './worker/containers/compile/typed-data.cjs';
 import { declaredTablesDeclaration, runtimeContextDeclaration } from './worker/containers/compile/runtime-types.cjs';
 import { declaredRoles } from './worker/containers/compile/groups-types.cjs';
@@ -30,6 +31,10 @@ export { CLIENT_FILE as FILES_DECLARATION_FILE } from './worker/containers/compi
 export function generateFromFiles(files) {
   const authority = clientAuthorityFromSource(files);
   return authority ? generateDataClient(authority) : undefined;
+}
+export function localDeclarationFromFiles(files) {
+  const authority = clientAuthorityFromSource(files);
+  return authority ? describeDataClientLocalDeclaration(authority) : undefined;
 }
 export function runtimeDeclarationFromFiles(files) {
   return runtimeContextDeclaration(declaredRoles(declaredRolesFromSource(files)));

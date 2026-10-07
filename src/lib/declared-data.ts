@@ -33,6 +33,7 @@ const require = createRequire(import.meta.url);
 
 interface DeclaredDataGenerator {
   generateFromFiles(files: Record<string, string>): DeclaredDataClient | undefined;
+  localDeclarationFromFiles(files: Record<string, string>): string | undefined;
   declaredTablesFromFiles(files: Record<string, string>): string;
   runtimeDeclarationFromFiles(files: Record<string, string>): string;
   filesDeclarationFromFiles(files: Record<string, string>): string | undefined;
@@ -88,6 +89,7 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
   generatedContents(filesPath);
   let client: DeclaredDataClient | undefined;
   // Server reads and writes of the declared tables are typed from the same schema.
+  let localDeclaration: string | undefined;
   let tables: string;
   let runtimeDeclaration: string;
   let filesDeclaration: string | undefined;
@@ -95,6 +97,7 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
   try {
     const files = { 'db/schema.ts': readFileSync(schemaPath, 'utf8') };
     client = generator.generateFromFiles(files);
+    localDeclaration = generator.localDeclarationFromFiles(files);
     tables = generator.declaredTablesFromFiles(files);
     runtimeDeclaration = generator.runtimeDeclarationFromFiles(files);
     filesDeclaration = generator.filesDeclarationFromFiles(files);
@@ -106,7 +109,7 @@ export function prepareDeclaredData(projectDir: string): LocalDeclaredData | und
     throw error;
   }
   const declaration = GENERATED_DATA_HEADER + runtimeDeclaration + tables
-    + generator.ENDPOINT_DECLARATION + SW_ENDPOINT_GLOBAL + generator.SCHEMA_DECLARATION + (client?.declaration ?? '');
+    + generator.ENDPOINT_DECLARATION + SW_ENDPOINT_GLOBAL + generator.SCHEMA_DECLARATION + (localDeclaration ?? '');
   if (declaration !== previous) writeFileSync(declarationPath, declaration);
   // Only declared collections exist on somewhere:files; with none, the module is
   // left undeclared so an import of it fails the check exactly as the deploy does.
