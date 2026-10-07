@@ -68,7 +68,7 @@ var require_declared_data_contract = __commonJS({
       }
       if (value.k === "a" && keys === "k,p" && Array.isArray(value.p) && value.p.length === 2) {
         const left = policy(value.p[0], label), right = policy(value.p[1], label);
-        if (left.k !== "o" || right.k !== "m") fail(label);
+        if (left.k !== "o" || !["m", "g", "r"].includes(right.k)) fail(label);
         return { k: "a", p: [left, right] };
       }
       if (value.k === "g" && ["c,k,roles", "c,generation,k,roles"].includes(keys) && identifier.test(value.c)) {
@@ -130,7 +130,7 @@ var require_declared_data_contract = __commonJS({
         const pk = table.clientPrimaryKey;
         if (!seen.has(pk) || !["integer", "text"].includes(columns.find((column) => column.n === pk).t)) fail(`${name} primary key`);
         const input = table.client;
-        if (Object.keys(input).some((key) => !["read", "publicRead", "create", "update", "delete", "identity"].includes(key))) fail(`${name} permissions`);
+        if (Object.keys(input).some((key) => !["read", "publicRead", "create", "update", "delete", "identity", "links"].includes(key))) fail(`${name} permissions`);
         const read = typeof input.read === "boolean" ? input.read : fields(input.read, seen, `${name}.read`);
         if (Array.isArray(read) && !read.includes(pk)) fail(`${name}.read must include the primary key`);
         let publicRead = input.publicRead;
@@ -186,13 +186,31 @@ var require_declared_data_contract = __commonJS({
         if (normalizedPolicy?.k === "g" && create !== null && !create.includes(normalizedPolicy.c)) fail(`${name}.policy group create`);
         if (normalizedPolicy?.k === "a") {
           owner = normalizedPolicy.p[0].c;
-          if ([...create || [], ...update || []].includes(owner) || (update || []).some((field) => normalizedPolicy.p[1].m.g.includes(field))) fail(`${name}.policy identity writes`);
+          const branch = normalizedPolicy.p[1];
+          const fixed = branch.k === "m" ? branch.m.g : branch.k === "g" ? [branch.c] : [];
+          if ([...create || [], ...update || []].includes(owner) || (update || []).some((field) => fixed.includes(field))) fail(`${name}.policy identity writes`);
+          if (branch.k === "g" && create !== null && !create.includes(branch.c)) fail(`${name}.policy group create`);
         }
         if (normalizedPolicy?.k === "p" && create !== null && !create.includes(normalizedPolicy.v)) fail(`${name}.policy parent create`);
+        let links = null;
+        if (input.links !== void 0) {
+          record(input.links, `${name}.links`);
+          if (Object.keys(input.links).sort().join() !== "children,edit,maxDays,read") fail(`${name}.links`);
+          if (!(intent === "scoped" && !visitors) && normalizedPolicy?.k !== "a") fail(`${name}.links owner`);
+          const readable = read === true ? columns.filter((column) => column.n !== author).map((column) => column.n) : read || [];
+          const linkRead = fields(input.links.read, new Set(readable), `${name}.links.read`);
+          if (!linkRead.includes(pk)) fail(`${name}.links.read must include the primary key`);
+          const linkEdit = fields(input.links.edit, new Set(update || []), `${name}.links.edit`, true);
+          const children = input.links.children;
+          if (!Array.isArray(children) || children.some((child) => typeof child !== "string" || !identifier.test(child)) || new Set(children).size !== children.length) fail(`${name}.links.children`);
+          const maxDays = input.links.maxDays;
+          if (maxDays !== null && !(Number.isSafeInteger(maxDays) && maxDays >= 1 && maxDays <= 365)) fail(`${name}.links.maxDays`);
+          links = { read: linkRead, edit: linkEdit, children: [...children].sort(), maxDays };
+        }
         tables.push({
           name,
           columns,
-          client: { identity: input.identity, read, publicRead, create, update, delete: input.delete },
+          client: { identity: input.identity, read, publicRead, create, update, delete: input.delete, ...links ? { links } : {} },
           primaryKey: pk,
           intent,
           owner,
@@ -233,6 +251,13 @@ var require_declared_data_contract = __commonJS({
         }
         if (relations.length) table.relations = relations.sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0);
       }
+      for (const table of tables) {
+        for (const name of table.client.links ? table.client.links.children : []) {
+          const relation = (table.relations || []).find((item) => item.name === name);
+          const child = relation && tableByName.get(relation.table);
+          if (!relation || !child || child.policy?.k !== "p" || child.policy.v !== relation.fk || child.policy.t !== table.name) fail(`${table.name}.links.children`);
+        }
+      }
       return JSON.stringify({ version: 1, tables });
     }
     function columnType(column) {
@@ -247,11 +272,14 @@ var require_declared_data_contract = __commonJS({
       });
       return values.length ? `{ ${values.join("; ")} }` : "Record<string, never>";
     }
+    var LINK_CLIENT_RUNTIME = 'const b64url=s=>btoa(unescape(encodeURIComponent(s))).replace(/\\+/g,"-").replace(/\\//g,"_").replace(/=+$/,"");const createLink=async(table,id,options={})=>{const result=await invoke(table,"link_create",{id,access:options.access,...(options.expiresInDays===undefined?{}:{expires_in_days:options.expiresInDays})});const route=typeof options.returnTo==="string"?options.returnTo:location.pathname+location.search+location.hash;return{link_id:result.link_id,url:location.origin+"/__sw/link#"+result.secret+"."+b64url(route),expires_at:result.expires_at}};const linkDoor=async(path,init)=>{const response=await fetch(path,{credentials:"same-origin",cache:"no-store",...init});const payload=await response.json().catch(()=>({error:"INVALID_DATA_RESPONSE",message:"Link operation returned an invalid response"}));if(!response.ok)throw new DataError(response.status,payload);return payload};const links=Object.freeze({opened:()=>{try{const list=JSON.parse(sessionStorage.getItem("__sw_links_opened")||"[]");return Array.isArray(list)?list:[]}catch(_){return[]}},sessions:async()=>{const payload=await linkDoor("/__sw/link/sessions",{method:"GET"});return{data:payload.data}},forget:async linkId=>{await linkDoor("/__sw/link/forget",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(linkId===undefined?{}:{link_id:linkId})})}});const linkedView=spec=>link=>{if(typeof link!=="string"||!/^lnk_[0-9a-f]{32}$/.test(link))throw new DataError(400,{error:"DATA_INPUT_INVALID",message:"linked() needs a link id"});const view={};for(const[table,canUpdate,children]of spec){const relations={};const root={get:id=>invoke(table,"get",{id,link})};if(canUpdate)root.update=(id,values)=>invoke(table,"update",{id,values,link});for(const[relation,child,canCreate,canUpdateChild]of children){relations[relation]=Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id,link})});const childOps={};if(canCreate)childOps.create=values=>invoke(child,"create",{values,link});if(canUpdateChild)childOps.update=(id,values)=>invoke(child,"update",{id,values,link});if(canCreate||canUpdateChild)view[child]=Object.freeze(childOps)}if(children.length)root.relations=Object.freeze(relations);view[table]=Object.freeze(root)}return Object.freeze(view)};\n';
     function describeDataClient2(authority, contract_digest) {
       const canonical = authority ? canonicalize2(authority.schema, authority.intents, authority.scopes) : canonicalize2({}, {}, {});
       const { tables } = JSON.parse(canonical);
       const declarations = [];
       const runtimeTables = [];
+      const linkedDeclarations = [];
+      const linkedSpec = [];
       for (const table of tables) {
         const { name, columns, client, primaryKey } = table;
         const readable = client.read === true ? columns.filter((column) => column.n !== table.author).map((column) => column.n) : client.read || [];
@@ -306,8 +334,43 @@ var require_declared_data_contract = __commonJS({
           relationNames.push(relation.name);
         }
         if (relationDeclarations.length) operations.push(`relations: { ${relationDeclarations.join("; ")} }`);
+        const links = client.links;
+        if (links) {
+          operations.push(`createLink(id: ${id}, options: { access: ${links.edit.length ? "'read' | 'edit'" : "'read'"}; expiresInDays?: number; returnTo?: string }): Promise<{ link_id: string; url: string; expires_at: number | null }>`);
+          operations.push(`links(id: ${id}): Promise<{ data: Array<{ link_id: string; access: 'read' | 'edit'; created_at: number; expires_at: number | null }> }>`);
+          operations.push(`revokeLink(id: ${id}, linkId: string): Promise<{ revoked: boolean }>`);
+          methods.push("createLink", "links", "revokeLink");
+          const linkRow = shape(columns, links.read, "read");
+          const rootOps = [`get(id: ${id}): Promise<{ data: ${linkRow} | null }>`];
+          if (links.edit.length) rootOps.push(`update(id: ${id}, values: ${shape(columns, links.edit, "update")}): Promise<{ data: ${linkRow} | null; count: number; changes: number }>`);
+          const childRelations = [];
+          const childSpecs = [];
+          for (const relationName of links.children) {
+            const relation = table.relations.find((item) => item.name === relationName);
+            const child = tables.find((candidate) => candidate.name === relation.table);
+            const childReadable = child.client.read === true ? child.columns.filter((column) => column.n !== child.author).map((column) => column.n) : child.client.read;
+            const childRow = shape(child.columns, childReadable, "read");
+            const childId = columnType(child.columns.find((column) => column.n === child.primaryKey));
+            childRelations.push(`${JSON.stringify(relationName)}: { list(parentId: ${id}, options?: { limit?: number; after?: ${childId} }): Promise<{ data: ${childRow}[]; next: ${childId} | null; has_more: boolean }> }`);
+            const childOps = [];
+            const canCreate = links.edit.length > 0 && child.client.create !== null;
+            const childUpdate = child.client.update ? child.client.update.filter((field) => field !== relation.fk) : [];
+            const canUpdate = links.edit.length > 0 && childUpdate.length > 0;
+            if (canCreate) childOps.push(`create(values: ${shape(child.columns, child.client.create, "create", /* @__PURE__ */ new Set([relation.fk]))}): Promise<{ data: ${childRow} | null; count: number; changes: number }>`);
+            if (canUpdate) childOps.push(`update(id: ${childId}, values: ${shape(child.columns, childUpdate, "update")}): Promise<{ data: ${childRow} | null; count: number; changes: number }>`);
+            if (childOps.length) linkedDeclarations.push(`${JSON.stringify(child.name)}: { ${childOps.join("; ")} }`);
+            childSpecs.push([relationName, child.name, canCreate, canUpdate]);
+          }
+          if (childRelations.length) rootOps.push(`relations: { ${childRelations.join("; ")} }`);
+          linkedDeclarations.push(`${JSON.stringify(name)}: { ${rootOps.join("; ")} }`);
+          linkedSpec.push([name, links.edit.length > 0, childSpecs]);
+        }
         declarations.push(`${JSON.stringify(name)}: { ${operations.join("; ")} }`);
         runtimeTables.push([name, methods, relationNames]);
+      }
+      if (linkedSpec.length) {
+        declarations.push(`links: { opened(): Array<{ link_id: string; table: string; row_id: string; access: 'read' | 'edit' }>; sessions(): Promise<{ data: Array<{ link_id: string; table: string; row_id: string; access: 'read' | 'edit'; expires_at: number }> }>; forget(linkId?: string): Promise<void> }`);
+        declarations.push(`linked(linkId: string): { ${linkedDeclarations.join("; ")} }`);
       }
       const declaration = `declare module ${JSON.stringify("somewhere:data")} {
   export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
@@ -318,7 +381,7 @@ var require_declared_data_contract = __commonJS({
       const runtime = `const contract=${JSON.stringify(contract_digest)};
 class DataError extends Error{constructor(status,payload){super(payload&&typeof payload.message==="string"?payload.message:payload&&typeof payload.error==="string"?payload.error:"Data operation failed");this.name="DataError";this.status=status;this.code=payload&&typeof payload.error==="string"?payload.error:null}}
 const invoke=async(table,operation,input)=>{const response=await fetch("/__sw/data",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,contract,table,operation})});const payload=await response.json().catch(()=>{throw new DataError(response.status,{error:"INVALID_DATA_RESPONSE",message:"Data operation returned an invalid response"})});if(!response.ok)throw new DataError(response.status,payload);return payload};
-const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];})));
+${linkedSpec.length ? LINK_CLIENT_RUNTIME : ""}const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?values=>invoke(table,operation,{values}):operation==="update"?(id,values)=>invoke(table,operation,{id,values}):operation==="createLink"?(id,options)=>createLink(table,id,options):operation==="links"?id=>invoke(table,"link_list",{id}):operation==="revokeLink"?(id,link_id)=>invoke(table,"link_revoke",{id,link_id}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];}).concat(${linkedSpec.length ? `[["links",links],["linked",linkedView(${JSON.stringify(linkedSpec)})]]` : "[]"})));
 export{data,DataError};
 `;
       return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration } };
@@ -993,6 +1056,15 @@ interface SomewhereAuthRequestOptions {
 interface SomewhereAuthRequireOptions extends SomewhereAuthRequestOptions { role?: 'admin' }
 interface SomewhereAuthAnonSession { id: string; isAnon: true; expiresAt: number }
 interface SomewhereAuthModerationRevoked { revoked_sessions: number; revoked_refresh_tokens: number }
+// The app's own users under explicit server authority (deployed production
+// functions; not row-bound jobs). Check the caller first: this is not a
+// browser user list. ids: exact lookup (max 200, no limit/cursor); otherwise
+// pages ordered by (created_at, id), limit 1-200 (default 50). Banned and
+// agent accounts are not listed; absent ids are omitted.
+interface SomewhereAuthDirectoryUser { id: string; email: string; display_name: string | null; email_verified: boolean; created_at: number | null }
+interface SomewhereRuntimeAuthServer {
+  listUsers(options?: { ids: readonly string[]; limit?: never; cursor?: never } | { ids?: never; limit?: number; cursor?: string }): Promise<{ users: SomewhereAuthDirectoryUser[]; next_cursor: string | null }>;
+}
 interface SomewhereRuntimeAuthModeration {
   ban(req: Request, userId: string, options?: { reason?: string | null } | null): Promise<SomewhereAuthModerationRevoked & {
     user: { id: string; email: string; banned: true; banned_reason: string | null };
@@ -1067,13 +1139,21 @@ interface SomewhereRuntimeAuth {
   // Password change and account deletion end every session of the account; these clear the cookies.
   updatePasswordWithCookie(req: Request, options: { new_password: string; current_password?: string }): Promise<{ updated: true }>;
   deleteUserWithCookie(req: Request): Promise<{ deleted: true }>;
-  googleUrl(options: { redirect_uri: string }): string;
-  githubUrl(options: { redirect_uri: string }): string;
-  discordUrl(options: { redirect_uri: string }): string;
-  googleExchange(options: { code: string; redirect_uri?: string }): Promise<SomewhereAuthGoogleSession>;
-  githubExchange(options: { code: string }): Promise<SomewhereAuthOAuthSession>;
-  discordExchange(options: { code: string }): Promise<SomewhereAuthOAuthSession>;
-  // Reads ?code, exchanges it, stages the session cookies, returns a 302 to redirectTo (default '/').
+  // Start Google/GitHub/Discord sign-in from a server handler: stages this attempt's HttpOnly
+  // verifier cookie on the response and resolves the provider start URL (only its challenge travels).
+  oauthStart(provider: 'google' | 'github' | 'discord', options: { redirect_uri: string }): Promise<string>;
+  /** @deprecated Always throws OAUTH_START_REQUIRES_BINDING: sign-in is bound to the browser that starts it. Use: Response.redirect(await sw.auth.oauthStart('google', { redirect_uri }), 302). The parameter stays assignable so apps on older SDK types still typecheck. */
+  googleUrl(options: { redirect_uri: string }): never;
+  /** @deprecated Always throws OAUTH_START_REQUIRES_BINDING: sign-in is bound to the browser that starts it. Use: Response.redirect(await sw.auth.oauthStart('github', { redirect_uri }), 302). The parameter stays assignable so apps on older SDK types still typecheck. */
+  githubUrl(options: { redirect_uri: string }): never;
+  /** @deprecated Always throws OAUTH_START_REQUIRES_BINDING: sign-in is bound to the browser that starts it. Use: Response.redirect(await sw.auth.oauthStart('discord', { redirect_uri }), 302). The parameter stays assignable so apps on older SDK types still typecheck. */
+  discordUrl(options: { redirect_uri: string }): never;
+  // Exchanges take the callback's ?code= and its public ?attempt= (which selects this browser's attempt cookie).
+  googleExchange(options: { code: string; attempt: string; redirect_uri?: string }): Promise<SomewhereAuthGoogleSession>;
+  githubExchange(options: { code: string; attempt: string }): Promise<SomewhereAuthOAuthSession>;
+  discordExchange(options: { code: string; attempt: string }): Promise<SomewhereAuthOAuthSession>;
+  // Reads ?code and ?attempt, exchanges with that attempt's oauthStart verifier from this request,
+  // stages the session cookies, clears that attempt, returns a 302 to redirectTo (default '/').
   googleCallbackWithCookie(req: Request, redirectTo?: string): Promise<Response>;
   githubCallbackWithCookie(req: Request, redirectTo?: string): Promise<Response>;
   discordCallbackWithCookie(req: Request, redirectTo?: string): Promise<Response>;
@@ -1094,6 +1174,7 @@ interface SomewhereRuntimeAuth {
   getAcceptedInvite(req: Request, id: string): Promise<SomewhereAuthInvite>;
   anonSession(): Promise<SomewhereAuthAnonSession>;
   readonly moderation: SomewhereRuntimeAuthModeration;
+  readonly server: SomewhereRuntimeAuthServer;
 }
 interface SomewhereRuntimeCrypto {
   // Lowercase hex HMAC-SHA256 of message keyed by secret.
@@ -3436,6 +3517,8 @@ var require_schema_types = __commonJS({
   interface Scope { readonly __somewhereScope: unique symbol }
   interface OwnerScope extends Scope { readonly __somewhereOwner: unique symbol }
   interface MemberScope extends Scope { readonly __somewhereMember: unique symbol }
+  interface GroupScope extends Scope { readonly __somewhereGroup: unique symbol }
+  interface AppRoleScope extends Scope { readonly __somewhereAppRole: unique symbol }
   interface ColumnOptions<Default> {
     nullable?: boolean; default?: Default | null; unique?: boolean;
     references?: string; onDelete?: 'cascade' | 'restrict'; renamedFrom?: string;
@@ -3443,6 +3526,10 @@ var require_schema_types = __commonJS({
   interface ClientPermissions<Field extends string> {
     identity?: 'authenticated' | 'visitor'; read?: boolean | readonly Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
     create?: readonly Field[] | false | null; update?: readonly Field[] | false | null; delete?: boolean;
+    links?: ClientLinkPermissions<Field>;
+  }
+  interface ClientLinkPermissions<Field extends string> {
+    read: true | readonly Field[]; edit?: readonly Field[] | false; children?: readonly string[]; maxDays?: number;
   }
   interface FileCollection { readonly __somewhereFileCollection: unique symbol }
   type FileOperation = 'read' | 'upload' | 'replace' | 'delete';
@@ -3486,11 +3573,11 @@ function removed(): SomewhereSchemaDeclaration.ColumnMarker;
 function removedTable(): SomewhereSchemaDeclaration.TableMarker;
 function exported(): SomewhereSchemaDeclaration.TableMarker;
 `;
-    var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, member: SomewhereSchemaDeclaration.MemberScope): SomewhereSchemaDeclaration.Scope;
-function anyOf(member: SomewhereSchemaDeclaration.MemberScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
+    var policySignatures = `function anyOf(owner: SomewhereSchemaDeclaration.OwnerScope, other: SomewhereSchemaDeclaration.MemberScope | SomewhereSchemaDeclaration.GroupScope | SomewhereSchemaDeclaration.AppRoleScope): SomewhereSchemaDeclaration.Scope;
+function anyOf(other: SomewhereSchemaDeclaration.MemberScope | SomewhereSchemaDeclaration.GroupScope | SomewhereSchemaDeclaration.AppRoleScope, owner: SomewhereSchemaDeclaration.OwnerScope): SomewhereSchemaDeclaration.Scope;
 function parent(options: { via: string; table?: string }): SomewhereSchemaDeclaration.Scope;
-function group(options?: { column?: string; roles?: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.Scope;
-function appRole(options: { roles: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.Scope;
+function group(options?: { column?: string; roles?: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.GroupScope;
+function appRole(options: { roles: Partial<Record<'read' | 'create' | 'update' | 'delete', string[]>> }): SomewhereSchemaDeclaration.AppRoleScope;
 `;
     var SCHEMA_DECLARATION2 = types + signatures.replace(/^function /gm, "declare function ") + `declare module 'somewhere/db' {
 ${(signatures + policySignatures).replace(/^function /gm, "  export function ")}}
@@ -3533,7 +3620,7 @@ function parseClientPermissions(value, columns, scope) {
   }
   const input = value;
   for (const key of Object.keys(input)) {
-    if (!["identity", "read", "publicRead", "create", "update", "delete"].includes(key)) {
+    if (!["identity", "read", "publicRead", "create", "update", "delete", "links"].includes(key)) {
       return fail(`Unknown client permission "${key}".`);
     }
   }
@@ -3639,7 +3726,77 @@ function parseClientPermissions(value, columns, scope) {
       }
     }
   }
-  return { ok: true, permissions: { identity, read, publicRead, ...writes, delete: remove } };
+  let links;
+  if (input.links !== void 0) {
+    const parsed = parseLinkPermissions(input.links, read, writes.update, columns, scope);
+    if (typeof parsed === "string") return fail(parsed);
+    links = parsed;
+  }
+  return { ok: true, permissions: { identity, read, publicRead, ...writes, delete: remove, ...links ? { links } : {} } };
+}
+function authoredClientFromCanonical(client) {
+  if (!client || typeof client !== "object" || Array.isArray(client)) return client;
+  const links = client.links;
+  if (!links || typeof links !== "object" || Array.isArray(links)) return client;
+  const l = links;
+  const keys = Object.keys(l).sort().join(",");
+  if (keys !== "children,edit,maxDays,read" || !Array.isArray(l.read) || !Array.isArray(l.edit) || !Array.isArray(l.children) || !(l.maxDays === null || typeof l.maxDays === "number")) return client;
+  const authored = { read: l.read, edit: l.edit.length === 0 ? false : l.edit, children: l.children };
+  if (l.maxDays !== null) authored.maxDays = l.maxDays;
+  return { ...client, links: authored };
+}
+function parseLinkPermissions(value, read, update, columns, scope) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "client.links must be an object: { read, edit?, children?, maxDays? }.";
+  const input = value;
+  for (const key2 of Object.keys(input)) {
+    if (!["read", "edit", "children", "maxDays"].includes(key2)) return `Unknown client.links option "${key2}". Allowed: read, edit, children, maxDays.`;
+  }
+  const owned = scope.kind === "owner" && scope.visitors !== true || scope.kind === "policy" && typeof scope.column === "string";
+  if (!owned) return "client.links needs rows with one signed-in owner: owner() (without visitors) or anyOf(owner(), ...).";
+  if (read === false) return "client.links needs client.read: a link can only read fields the app data client reads.";
+  const readable = read === true ? columns.filter((column) => column.helper !== "blob").map((column) => column.name) : read;
+  const list = (raw, label, allowed, allowedLabel) => {
+    if (!Array.isArray(raw)) return `client.links.${label} must list field names.`;
+    const names = [];
+    for (const entry of raw) {
+      if (typeof entry !== "string") return `client.links.${label} fields must be column names.`;
+      const name = entry.toLowerCase();
+      if (!allowed.includes(name)) return `client.links.${label} names "${entry}", which is not in ${allowedLabel}.`;
+      if (names.includes(name)) return `client.links.${label} declares field "${entry}" twice.`;
+      names.push(name);
+    }
+    return names.sort();
+  };
+  const linkRead = input.read === true ? [...readable].sort() : list(input.read, "read", readable, "client.read");
+  if (typeof linkRead === "string") return linkRead;
+  if (linkRead.length === 0) return "client.links.read must name at least one field, or be true.";
+  const key = columns.find((column) => column.helper === "id")?.name;
+  if (!key || !linkRead.includes(key)) return "client.links.read must include the primary key.";
+  let edit = [];
+  if (input.edit !== void 0 && input.edit !== false) {
+    if (!update) return "client.links.edit needs client.update: a link can only update fields the app data client updates.";
+    const parsed = list(input.edit, "edit", update, "client.update");
+    if (typeof parsed === "string") return parsed;
+    if (parsed.length === 0) return "client.links.edit must name at least one field, or be false.";
+    if (scope.column && parsed.includes(scope.column)) return `client.links.edit cannot write the owner field "${scope.column}".`;
+    edit = parsed;
+  }
+  let children = [];
+  if (input.children !== void 0) {
+    if (!Array.isArray(input.children) || input.children.some((entry) => typeof entry !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(entry))) {
+      return "client.links.children must list relation names declared on this table.";
+    }
+    children = [...new Set(input.children.map((entry) => entry.toLowerCase()))].sort();
+    if (children.length !== input.children.length) return "client.links.children names a relation twice.";
+  }
+  let maxDays = null;
+  if (input.maxDays !== void 0) {
+    if (typeof input.maxDays !== "number" || !Number.isSafeInteger(input.maxDays) || input.maxDays < 1 || input.maxDays > 365) {
+      return "client.links.maxDays must be a whole number of days from 1 to 365.";
+    }
+    maxDays = input.maxDays;
+  }
+  return { read: linkRead, edit, children, maxDays };
 }
 
 // worker/src/services/jobs/limits.ts
@@ -3928,7 +4085,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     const sc = scope;
     if (typeof sc.kind !== "string") return null;
     const policyIdentity = sc.kind === "policy" ? declaredPolicyIdentity(sc.policy) : {};
-    const parsed = parseClientPermissions(shape.client, permissionColumns, {
+    const parsed = parseClientPermissions(authoredClientFromCanonical(shape.client), permissionColumns, {
       kind: sc.kind,
       ...visitors ? { visitors: true } : {},
       ...typeof sc.column === "string" ? { column: sc.column } : {},
@@ -3959,7 +4116,11 @@ function declaredPolicyIdentity(value) {
   if (node.kind === "owner" && typeof node.column === "string") return { column: node.column };
   if (node.kind === "member" && Array.isArray(node.group) && node.group.every((entry) => typeof entry === "string")) return { group: node.group };
   if (node.kind === "any_of" && Array.isArray(node.policies)) {
-    return node.policies.reduce((all, child) => ({ ...all, ...declaredPolicyIdentity(child) }), {});
+    const branchGroup = (child) => {
+      const c = child;
+      return c && c.kind === "group" && typeof c.column === "string" ? { group: [c.column] } : {};
+    };
+    return node.policies.reduce((all, child) => ({ ...all, ...declaredPolicyIdentity(child), ...branchGroup(child) }), {});
   }
   return {};
 }
@@ -3974,9 +4135,10 @@ function bakedPolicyFromDeclared(value, depth = 0, edges = 0, underParent = fals
     return member ? { k: "m", m: member } : null;
   }
   if (node.kind === "any_of" && Array.isArray(node.policies) && node.policies.length === 2) {
-    if (depth !== 0 && !underParent || node.policies[0]?.kind !== "owner" || node.policies[1]?.kind !== "member") return null;
+    const second = node.policies[1]?.kind;
+    if (depth !== 0 && !underParent || node.policies[0]?.kind !== "owner" || second !== "member" && second !== "group" && second !== "app_role") return null;
     const left = bakedPolicyFromDeclared(node.policies[0], depth + 1);
-    const right = bakedPolicyFromDeclared(node.policies[1], depth + 1);
+    const right = bakedPolicyFromDeclared(node.policies[1], depth + 1, edges, second !== "member");
     return left && right ? { k: "a", p: [left, right] } : null;
   }
   if (node.kind === "group") {
@@ -4410,6 +4572,43 @@ function validateDeclaredRelations(tables, tableByName, knownColumns, markedGone
           );
         }
       }
+    }
+  }
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-links.ts
+function validateRowLinks(tables, tableByName, errors) {
+  const childOf = /* @__PURE__ */ new Map();
+  for (const t of tables) {
+    const links = t.client?.links;
+    if (!links) continue;
+    for (const name of links.children) {
+      const relation = t.relations.find((r) => r.name === name);
+      const child = relation ? tableByName.get(relation.table) : void 0;
+      if (!relation || relation.kind !== "hasMany" || !child) {
+        errors.push(`Table "${t.name}" lists "${name}" in client.links.children, which is not a hasMany relation declared on "${t.name}".`);
+        continue;
+      }
+      const scope = child.scope;
+      if (scope.kind !== "policy" || scope.policy.kind !== "parent" || scope.policy.table !== t.name || scope.policy.via !== relation.fk) {
+        errors.push(`Table "${t.name}" lists "${name}" in client.links.children, but "${child.name}" is not scoped parent({ via: '${relation.fk}' }) on "${t.name}". A link reaches only rows that belong to the linked row.`);
+        continue;
+      }
+      if (!child.client || child.client.read === false) {
+        errors.push(`Table "${t.name}" lists "${name}" in client.links.children, but "${child.name}" declares no client.read.`);
+        continue;
+      }
+      const earlier = childOf.get(child.name);
+      if (earlier && earlier !== t.name) {
+        errors.push(`Table "${child.name}" is a link child of both "${earlier}" and "${t.name}". Declare it as a link child of one table.`);
+        continue;
+      }
+      childOf.set(child.name, t.name);
+    }
+  }
+  for (const [child, parent] of childOf) {
+    if (tableByName.get(child)?.client?.links) {
+      errors.push(`Table "${child}" declares client.links and is also a link child of "${parent}". Links reach one level of children.`);
     }
   }
 }
@@ -4869,10 +5068,13 @@ var sorted = (list) => [...list].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
 function resolveGroupScopes(tables, vocabulary, errors) {
   const allRoles = [...BUILT_IN_GROUP_ROLES2, ...vocabulary?.roles ?? []];
   for (const t of tables) {
-    if (t.scope.kind !== "policy" || t.scope.policy.kind !== "group") continue;
-    const node = t.scope.policy;
+    if (t.scope.kind !== "policy") continue;
+    const branch = t.scope.policy.kind === "any_of" ? t.scope.policy.policies.find((p) => p.kind === "group") : void 0;
+    const node = t.scope.policy.kind === "group" ? t.scope.policy : branch?.kind === "group" ? branch : null;
+    if (!node) continue;
     const declared = declaredGroupRoles.get(node);
     if (!declared) continue;
+    const omitted = branch ? [] : allRoles;
     const where = `line ${declared.line}: `;
     const column = t.columns.find((c) => c.name === node.column);
     if (!column) {
@@ -4881,7 +5083,7 @@ function resolveGroupScopes(tables, vocabulary, errors) {
       errors.push(`${where}Table "${t.name}" uses group({ column: '${node.column}' }), which must be a non-nullable text() column: every row belongs to exactly one group.`);
     }
     for (const op of GROUP_OPERATIONS) {
-      const list = declared.explicit[op] ?? allRoles;
+      const list = declared.explicit[op] ?? omitted;
       for (const role of list) {
         if (!allRoles.includes(role)) {
           errors.push(`${where}group({ roles: { ${op} } }) on table "${t.name}" names "${role}", which is not a group role. Use owner, admin, member, or a role declared in groups.roles.`);
@@ -4895,10 +5097,12 @@ function resolveGroupScopes(tables, vocabulary, errors) {
         errors.push(`${where}group() on table "${t.name}" lets ${missing.join(", ")} ${op} rows they cannot read. A role that may ${op} must also read, because the write returns the row.`);
       }
     }
+    if (branch && GROUP_OPERATIONS.every((op) => node.roles[op].length === 0)) {
+      errors.push(`${where}group() inside anyOf() on table "${t.name}" grants no operation. List the group roles that may read, update or delete every row of the group.`);
+    }
     if (t.client?.create && !t.client.create.includes(node.column)) {
       errors.push(`${where}Table "${t.name}" uses group() and client.create must include "${node.column}" so every new row names the group it belongs to.`);
     }
-    declaredGroupRoles.delete(node);
   }
 }
 function groupLeafOf(t) {
@@ -5001,8 +5205,10 @@ function readAppRoleScope(r, tableName, line, fail) {
 function resolveAppRoleScopes(tables, appRoles, errors) {
   const vocabulary = new Set((appRoles ?? []).map((role) => role.name));
   for (const t of tables) {
-    if (t.scope.kind !== "policy" || t.scope.policy.kind !== "app_role") continue;
-    const node = t.scope.policy;
+    if (t.scope.kind !== "policy") continue;
+    const root = t.scope.policy;
+    const node = root.kind === "app_role" ? root : root.kind === "any_of" ? root.policies.find((p) => p.kind === "app_role") : void 0;
+    if (!node) continue;
     const declared = declaredLines.get(node);
     if (!declared) continue;
     for (const { op, name, line } of declared.names) {
@@ -5015,6 +5221,9 @@ function resolveAppRoleScopes(tables, appRoles, errors) {
       if (missing.length) {
         errors.push(`line ${declared.line}: appRole() on table "${t.name}" lets ${missing.join(", ")} ${op} rows they cannot read. A role that may ${op} must also read, because the write returns the row.`);
       }
+    }
+    if (root.kind === "any_of" && APP_ROLE_OPERATIONS.every((op) => node.roles[op].length === 0)) {
+      errors.push(`line ${declared.line}: appRole() inside anyOf() on table "${t.name}" grants no operation. List the app roles that may read, update or delete every row.`);
     }
     declaredLines.delete(node);
   }
@@ -5412,7 +5621,7 @@ function readClientPermissions(r) {
       }
       out[key.name] = fields;
     } else {
-      out[key.name] = r.readLiteral(`for client.${key.name}`);
+      out[key.name] = key.name === "links" && r.peek().kind === "punct" && r.peek().value === "{" ? readClientPermissions(r) : r.readLiteral(`for client.${key.name}`);
     }
     if (!r.tryPunct(",")) {
       r.expectPunct("}", "closing client permissions");
@@ -5713,23 +5922,30 @@ function readPolicyMember(r, tableName, line) {
   if (scope.kind !== "member") throw new SchemaTsError(`line ${line}: invalid member() policy.`);
   return scope;
 }
+var ANY_OF_FORMS = "anyOf() accepts exactly one owner() and one member(), group() or appRole().";
+function readAnyOfBranch(r, tableName, which) {
+  const tok = r.expectIdent(`for the ${which} policy in anyOf() on table "${tableName}"`);
+  const failAt = (at, message) => {
+    throw new SchemaTsError(`line ${at}: ${message}`);
+  };
+  if (tok.value === "owner") return readPolicyOwner(r, tableName, tok.line);
+  if (tok.value === "member") return readPolicyMember(r, tableName, tok.line);
+  if (tok.value === "group") return readGroupScope(r, tableName, tok.line, failAt);
+  if (tok.value === "appRole") return readAppRoleScope(r, tableName, tok.line, failAt);
+  throw new SchemaTsError(`line ${tok.line}: ${ANY_OF_FORMS}`);
+}
 function readAnyOfScope(r, tableName, line) {
   r.expectPunct("(", 'after "anyOf"');
-  const first = r.expectIdent(`for the first policy in anyOf() on table "${tableName}"`);
-  const firstPolicy = first.value === "owner" ? readPolicyOwner(r, tableName, first.line) : first.value === "member" ? readPolicyMember(r, tableName, first.line) : null;
-  if (!firstPolicy) throw new SchemaTsError(`line ${first.line}: anyOf() only accepts owner() and member().`);
+  const firstPolicy = readAnyOfBranch(r, tableName, "first");
   r.expectPunct(",", `between the two policies in anyOf() on table "${tableName}"`);
-  const second = r.expectIdent(`for the second policy in anyOf() on table "${tableName}"`);
-  const secondPolicy = second.value === "owner" ? readPolicyOwner(r, tableName, second.line) : second.value === "member" ? readPolicyMember(r, tableName, second.line) : null;
-  if (!secondPolicy) throw new SchemaTsError(`line ${second.line}: anyOf() only accepts owner() and member().`);
+  const secondPolicy = readAnyOfBranch(r, tableName, "second");
   r.tryPunct(",");
   r.expectPunct(")", "closing anyOf()");
-  if (firstPolicy.kind === secondPolicy.kind) {
-    throw new SchemaTsError(`line ${line}: anyOf() requires exactly one owner() and one member() policy.`);
-  }
-  const owner = firstPolicy.kind === "owner" ? firstPolicy : secondPolicy;
-  const member = firstPolicy.kind === "member" ? firstPolicy : secondPolicy;
-  return { kind: "policy", policy: { kind: "any_of", policies: [owner, member] } };
+  const owners = [firstPolicy, secondPolicy].filter((p) => p.kind === "owner");
+  if (owners.length !== 1) throw new SchemaTsError(`line ${line}: ${ANY_OF_FORMS}`);
+  const owner = owners[0];
+  const other = firstPolicy.kind === "owner" ? secondPolicy : firstPolicy;
+  return { kind: "policy", policy: { kind: "any_of", policies: [owner, other] } };
 }
 function readParentScope(r, tableName, line) {
   r.expectPunct("(", 'after "parent"');
@@ -6061,11 +6277,12 @@ function readTable(r, rawName, nameLine) {
     if (columns.filter((column) => column.helper === "id").length !== 1) {
       throw new SchemaTsError(`line ${nameLine}: table "${rawName}": client operations require exactly one id() column.`);
     }
-    const policyMember = scope.kind === "policy" && scope.policy.kind === "any_of" ? scope.policy.policies.find((node) => node.kind === "member") : void 0;
+    const branch = scope.kind === "policy" && scope.policy.kind === "any_of" ? scope.policy.policies.find((node) => node.kind === "member" || node.kind === "group") : void 0;
+    const branchGroup = branch?.kind === "member" ? branch.group : branch?.kind === "group" ? [branch.column] : void 0;
     const parsed = parseClientPermissions(clientInput, columns, {
       ...scope,
       ...managedOwner ? { column: managedOwner.column } : {},
-      ...policyMember ? { group: policyMember.group } : {}
+      ...branchGroup ? { group: branchGroup } : {}
     });
     if (!parsed.ok) throw new SchemaTsError(`line ${nameLine}: table "${rawName}": ${parsed.message}`);
     const key = columns.find((column) => column.helper === "id").name;
@@ -6215,6 +6432,7 @@ function extractSchemaTs(source) {
       }
     }
     validateDeclaredRelations(tables, tableByName, knownColumns, (table) => removedTables.includes(table) ? "removedTable()" : exportedTables.includes(table) ? "exported()" : null, errors);
+    validateRowLinks(tables, tableByName, errors);
     if (fileCollections) {
       errors.push(...fileErrors);
       validateFileCollections(fileCollections, (name) => {

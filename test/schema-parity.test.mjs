@@ -111,3 +111,57 @@ sw.ai.transcribe({ language: 'en', prompt: 'no audio' });
   assert.equal(bad.ok, false);
   assert.ok(bad.errors.some(error => error.file === 'src/bad.ts'), bad.raw);
 });
+
+const rowLinkSchema = `import { schema, table, id, text, integer, owner, parent, hasMany } from 'somewhere/db';
+export default schema({
+  notes: table({ id: id(), title: text(), body: text(), private_note: text() }, {
+    scope: owner(), relations: { comments: hasMany('comments', 'note_id') },
+    client: { read: ['id', 'title', 'body', 'private_note'], create: ['title', 'body', 'private_note'], update: ['body'],
+      links: { read: ['id', 'title', 'body'], edit: ['body'], children: ['comments'], maxDays: 7 } },
+  }),
+  comments: table({ id: id(), note_id: integer({ references: 'notes' }), body: text(), secret: text({ default: '' }) }, {
+    scope: parent({ via: 'note_id' }), client: { read: ['id', 'body'], create: ['note_id', 'body'], update: ['body'] },
+  }),
+  read_notes: table({ id: id(), title: text() }, {
+    scope: owner(), client: { read: ['id', 'title'], links: { read: true, edit: false } },
+  }),
+});`;
+
+test('row-link declarations typecheck owner and restricted recipient clients without exposing private fields', async t => {
+  const root = fixture(t, rowLinkSchema, { 'src/main.ts': `import { data } from 'somewhere:data';
+const made = await data.notes.createLink(1, { access: 'edit', expiresInDays: 2, returnTo: '/' });
+const url: string = made.url;
+await data.notes.links(1);
+await data.notes.revokeLink(1, made.link_id);
+const opened = data.links.opened();
+const sessions = await data.links.sessions();
+await data.links.forget(made.link_id);
+const recipient = data.linked(made.link_id);
+const note = await recipient.notes.get(1);
+const title: string | undefined = note.data?.title;
+await recipient.notes.update(1, { body: 'Changed' });
+await recipient.notes.relations.comments.list(1);
+await recipient.comments.create({ note_id: 1, body: 'Comment' });
+await recipient.comments.update(1, { body: 'Edited' });
+await data.read_notes.createLink(1, { access: 'read' });
+await recipient.read_notes.get(1);
+export { url, title, opened, sessions };` });
+  const good = await check(root);
+  assert.equal(good.ok, true, good.raw);
+  writeFileSync(join(root, 'src', 'bad.ts'), `import { data } from 'somewhere:data';
+const recipient = data.linked('lnk_test');
+(await recipient.notes.get(1)).data?.private_note;
+await recipient.notes.update(1, { private_note: 'Private' });
+await recipient.comments.update(1, { note_id: 2 });
+await data.read_notes.createLink(1, { access: 'edit' });
+await recipient.read_notes.update(1, { title: 'No edit permission' });
+`);
+  const bad = await check(root);
+  assert.equal(bad.ok, false);
+  assert.equal(bad.errors.length, 5, bad.raw);
+  assert.ok(bad.errors.every(error => error.file === 'src/bad.ts'), bad.raw);
+});
+
+test('row-link declarations refuse an undeclared shared field through the actual vendored parser', () => {
+  assert.throws(() => vendored.generateFromFiles({ 'db/schema.ts': rowLinkSchema.replace("read: ['id', 'title', 'body'], edit:", "read: ['id', 'missing'], edit:") }), /client\.links\.read.*missing/);
+});
