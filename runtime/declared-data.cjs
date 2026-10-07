@@ -2347,8 +2347,45 @@ interface SomewhereAiModerationResult {
   model: string;
   provider: string;
 }
+// sw.ai.evaluate: typed decisions. Probabilities are model output, not
+// calibrated guarantees; choose thresholds from labelled cases.
+type SomewhereAiEvaluateQuestion =
+  | { type: 'noul'; instructions: string | SomewhereJsonObject | readonly unknown[]; criteria?: { true?: unknown; false?: unknown } }
+  | { type: 'choice'; instructions: string | SomewhereJsonObject | readonly unknown[]; criteria: Record<string, unknown> }
+  | { type: 'score'; instructions: string | SomewhereJsonObject | readonly unknown[]; criteria: readonly unknown[] };
+type SomewhereAiEvaluateImage =
+  | string
+  | { content_type: 'image/png' | 'image/jpeg' | 'image/webp'; base64: string };
+type SomewhereAiEvaluateOptions<Q extends Record<string, SomewhereAiEvaluateQuestion>> = {
+  state: string | SomewhereJsonObject | readonly unknown[];
+  questions: Q;
+} & (
+  // Text routes to jev and images to clef-flash when model is omitted; jev reads text only.
+  | { model: 'jev'; images?: never }
+  | { model?: 'clef-flash'; images?: readonly SomewhereAiEvaluateImage[] }
+);
+interface SomewhereAiEvaluateNoulAnswer { type: 'noul'; noul: number }
+interface SomewhereAiEvaluateChoiceAnswer<O extends string = string> {
+  type: 'choice'; choice: O; probabilities: Record<O, number>; confidence: number;
+}
+interface SomewhereAiEvaluateScoreAnswer {
+  type: 'score'; score: number; legend: Record<string, unknown>; probabilities: Record<string, number>; confidence: number;
+}
+type SomewhereAiEvaluateAnswer<Q> =
+  Q extends { type: 'noul' } ? SomewhereAiEvaluateNoulAnswer
+  : Q extends { type: 'choice'; criteria: infer C } ? SomewhereAiEvaluateChoiceAnswer<Extract<keyof C, string>>
+  : Q extends { type: 'score' } ? SomewhereAiEvaluateScoreAnswer
+  : never;
+interface SomewhereAiEvaluateResult<Q extends Record<string, SomewhereAiEvaluateQuestion>> {
+  model: 'clef-flash' | 'jev';
+  provider_model: string;
+  routed_by: 'model' | 'images' | 'text';
+  answers: { [K in keyof Q]: SomewhereAiEvaluateAnswer<Q[K]> };
+  usage: { input_tokens: number };
+  cost: SomewhereAiCost;
+}
 interface SomewhereAiCatalogEntry {
-  feature: 'transcribe' | 'tts' | 'generate_image' | 'remove_background' | 'embed' | 'complete';
+  feature: 'transcribe' | 'tts' | 'generate_image' | 'remove_background' | 'embed' | 'complete' | 'evaluate';
   model: string;
   provider: string;
   label: string;
@@ -2386,6 +2423,7 @@ interface SomewhereRuntimeAi {
   removeBackground(options: SomewhereAiRemoveBackgroundOptions): Promise<never>;
   embeddings(options: SomewhereAiEmbeddingsOptions): Promise<SomewhereAiEmbeddingsResult>;
   moderate(text: string): Promise<SomewhereAiModerationResult>;
+  evaluate<const Q extends Record<string, SomewhereAiEvaluateQuestion>>(options: SomewhereAiEvaluateOptions<Q>): Promise<SomewhereAiEvaluateResult<Q>>;
   catalog(): Promise<SomewhereAiCatalog>;
 }
 

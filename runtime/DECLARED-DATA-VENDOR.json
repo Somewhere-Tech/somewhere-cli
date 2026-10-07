@@ -3,7 +3,7 @@
   "source_files": {
     "worker/containers/compile/declared-data-contract.cjs": "abdf0a0f238f9d7ecccc8aa3ede7cd25778194d0b9c68cc6c44aa776de46d122",
     "worker/containers/compile/groups-types.cjs": "f0f38ca6f160561f997b20af44763bd07232deb2668a536cd52c1974fcfed2c8",
-    "worker/containers/compile/runtime-types.cjs": "b37bb3a251ef0dde6c699f7941de537c28088f180bb3850808d97db2f76c866c",
+    "worker/containers/compile/runtime-types.cjs": "7d2e647e6a7301b4158f8d45d5c52da9aac3b6fb6f8118be5a5cde62c40462fc",
     "worker/containers/compile/schema-types.cjs": "97941a4f80f50f4a48b828a6a2695f6f0c606ab6e74b4511fbb99e786dc4f0c4",
     "worker/containers/compile/typed-data.cjs": "57b458e16a373e42d48a0e527317fcdf609299ae368eb539a8b582b9a47abb15",
     "worker/containers/compile/typed-files.cjs": "a0b1818afbc7673f84583c76436a3b3ca1d1fdf63d8d8db138b36646103f0708",
@@ -27,5 +27,5 @@
     "worker/src/utils/managed-groups/errors.ts": "4830b1ad7357a79760b0bcc68884e562cfbc07d12a37cc73651a6fcb256d682f",
     "worker/src/utils/managed-groups/policy.ts": "2259a883645c8bfd607ead7c37387f3ffd42ac9dfb86722c72b224adb498511e"
   },
-  "sha256": "d9b4c27c75353337c46ac93abb2816cfb60a77930957778a1b52c5ded6e9128e"
+  "sha256": "849e3664a55c1c5fb67faf54b0866db9b1d10b10807dd8a5631893a775a626d8"
 }
