@@ -218,7 +218,7 @@ test('both starter UI modes point from creating a schedule to running it now', (
   for (const ui of ['styled', 'headless']) {
     const files = createFeatureTemplate(resolveInitSelection('auth', ui), { appName: 'Cron notes' });
     const guide = files.find(file => file.path === 'AGENTS.md').content;
-    assert.match(guide, /After creating a schedule, run it now with `somewhere cron run <id> --wait`;\ndo not wait for its scheduled time\./);
+    assert.match(guide, /Test schedules now: `somewhere cron run <id> --wait`\. Do not wait for it to fire\./);
   }
 });
 
