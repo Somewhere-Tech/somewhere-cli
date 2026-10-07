@@ -79,9 +79,10 @@ Use \`serverOnly()\` only when every operation needs a function's own access
 check.
 Structured queries: \`sw.db.from\` / \`insert\` / \`update\` / \`remove\` return \`{ data: rows[], count,
 changes }\`; \`where: { a: 1, b: { in: ids }, c: { gte: 2 }, d: null }\` (one
-operator per column). Raw SQL \`sw.db.query(sql, params)\` runs as written (add \`WHERE
-user_id = ?\`; managed projects refuse it). Use \`sw.db.server.query\` for managed
-raw access; authorize the caller in your function. Parallel reads: \`Promise.all\`.
+operator per column). Raw SQL runs only against a separate raw database and
+never accesses managed tables. For an exceptional managed operation,
+authorize the caller and use \`sw.db.server.from\` / \`insert\` / \`update\` /
+\`remove\`; keep \`owner()\`/\`group()\` on the table. Parallel reads: \`Promise.all\`.
 
 After creating a schedule, run it now with \`somewhere cron run <id> --wait\`;
 do not wait for its scheduled time.`;
