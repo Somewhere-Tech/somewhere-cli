@@ -1,6 +1,5 @@
 import { readFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
-import { cliConfigDir, loadProjectConfig } from './config.js';
 
 const TAIL_LIMIT = 4_000;
 const FILE_LIMIT = 8_000;
@@ -39,26 +38,13 @@ export function redactAdvisorText(value: string, redactDotenvValues = false): st
   return redacted;
 }
 
-function readLastRun(): LastRunRecord | undefined {
-  try {
-    const parsed = JSON.parse(readFileSync(`${cliConfigDir()}/last-run.json`, 'utf8')) as LastRunRecord;
-    return typeof parsed?.command === 'string' && Array.isArray(parsed.args) ? normalizeLastRun(parsed) : undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 function isDotenvPath(path: string): boolean {
   const name = basename(path);
   return name === '.env' || name.startsWith('.env.') || name.endsWith('.env');
 }
 
 export function buildAdvisorContext(filePath?: string): AdvisorContext | undefined {
-  const project = loadProjectConfig();
   const context: AdvisorContext = {};
-  if (project?.project_id) context.project_ref = project.project_id;
-  const lastRun = readLastRun();
-  if (lastRun) context.last_run = lastRun;
   if (filePath) {
     const stat = statSync(filePath);
     if (!stat.isFile()) throw new Error('--file must name a regular file.');
@@ -72,13 +58,9 @@ export function buildAdvisorContext(filePath?: string): AdvisorContext | undefin
 }
 
 export function contextNotice(context: AdvisorContext | undefined): string {
-  if (!context) return 'Advisor context not attached.';
-  const attached = [
-    context.project_ref ? 'linked project' : null,
-    context.last_run ? 'last run' : null,
-    context.file ? `file ${context.file.path}` : null,
-  ].filter((value): value is string => value !== null);
-  return `Advisor context attached: ${attached.join(', ')}.`;
+  return context?.file
+    ? `Advisor context attached: explicitly selected file ${context.file.path}.`
+    : 'Advisor context not attached; use --file to attach a redacted excerpt.';
 }
 
 export function normalizeLastRun(record: LastRunRecord): LastRunRecord {

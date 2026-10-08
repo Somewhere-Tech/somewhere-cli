@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { mkdtempSync, rmSync,readFileSync,readdirSync } from 'node:fs';
+import { mkdtempSync, rmSync,readFileSync,readdirSync,writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer } from 'node:http';
@@ -71,5 +71,93 @@ test('account and advisor commands perform no synthetic health preflight', async
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
     rmSync(home, { recursive: true, force: true });
+  }
+});
+
+
+test('Advisor transports only explicitly selected file context, never linked project or global last run', async () => {
+  const app = mkdtempSync(join(tmpdir(), 'advisor-explicit-app-'));
+  const config = mkdtempSync(join(tmpdir(), 'advisor-explicit-config-'));
+  const bodies = [];
+  const server = createServer(async (req, res) => {
+    let raw = ''; for await (const chunk of req) raw += chunk;
+    const body = raw ? JSON.parse(raw) : null;
+    res.setHeader('Content-Type', 'application/json');
+    if (req.url === '/mcp' && body?.method === 'initialize') {
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { protocolVersion: body.params.protocolVersion, capabilities: { tools: {} }, serverInfo: { name: 'fixture', version: '1' } } }));
+    } else if (req.url === '/mcp' && body?.method === 'tools/call') {
+      assert.equal(body.params.name, 'advisor');
+      bodies.push({ path: req.url, auth: req.headers.authorization, body: body.params.arguments });
+      res.end(JSON.stringify({ jsonrpc: '2.0', id: body.id, result: { content: [{ type: 'text', text: 'Explicit answer.' }] } }));
+    } else if (req.url === '/advisor' || req.url === '/advisor/runs') {
+      bodies.push({ path: req.url, auth: req.headers.authorization, body });
+      const data = req.url === '/advisor' ? { answer: 'Explicit answer.' }
+        : { run_id: '00000000-0000-4000-8000-000000000001', status: 'settled', answer: 'Durable explicit answer.', incomplete: false };
+      res.end(JSON.stringify({ ok: true, data }));
+    } else if (req.url === '/mcp') { res.statusCode = 202; res.end(); }
+    else { res.statusCode = 405; res.end('{}'); }
+  });
+  await new Promise(resolve => server.listen(0, '127.0.0.1', resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  writeFileSync(join(app, '.somewhere.json'), JSON.stringify({ project_id: 'unrelated-linked-project' }));
+  const excerpt = join(app, '.env');
+  writeFileSync(excerpt, 'x'.repeat(8500) + '\nSECRET=fixture-secret\nMESSAGE=private-value\n');
+  const cli = join(process.cwd(), 'dist/index.js');
+  const command = async (flags, authenticated) => {
+    writeFileSync(join(config, 'config.json'), JSON.stringify(authenticated
+      ? { token: 'smt_fixture_only', user: { email: 'fixture@example.test' } } : {}));
+    // Reseed for each actual CLI invocation; global capture remains unchanged.
+    writeFileSync(join(config, 'last-run.json'), JSON.stringify({ command: 'unrelated-command', args: ['unrelated-argument'], exit_code: 1, stdout_tail: 'unrelated-output', stderr_tail: 'unrelated-error', timestamp: '2026-10-08T00:00:00Z' }));
+    return new Promise(resolve => {
+      const child = spawn(process.execPath, [cli, 'advisor', 'Explicit question', ...flags], { cwd: app, env: { ...process.env, SOMEWHERE_CONFIG_DIR: config, SOMEWHERE_MCP_URL: base + '/mcp', SOMEWHERE_API_URL: base + '/v1', SOMEWHERE_NO_NOTIFICATIONS: '1', CI: '1' } });
+      let out = '', err = '';
+      child.stdout.on('data', chunk => { out += chunk; }); child.stderr.on('data', chunk => { err += chunk; });
+      child.on('close', code => resolve({ code, out, err }));
+    });
+  };
+  try {
+    for (const authenticated of [true, false]) {
+      let result = await command([], authenticated);
+      assert.equal(result.code, 0, result.err);
+      assert.match(result.err, /context not attached/);
+      assert.equal(bodies.at(-1).body.context, undefined);
+      assert.equal(bodies.at(-1).path, authenticated ? '/mcp' : '/advisor');
+      assert.equal(bodies.at(-1).auth, authenticated ? 'Bearer smt_fixture_only' : undefined);
+      result = await command(['--file', excerpt], authenticated);
+      assert.equal(result.code, 0, result.err);
+      assert.match(result.err, /explicitly selected file/);
+      const context = bodies.at(-1).body.context;
+      assert.deepEqual(Object.keys(context), ['file']);
+      assert.equal(context.file.path, excerpt);
+      assert.equal(context.file.content.length, 8001);
+      assert.match(context.file.content, /SECRET=\[REDACTED\]/);
+      assert.match(context.file.content, /MESSAGE=\[REDACTED\]/);
+      assert(!context.file.content.includes('fixture-secret'));
+      assert(!context.file.content.includes('private-value'));
+      result = await command(['--file', excerpt, '--no-context'], authenticated);
+      assert.equal(result.code, 0, result.err);
+      assert.equal(bodies.at(-1).body.context, undefined);
+      result = await command(['--async'], authenticated);
+      assert.equal(result.code, 0, result.err);
+      assert.equal(bodies.at(-1).path, '/advisor/runs');
+      assert.equal(bodies.at(-1).body.context, undefined);
+      assert.equal(typeof bodies.at(-1).body.request_id, 'string');
+      assert.equal(typeof bodies.at(-1).body.request_created_at, 'number');
+      const count = bodies.length;
+      result = await command(['--async', '--file', excerpt], authenticated);
+      assert.equal(result.code, 1);
+      assert.match(result.err + result.out, /File excerpts are not retained/);
+      assert.equal(bodies.length, count, 'durable file refusal precedes networking');
+    }
+    for (const request of bodies) {
+      const serialized = JSON.stringify(request.body);
+      assert(!serialized.includes('unrelated-linked-project'));
+      assert(!serialized.includes('unrelated-command'));
+      assert(!serialized.includes('unrelated-output'));
+      assert(!serialized.includes('unrelated-error'));
+    }
+  } finally {
+    server.closeAllConnections(); await new Promise(resolve => server.close(resolve));
+    rmSync(app, { recursive: true, force: true }); rmSync(config, { recursive: true, force: true });
   }
 });

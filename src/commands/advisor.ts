@@ -70,14 +70,14 @@ export async function callAnonymousAdvisor(
 export function registerAdvisor(program: Command): void {
   program
     .command('advisor [question]')
-    .description('Ask the somewhere.tech platform advisor; login adds linked-project context')
+    .description('Ask the somewhere.tech platform advisor; local context is attached only with --file')
     .option('--async', 'Use the durable Advisor candidate when enabled by the server')
     .option('--resume <request-id>', 'Reconnect to the same saved Advisor request')
     .option('--status <request-id>', 'Read one saved Advisor request status')
     .option('--cancel <request-id>', 'Request cancellation of a saved Advisor run')
     .option('--json', 'Print the advisor response in a JSON envelope')
     .option('--file <path>', 'Attach a trimmed, redacted local file as context')
-    .option('--no-context', 'Do not attach the linked project, previous run, or file')
+    .option('--no-context', 'Do not attach the explicitly selected file')
     .action(async (question: string, opts: { json?: boolean; file?: string; context?: boolean; async?:boolean;resume?:string;status?:string;cancel?:string }) => {
       try {
         if(opts.async||opts.resume||opts.status||opts.cancel){
