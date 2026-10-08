@@ -13,7 +13,7 @@ test('durable Advisor expiry erases local payloads without replaying an unknown 
     const body=raw?JSON.parse(raw):null;requests.push({path:req.url,body,capability:req.headers['x-advisor-capability']});
     res.setHeader('Content-Type','application/json');
     if(req.url==='/advisor/runs')res.end(JSON.stringify({ok:true,data:{run_id:'00000000-0000-4000-8000-000000000002',status:'in_progress',provider_status:'in_progress',payload_expires_at:Date.now()+86400000}}));
-    else res.end(JSON.stringify({ok:true,data:{run_id:'00000000-0000-4000-8000-000000000002',status:terminal?'settled':'in_progress',provider_status:terminal?'completed':'in_progress',answer:'PRIVATE LATE CONTENT',partial_output:'PRIVATE PARTIAL',payload_expires_at:Date.now()+86400000}}));
+    else res.end(JSON.stringify({ok:true,data:{run_id:'00000000-0000-4000-8000-000000000002',status:terminal?'payload_expired':'in_progress',payload_expired:terminal,next_step:terminal?'none':'status',provider_status:terminal?'completed':'in_progress',answer:'PRIVATE LATE CONTENT',partial_output:'PRIVATE PARTIAL',payload_expires_at:Date.now()+86400000}}));
   });
   await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));process.env.SOMEWHERE_MCP_URL=`http://127.0.0.1:${server.address().port}/mcp`;
   const {callAdvisorRun}=await import('../dist/lib/advisor-runs.js');

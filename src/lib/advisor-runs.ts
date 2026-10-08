@@ -32,7 +32,7 @@ async function request(record:LocalRun,operation:'start'|'status'|'resume'|'canc
   if(payload.data.run_id)record.run_id=payload.data.run_id;
   if(Number.isSafeInteger(payload.data.payload_expires_at))record.payload_expires_at=Math.min(payloadDeadline(record),payload.data.payload_expires_at!);
   if(payload.data.payload_expired)record.payload_expires_at=Math.min(payloadDeadline(record),Date.now());
-  if(payload.data.status==='settled'&&payload.data.provider_status&&['completed','failed','incomplete','cancelled'].includes(payload.data.provider_status))record.provider_settled=true;
+  if((payload.data.status==='settled'||(payload.data.payload_expired&&payload.data.next_step==='none'))&&payload.data.provider_status&&['completed','failed','incomplete','cancelled'].includes(payload.data.provider_status))record.provider_settled=true;
   if(payload.data.status==='settled'||payload.data.answer){delete record.body;if(!record.run_id){record.terminal=payload.data;record.provider_settled=true;}}
   prune(record);save(record);
   if(payloadExpired(record)||payload.data.payload_expired)return {...expiredResult(record),provider_status:payload.data.provider_status};
