@@ -460,3 +460,94 @@ test('verify URL keeps linked ownership only for authenticated matching origins'
     rmSync(configDir, { recursive: true, force: true });
   }
 });
+
+
+test('verify --path selects an app path and rejects URL escapes without changing defaults', async () => {
+  const requests = [];
+  const server = createServer((req, res) => {
+    let raw = '';
+    req.on('data', chunk => { raw += chunk; });
+    req.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      if (req.method === 'GET' && /^\/v1\/projects\/(linked|chosen)\/urls$/.test(req.url)) {
+        requests.push({ method: 'GET', path: req.url });
+        res.end(JSON.stringify({ ok: true, data: { prod_fallback: 'https://app.somewhere.site/' } }));
+      } else if (req.method === 'POST' && req.url === '/v1/browser/test') {
+        const body = JSON.parse(raw);
+        requests.push({ method: 'POST', body });
+        res.end(JSON.stringify({ ok: true, data: browserReport({ steps: [], request_expectations: [] }) }));
+      } else {
+        res.statusCode = 404;
+        res.end(JSON.stringify({ ok: false, error: 'NOT_FOUND', message: req.url }));
+      }
+    });
+  });
+  await new Promise(resolvePromise => server.listen(0, '127.0.0.1', resolvePromise));
+  const app = mkdtempSync(join(tmpdir(), 'sw-verify-path-app-'));
+  const configDir = mkdtempSync(join(tmpdir(), 'sw-verify-path-config-'));
+  writeFileSync(join(app, '.somewhere.json'), JSON.stringify({ project_id: 'linked', name: 'linked' }));
+  writeFileSync(join(configDir, 'config.json'), JSON.stringify({ token: 'smt_fixture', user: { email: '', username: '' } }));
+  const env = { ...process.env, SOMEWHERE_CONFIG_DIR: configDir,
+    SOMEWHERE_API_URL: `http://127.0.0.1:${server.address().port}/v1`, CI: '1', SOMEWHERE_NO_NOTIFICATIONS: '1' };
+  const cli = join(process.cwd(), 'dist/index.js');
+  const run = args => new Promise(resolvePromise => {
+    const child = spawn(process.execPath, [cli, 'verify', ...args, '--json'], { cwd: app, env });
+    let stdout = '', stderr = '';
+    child.stdout.on('data', chunk => { stdout += chunk; });
+    child.stderr.on('data', chunk => { stderr += chunk; });
+    child.on('close', status => resolvePromise({ status, stdout, stderr }));
+  });
+  try {
+    for (const [args, project, url] of [
+      [['--path', '/settings'], 'linked', 'https://app.somewhere.site/settings'],
+      [['--project', 'chosen', '--path', 'settings/profile?tab=security%20keys&return=%2Fhome#password'], 'chosen',
+        'https://app.somewhere.site/settings/profile?tab=security%20keys&return=%2Fhome#password'],
+    ]) {
+      requests.length = 0;
+      const result = await run(args);
+      assert.equal(result.status, 0, result.stdout + result.stderr);
+      assert.deepEqual(requests[0], { method: 'GET', path: `/v1/projects/${project}/urls` });
+      const browser = requests.filter(row => row.method === 'POST');
+      assert.equal(browser.length, 2);
+      for (const row of browser) {
+        assert.equal(row.body.project_id, project);
+        assert.equal(row.body.url, url);
+      }
+    }
+    for (const path of ['https://other.example/settings', '//other.example/settings', 'javascript:alert(1)', '/\\other.example/settings', ' /settings']) {
+      requests.length = 0;
+      const result = await run(['--path', path]);
+      assert.equal(result.status, 1);
+      assert.match(JSON.parse(result.stdout).message, /--path must be a relative app path/);
+      assert.deepEqual(requests, [], 'invalid paths make no API or browser request');
+    }
+    for (const args of [
+      ['--url', 'https://app.somewhere.site', '--path', '/settings'],
+      ['https://app.somewhere.site', '--path', '/settings'],
+    ]) {
+      requests.length = 0;
+      const result = await run(args);
+      assert.equal(result.status, 1);
+      assert.match(JSON.parse(result.stdout).message, /Pass --url or --path, not both/);
+      assert.deepEqual(requests, []);
+    }
+    requests.length = 0;
+    const unchanged = await run([]);
+    assert.equal(unchanged.status, 0, unchanged.stdout + unchanged.stderr);
+    assert.equal(requests.length, 2, 'default still lets the platform resolve the linked URL');
+    for (const row of requests) {
+      assert.equal(row.body.project_id, 'linked');
+      assert.equal(row.body.url, undefined);
+      assert.deepEqual(row.body.actions, []);
+    }
+    requests.length = 0;
+    const explicit = await run(['--project', 'chosen', '--url', 'https://app.somewhere.site/existing?x=1']);
+    assert.equal(explicit.status, 0, explicit.stdout + explicit.stderr);
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].body.url, 'https://app.somewhere.site/existing?x=1');
+  } finally {
+    await new Promise(resolvePromise => server.close(resolvePromise));
+    rmSync(app, { recursive: true, force: true });
+    rmSync(configDir, { recursive: true, force: true });
+  }
+});

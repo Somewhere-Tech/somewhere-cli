@@ -15,6 +15,7 @@ import { isLoopbackUrl, runLocalBrowser } from '../lib/browser-run.js';
 import { dim, error, green, red, teal } from '../lib/output.js';
 import { withVerifyProgress } from '../lib/verify-progress.js';
 import { saveVerifyReport } from '../lib/verify-report.js';
+import { getProjectServingUrl } from '../lib/project-urls.js';
 import { readBrowserIncomplete, readBrowserLifecycle, formatStepDuration, stringifyResult, type BrowserLifecycle, type BrowserResult } from './browser.js';
 
 /** The local browser's own bound (no platform execution cap applies). */
@@ -1375,6 +1376,7 @@ export function registerVerify(program: Command): void {
     .description('Run one browser flow at desktop and phone size, report every step and health signal, and capture both screenshots.')
     .option('--project <ref>', 'Project to verify. With --url, use this when the directory is unlinked or points to another project.')
     .option('--url <url>', 'Live or local URL to verify.')
+    .option('--path <path>', 'Path relative to the linked or selected project app, e.g. /settings. Cannot be combined with --url.')
     .option('--flow <file.json>', 'Flow JSON with actions, session seeds, expect_requests, visible_only, and viewports. Omit for the default health check.')
     .option('--session <session-id>', 'Existing app session value to seed as localStorage sw_auth in every viewport.')
     .option('--cookie <name=value>', 'Existing app cookie to seed in every viewport. Repeatable.', collectCookie)
@@ -1415,13 +1417,20 @@ Several users need a claimed account and a CLI login approved for all your
 projects: a login approved for "Only these projects" cannot open named browsers
 (SESSION_SCOPE_FORBIDDEN). Print the full flow schema with: somewhere verify --schema
 `)
-    .action(async (target: string | undefined, opts: { project?: string; url?: string; flow?: string; session?: string; cookie?: string; json?: boolean; schema?: boolean }) => {
+    .action(async (target: string | undefined, opts: { project?: string; url?: string; path?: string; flow?: string; session?: string; cookie?: string; json?: boolean; schema?: boolean }) => {
       if (opts.schema) {
         console.log(JSON.stringify(verifyFlowSchema(), null, 2));
         process.exit(0);
       }
       try {
-        const url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);
+        let url = opts.url ?? (target && /^https?:\/\//i.test(target) ? target : undefined);
+        if (opts.path !== undefined) {
+          if (url !== undefined) throw new Error('Pass --url or --path, not both (including a positional URL).');
+          if (!opts.path || /^[a-z][a-z0-9+.-]*:/i.test(opts.path) || opts.path.startsWith('//')
+              || /[\\\x00-\x20\x7f]/.test(opts.path)) {
+            throw new Error('--path must be a relative app path such as /settings, without a scheme, host, backslash or whitespace.');
+          }
+        }
         const local = !!url && isLoopbackUrl(url);
         const linkedProjectId = loadProjectConfig()?.project_id;
         const config = loadConfig();
@@ -1450,6 +1459,17 @@ projects: a login approved for "Only these projects" cannot open named browsers
           }
         }
         if (!local && !client) client = new ApiClient(getToken());
+        if (opts.path !== undefined) {
+          if (!client || !project) throw new Error('--path requires a linked or selected project.');
+          const servingUrl = await getProjectServingUrl(client, project);
+          if (!servingUrl) throw new Error('The selected project did not return an app URL. Deploy it before using --path.');
+          const base = new URL(servingUrl);
+          const selected = new URL(opts.path, base);
+          if (selected.origin !== base.origin || !/^https?:$/.test(selected.protocol)) {
+            throw new Error('--path must stay on the selected project app origin.');
+          }
+          url = selected.href;
+        }
         const input = loadVerifyInput(opts.flow);
         if (input.kind === 'journey') {
           if (opts.session || cliCookies.length) {
