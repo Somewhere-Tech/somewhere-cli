@@ -73,12 +73,12 @@ test('no-config and temporary advisor use the public HTTP contract without proje
     const answer = await run(['advisor', 'How do I deploy?', '--file', contextFile, '--json'], env, project);
     assert.equal(answer.status, 0, answer.stderr);
     assert.equal(JSON.parse(answer.stdout).answer, 'Anonymous answer.\n\n---\nLog in for faster answers.');
-    assert.match(answer.stderr, /Advisor context attached: last run, file/);
+    assert.match(answer.stderr, /Advisor context attached: explicitly selected file/);
     assert.equal(calls[0].url, '/advisor');
     assert.equal(calls[0].authorization, undefined);
     assert.equal(calls[0].body.project_id, undefined);
     assert.equal(calls[0].body.context.project_ref, undefined);
-    assert.equal(calls[0].body.context.last_run.stderr_tail, 'Bearer [REDACTED] failed');
+    assert.equal(calls[0].body.context.last_run, undefined);
     assert.equal(calls[0].body.context.file.content, 'APP_SECRET=[REDACTED]\n');
     assert.doesNotMatch(JSON.stringify(calls[0]), /private-project-id|smt_private_fixture|sk_private_fixture/);
 
@@ -99,7 +99,7 @@ test('no-config and temporary advisor use the public HTTP contract without proje
     assert.equal(calls[2].authorization, undefined);
     assert.equal(calls[2].body.context.project_ref, undefined);
     assert.doesNotMatch(JSON.stringify(calls[2]), /private-project-id|smt_temporary_fixture/);
-    assert.match(temporary.stderr, /Advisor context attached: last run, file/);
+    assert.match(temporary.stderr, /Advisor context attached: explicitly selected file/);
 
     const temporaryNoContext = await run(['advisor', 'No temporary context', '--no-context'], env, project);
     assert.equal(temporaryNoContext.status, 0, temporaryNoContext.stderr);
@@ -300,10 +300,11 @@ test('advisor, MCP docs topics, and catalog use the authenticated platform help 
       question: 'How should I store notes?',
       answer: 'Use `sw.db.query` for this.',
     });
-    assert.match(advisor.stderr, /Advisor context attached: last run, file/);
+    assert.match(advisor.stderr, /Advisor context attached: explicitly selected file/);
     const advisorContext = calls[0].arguments.context;
-    assert.equal(advisorContext.last_run.stderr_tail, 'deploy failed: Bearer [REDACTED]');
-    assert.equal(advisorContext.last_run.args[1], '[REDACTED]');
+    assert.equal(advisorContext.last_run, undefined);
+    assert.equal(advisorContext.project_ref, undefined);
+    assert.equal(calls[0].arguments.project_id, undefined);
     assert.equal(advisorContext.file.content, 'APP_SECRET=[REDACTED]\nPUBLIC_NAME=[REDACTED]\n');
     assert.doesNotMatch(JSON.stringify(advisorContext), /sk_live_file_fixture|smt_stderr_fixture/);
 
