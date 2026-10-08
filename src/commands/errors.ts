@@ -29,6 +29,12 @@ const isPlatformDiagnostic = (r: ErrorRow): boolean => r.source === 'api'
   && r.method === 'POST' && r.endpoint === '/v1/db/query-observations'
   && (r.status_code ?? 0) >= 500;
 
+// A caller leaving is ordinary traffic; ambiguous 499s and handler failures stay visible.
+const isClientDisconnect = (r: ErrorRow): boolean => r.status_code === 499
+  && r.source === 'function' && r.kind === 'refusal'
+  && (r.error_code === 'CLIENT_DISCONNECTED'
+    || (r.error_code === 'HTTP_499' && r.error_message?.startsWith('CLIENT_DISCONNECTED:') === true));
+
 export function registerErrors(program: Command) {
   program
     .command('errors [project]')
@@ -92,6 +98,14 @@ export function registerErrors(program: Command) {
         return;
       }
 
+      const disconnected = rows.filter(isClientDisconnect).length;
+      rows = rows.filter(r => !isClientDisconnect(r));
+      const disconnectedNotice = `${disconnected} client disconnect${disconnected === 1 ? '' : 's'} collapsed — use --json to see every row.`;
+      if (!rows.length && disconnected) {
+        console.log(dim(`  ${disconnectedNotice}`));
+        return;
+      }
+
       if (!rows.length) {
         // A window with nothing but refusals is a healthy window — say what is
         // actually there rather than reporting a bare zero.
@@ -123,10 +137,11 @@ export function registerErrors(program: Command) {
       const exceptions = rows.length - rows.filter(isRefusal).length - platformDiagnostics;
       const counts = opts.exceptions
         ? `${exceptions} exception${exceptions === 1 ? '' : 's'}`
-        : `${exceptions} exception${exceptions === 1 ? '' : 's'}, ${refusals} refused on purpose`;
+        : `${exceptions} exception${exceptions === 1 ? '' : 's'}, ${rows.filter(isRefusal).length} refused on purpose`;
       const diagnosticCount = platformDiagnostics
         ? `, ${platformDiagnostics} platform diagnostic${platformDiagnostics === 1 ? '' : 's'}` : '';
       console.log(dim(`\n  ${counts}${diagnosticCount} — ${teal('somewhere logs --level error')} for full detail.`));
+      if (disconnected) console.log(dim(`  ${disconnectedNotice}`));
     });
 }
 

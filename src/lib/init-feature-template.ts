@@ -2127,7 +2127,7 @@ button, input, textarea { font: inherit; color: inherit; }
 .muted { color: var(--color-muted); }
 .hint { margin: 0; color: var(--color-muted); font-size: var(--text-sm); font-weight: 400; }
 .error { margin: 0; color: var(--color-danger); font-size: var(--text-sm); }
-.skip-link { position: absolute; left: var(--space-3); top: -60px; padding: var(--space-2) var(--space-3); background: var(--color-text); color: var(--color-bg); }
+.skip-link { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; position: absolute; left: var(--space-3); top: -60px; padding: var(--space-2) var(--space-3); background: var(--color-text); color: var(--color-bg); }
 .skip-link:focus { top: var(--space-3); }
 
 .panel {
@@ -2223,7 +2223,7 @@ button, input, textarea { font: inherit; color: inherit; }
   border-bottom: 1px solid var(--color-border);
 }
 .topbar__error { width: min(1040px, calc(100% - 2 * var(--space-6))); margin: var(--space-2) auto 0; }
-.brand { font: 600 var(--text-lg)/1 var(--font-display); color: inherit; text-decoration: none; }
+.brand { display: inline-flex; align-items: center; justify-content: center; min-width: 44px; min-height: 44px; font: 600 var(--text-lg)/1 var(--font-display); color: inherit; text-decoration: none; }
 .account { display: flex; align-items: center; gap: var(--space-3); min-width: 0; }
 .account__label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--color-muted); font-size: var(--text-sm); }
 .content { width: min(1040px, calc(100% - 2 * var(--space-6))); margin: 0 auto; padding: var(--space-8) 0 var(--space-12); outline: none; }
