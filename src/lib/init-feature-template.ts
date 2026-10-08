@@ -679,7 +679,8 @@ export function useNotes(): NotesController {
   // An empty title disables Save; it is not flagged while the user types.
   const draftErrors: NoteDraftErrors = draft.title.trim() ? errors : { body: errors.body };
   const editing = editingId === null ? null : notes.find((note) => note.id === editingId) ?? null;
-  const canSave = !saving && (pendingCreate ? pendingCreate.error.retry !== null : Object.keys(errors).length === 0);
+  const pendingAdd = editing ? null : pendingCreate;
+  const canSave = !saving && (pendingAdd ? pendingAdd.error.retry !== null : Object.keys(errors).length === 0);
 
   function fail(reason: unknown) {
     setNotice({ tone: 'error', text: notesErrorMessage(reason) });
@@ -691,15 +692,15 @@ export function useNotes(): NotesController {
     busy.current = true;
     setSaving(true);
     setNotice(null);
-    const submitted = pendingCreate?.draft ?? { ...draft };
-    const creating = pendingCreate !== null || !editing;
+    const submitted = pendingAdd?.draft ?? { ...draft };
+    const creating = !editing;
     try {
       if (!creating && editing) {
         const result = await updateNote(editing, draft);
         if (!mounted.current) return;
         if (result.kind === 'saved') {
           setNotes((list) => list.map((note) => (note.id === editing.id ? result.note : note)));
-          setNotice({ tone: 'info', text: 'Saved.' });
+          setNotice({ tone: 'info', text: pendingCreate ? 'Saved. ' + pendingCreate.error.message : 'Saved.' });
         } else if (result.kind === 'unchanged') {
           setNotice({ tone: 'info', text: 'No changes to save.' });
         } else {
@@ -707,8 +708,8 @@ export function useNotes(): NotesController {
           setNotice({ tone: 'error', text: 'That note was already removed.' });
         }
       } else {
-        const created = pendingCreate?.error.retry
-          ? await pendingCreate.error.retry() : await createNote(submitted);
+        const created = pendingAdd?.error.retry
+          ? await pendingAdd.error.retry() : await createNote(submitted);
         if (!mounted.current) return;
         setNotes((list) => [...list, created]);
         setPendingCreate(null);
@@ -716,7 +717,7 @@ export function useNotes(): NotesController {
       }
       // A retry saves the original values, not edits made while it was uncertain.
       setDraft((current) => current.title === submitted.title && current.body === submitted.body ? EMPTY_DRAFT : current);
-      if (!pendingCreate) setEditingId((current) => current === editingId ? null : current);
+      setEditingId((current) => current === editingId ? null : current);
     } catch (reason: unknown) {
       if (mounted.current) {
         if (creating && reason instanceof NoteCreateError) setPendingCreate({ error: reason, draft: submitted });
@@ -761,15 +762,16 @@ export function useNotes(): NotesController {
     startEdit(note) {
       setEditingId(note.id);
       setDraft({ title: note.title, body: note.body });
-      if (!pendingCreate) setNotice(null);
+      setNotice(null);
     },
     cancelEdit() {
       setEditingId(null);
       setDraft(EMPTY_DRAFT);
+      if (pendingCreate) setNotice({ tone: 'error', text: pendingCreate.error.message });
     },
     saving,
     canSave,
-    retryingCreate: pendingCreate?.error.retry != null,
+    retryingCreate: pendingAdd?.error.retry != null,
     save,
     removingId,
     remove,

@@ -69,11 +69,12 @@ async function prepare(ui) {
   return { useNotes, dir };
 }
 
-function fixture(useNotes, mode) {
+function fixture(useNotes, mode, existing = false) {
   const host = hookHost();
-  const rows = new Map();
+  const rows = new Map(existing ? [[41, { id: 41, title: 'Existing', body: 'Before' }]] : []);
   const receipts = new Map();
   const writes = [];
+  const updates = [];
   let calls = 0;
   let reads = 0;
   globalThis.__notesHost = host;
@@ -81,6 +82,12 @@ function fixture(useNotes, mode) {
   globalThis.fetch = async (_url, init) => {
     const body = JSON.parse(init.body);
     if (body.operation === 'list') { reads++; return Response.json({ data: [...rows.values()], has_more: false }); }
+    if (body.operation === 'update') {
+      updates.push(body);
+      const note = { ...rows.get(body.id), ...body.values };
+      rows.set(body.id, note);
+      return Response.json({ data: note, changes: 1, count: 1 });
+    }
     assert.equal(body.operation, 'create');
     writes.push(init.body);
     calls++;
@@ -102,7 +109,7 @@ function fixture(useNotes, mode) {
   };
   let controller;
   const render = () => controller = host.render(useNotes);
-  return { rows, writes, render, get reads() { return reads; }, async start() { render(); await new Promise(resolve => setImmediate(resolve)); render(); controller.setDraft({ title: 'Original', body: 'Body' }); return render(); } };
+  return { rows, writes, updates, render, get reads() { return reads; }, async start() { render(); await new Promise(resolve => setImmediate(resolve)); render(); controller.setDraft({ title: 'Original', body: 'Body' }); return render(); } };
 }
 
 test('emitted private-data starter preserves keyed saves across uncertainty', { skip: !platform }, async () => {
@@ -130,6 +137,30 @@ test('emitted private-data starter preserves keyed saves across uncertainty', { 
         assert.equal(c.retryingCreate, false); assert.match(c.notice.text, /Check your notes/);
         c.cancelEdit(); c = f.render(); c.setDraft({ title: 'Changed', body: '' }); c = f.render();
         await c.save(); assert.equal(f.writes.length, 1, mode + ' survives cancel and edits');
+      }
+      // A pending add must never hijack an existing note's Save changes.
+      for (const mode of ['lost', 'committed-error', 'no-handle']) {
+        const f = fixture(useNotes, mode, true); let c = await f.start();
+        await c.save(); c = f.render();
+        c.startEdit(c.notes.find(note => note.id === 41)); c = f.render();
+        assert.equal(c.retryingCreate, false, mode + ': editing shows Save changes');
+        c.setDraft({ title: 'Updated existing', body: 'After' }); c = f.render();
+        assert.equal(c.canSave, true, mode + ': existing update stays available');
+        await c.save(); c = f.render();
+        assert.equal(f.updates.length, 1); assert.equal(f.writes.length, 1, 'update never sends a pending create');
+        assert.equal(f.rows.get(41).title, 'Updated existing');
+        assert.equal(c.editingId, null, 'successful update returns to adding');
+        assert.equal(c.retryingCreate, mode === 'lost');
+        assert.equal(c.canSave, mode === 'lost', 'pending add remains guarded after update');
+        c.startEdit(c.notes.find(note => note.id === 41)); c = f.render();
+        c.cancelEdit(); c = f.render();
+        assert.equal(c.retryingCreate, mode === 'lost', 'cancel also preserves pending add');
+        await c.save(); c = f.render();
+        if (mode === 'lost') {
+          assert.equal(f.writes[1], f.writes[0], 'returning to Retry preserves original key/body');
+          assert.equal(f.rows.size, 2, 'existing note plus one original create');
+          assert.equal(c.notes.length, 2);
+        } else assert.equal(f.writes.length, 1, 'committed/no-handle add stays blocked');
       }
       const uncertain = fixture(useNotes, 'lost-then-refused'); let c = await uncertain.start();
       await c.save(); c = uncertain.render(); await c.save(); c = uncertain.render();
