@@ -214,6 +214,23 @@ function emptyCredentialHome() {
   return mkdtempSync(join(tmpdir(), 'sw-docs-nocreds-home-'));
 }
 
+test('docs schema resolves the canonical declared-data page; unknown topics still fail', async () => {
+  const home = emptyCredentialHome();
+  await withManifest(async (base) => {
+    const env = { HOME: home, USERPROFILE: home, SOMEWHERE_DOCS_BASE: base,
+      SOMEWHERE_NO_NOTIFICATIONS: '1', NO_COLOR: '1', CI: '1' };
+    const result = await run(['docs', 'Schema', '--json'], env);
+    assert.equal(result.status, 0, result.stderr);
+    const page = JSON.parse(result.stdout);
+    assert.equal(page.topic, 'declared-data');
+    assert.match(page.content, /Generated client API/);
+    assert.doesNotMatch(page.content, /Canonical database body/);
+    const unknown = await run(['docs', 'zzz-not-a-real-topic', '--json'], env);
+    assert.equal(unknown.status, 1);
+    assert.match(unknown.stdout + unknown.stderr, /DOCS_TOPIC_NOT_FOUND/);
+  });
+});
+
 test('docs <topic> returns exact manifest pages with NO credential present', async () => {
   const home = emptyCredentialHome();
   await withManifest(async (base) => {

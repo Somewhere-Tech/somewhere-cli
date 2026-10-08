@@ -50,6 +50,7 @@ const ALIASES: Record<string, string> = {
   quickstart: 'start',
   help: 'docs',
   all: 'llms',
+  schema: 'declared-data',
 };
 
 /** Generated from PLATFORM_HELP_TOPICS and served without credentials. Each
@@ -533,6 +534,7 @@ export function registerDocs(program: Command) {
       const key = TOPICS[requestedTopic]
         ? requestedTopic
         : ALIASES[requestedTopic.toLowerCase()];
+      const resolvedTopic = key ?? requestedTopic;
       const entry = key ? TOPICS[key] : undefined;
       if (entry && view.kind === 'section') {
         reportDocsFailure({
@@ -551,7 +553,7 @@ export function registerDocs(program: Command) {
         if (hasUsableCredential()) {
           try {
             const content = await callPlatformHelpTool('docs', {
-              topic: requestedTopic,
+              topic: resolvedTopic,
               ...(view.kind === 'full' ? { detail: 'full' } : {}),
               ...(view.kind === 'section' ? { section: view.id } : {}),
             });
@@ -570,7 +572,7 @@ export function registerDocs(program: Command) {
 
         try {
           const pages = await fetchPublicManifest();
-          const page = pages.find(({ id }) => id.toLowerCase() === requestedTopic.toLowerCase());
+          const page = pages.find(({ id }) => id.toLowerCase() === resolvedTopic.toLowerCase());
           if (page) {
             const rendered = renderPublicDocsView(page, view);
             if (rendered.failure) {
