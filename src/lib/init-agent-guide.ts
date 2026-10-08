@@ -5,13 +5,11 @@ import { SKILLS_DIR, skillNames } from './skills-pack.js';
 // docs lint byte-compares this value when SOMEWHERE_CLI_REPO points here.
 export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 
-\`somewhere init --name <slug>\` creates a React + TypeScript starter without
-logging in. The default has sign-in; minimal/bare omit it. The README maps
-the files. \`init --catalog --json\` lists \`--features\` modules.
+\`somewhere init --name <slug>\` creates a React + TypeScript app; no login needed.
+Sign-in is included except in minimal/bare. See README for the file map. \`init --catalog --json\` lists \`--features\` modules.
 \`npx @somewhere-tech/cli deploy\` publishes a temporary app and prints its live
 URL, claim URL and expiry. Login is needed for account-owned operations,
-the email test inbox and cron. On a hosted VM, \`somewhere login\` prints a code
-for human approval in a browser; the machine stays signed in.
+the email test inbox and cron. \`somewhere login\` prints a browser approval code and keeps you signed in.
 For a reference, use \`somewhere docs <topic> --section <id>\` (MCP: \`docs({ topic })\`, \`catalog\`).
 
 After every change:
