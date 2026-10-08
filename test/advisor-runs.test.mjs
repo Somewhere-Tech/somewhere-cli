@@ -29,7 +29,7 @@ test('durable Advisor CLI persists identity before POST, resumes lost acknowledg
     const file=readdirSync(join(dir,'advisor-runs')).find(file=>file.endsWith('.json')),id=file.slice(0,-5);
     const stored=JSON.parse(readFileSync(join(dir,'advisor-runs',file),'utf8'));assert.equal(stored.request_id,requests[0].body.request_id);assert.equal(statSync(join(dir,'advisor-runs',file)).mode&0o777,0o600);
     await assert.rejects(callAdvisorRun({requestId:id,operation:'cancel',wait:false}),/no cancellation or replacement dispatch/);assert.equal(requests.length,1);
-    const recovered=await callAdvisorRun({requestId:id,operation:'resume',wait:false});assert.equal(recovered.run_id,'00000000-0000-4000-8000-000000000001');assert.equal(billed,1);assert.deepEqual(requests[0].body,requests[1].body);assert.equal(requests[0].capability,requests[1].capability);
+    const recovered=await callAdvisorRun({requestId:id,operation:'resume',wait:false});assert.equal(recovered.run_id,'00000000-0000-4000-8000-000000000001');assert.equal(billed,1);assert.deepEqual(requests[0].body,requests[1].body);assert.equal(requests[0].capability,requests[1].capability);assert.equal(JSON.parse(readFileSync(join(dir,'advisor-runs',file),'utf8')).body,undefined,'Acknowledgment drops question/context before completion');
     for(let i=0;i<31;i++){const status=await callAdvisorRun({requestId:id,operation:'status',wait:false});assert.equal(status.status,'in_progress');}
     assert.equal(billed,1);assert.equal(requests.filter(r=>r.path==='/advisor/runs').length,2);
     await callAdvisorRun({requestId:id,operation:'cancel',wait:false});assert.equal(billed,1);
