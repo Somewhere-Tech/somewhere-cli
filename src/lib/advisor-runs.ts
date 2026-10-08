@@ -1,5 +1,5 @@
 import {randomBytes,randomUUID} from 'node:crypto';
-import {chmodSync,existsSync,mkdirSync,readFileSync,renameSync,writeFileSync} from 'node:fs';
+import {chmodSync,existsSync,mkdirSync,readFileSync,readdirSync,renameSync,writeFileSync} from 'node:fs';
 import {join} from 'node:path';
 import {cliConfigDir,loadConfig} from './config.js';
 import {fetchWithProxy} from './http.js';
@@ -18,6 +18,28 @@ function prune(record:LocalRun):void {
   if(!payloadExpired(record))return;
   delete record.body;delete record.terminal;
   if(!record.run_id||record.provider_settled)delete record.capability;
+}
+/** Opportunistic only: no files are cleaned while the CLI is not running.
+ * The persisted cursor rotates past unreadable and fresh records as well. */
+function sweepExpiredRecords():void {
+  const dir=directory(),cursorFile=join(dir,'.cleanup-cursor');
+  try {
+    const names=readdirSync(dir).filter(name=>/^[a-f0-9-]{36}\.json$/i.test(name)).sort();
+    if(!names.length)return;
+    let cursor='';try{cursor=readFileSync(cursorFile,'utf8');}catch{/* First sweep or unreadable cursor. */}
+    const next=names.findIndex(name=>name>cursor),start=next<0?0:next;
+    let last=cursor;
+    for(let offset=0;offset<Math.min(32,names.length);offset++){
+      const name=names[(start+offset)%names.length];last=name;
+      try{
+        const record=JSON.parse(readFileSync(join(dir,name),'utf8')) as LocalRun;
+        if(record.request_id+'.json'!==name||!Number.isSafeInteger(record.request_created_at)||!payloadExpired(record))continue;
+        const before=JSON.stringify(record);prune(record);
+        if(JSON.stringify(record)!==before)save(record);
+      }catch{/* A bad local record must not block other records or invocation. */}
+    }
+    writeFileSync(cursorFile,last,{mode:0o600});
+  }catch{/* Local housekeeping must not prevent original-handle recovery. */}
 }
 function expiredResult(record:LocalRun):AdvisorRunResult {return {run_id:record.run_id,request_id:record.request_id,status:record.provider_settled?'settled':'delivery_expired',payload_expired:true,payload_expires_at:payloadDeadline(record),error:'ADVISOR_PAYLOAD_EXPIRED',incomplete:true,next_step:record.provider_settled?'none':'status'};}
 function load(id:string):LocalRun {if(!existsSync(path(id)))throw Error('Advisor request was not found in this CLI configuration.');const record=JSON.parse(readFileSync(path(id),'utf8')) as LocalRun;prune(record);save(record);return record;}
@@ -40,6 +62,7 @@ async function request(record:LocalRun,operation:'start'|'status'|'resume'|'canc
 }
 /** Local identity is written before POST. Transport failure never creates another request. */
 export async function callAdvisorRun(args:{question?:string;context?:AdvisorContext;requestId?:string;operation?:'status'|'resume'|'cancel';wait?:boolean;progress?:(message:string)=>void}):Promise<AdvisorRunResult>{
+  sweepExpiredRecords();
   let record:LocalRun;
   if(args.requestId)record=load(args.requestId);
   else{if(!args.question)throw Error('Supply a question or --resume <request-id>.');const id=randomUUID(),created=Date.now(),context=args.context?{...args.context}:undefined;if(context?.file)delete context.file;const config=loadConfig();record={owner_mode:config?.token&&config.temporary!==true?'account':'anonymous',request_id:id,request_created_at:created,capability:randomBytes(32).toString('hex'),body:{question:redactAdvisorText(args.question),...(context?{context}:{}),request_id:id,request_created_at:created}};save(record);}
@@ -57,6 +80,7 @@ export async function callAdvisorRun(args:{question?:string;context?:AdvisorCont
 
 /** Adopt an unpaid legacy/native prepared handle before its first billable resume. */
 export async function consumeAdvisorRun(text:string,progress?:(message:string)=>void):Promise<AdvisorRunResult|null>{
+  sweepExpiredRecords();
   let parsed:Record<string,unknown>;try{parsed=JSON.parse(text) as Record<string,unknown>;}catch{return null;}
   if(typeof parsed.run_id!=='string'||typeof parsed.status!=='string')return null;
   const config=loadConfig(),anonymous=typeof parsed.anonymous_capability==='string',id=randomUUID();
