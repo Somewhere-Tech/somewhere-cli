@@ -56,10 +56,10 @@ Data: declare tables in \`db/schema.ts\`; pages use \`somewhere:data\`
 Use \`owner()\` for personal rows, \`group()\` for invited teams, \`appRole()\`
 for app-wide roles, and \`anyOf()\` for owner or a permitted role.
 \`shared()\` gives signed-in reads and creator-only writes. \`client\` sets browser
-columns; \`publicRead: { where }\` admits visitors. Keep these rules; add one
-function for an exceptional write, not \`serverOnly()\` everywhere. Validate
-first. Here \`handle\` is a public intake address its owner claimed, never a
-private profile:
+columns; \`publicRead: { where }\` admits visitors. Public-profile enquiries use
+\`client.intake\` (\`somewhere docs declared-data\`). Keep scopes and grants;
+functions handle authorized exceptional writes and side effects. Validate
+first: \`handle\` below is a public address its owner claimed:
 
 \`\`\`ts
 const { handle, title, from_email } = body as { handle?: unknown; title?: unknown; from_email?: unknown };
