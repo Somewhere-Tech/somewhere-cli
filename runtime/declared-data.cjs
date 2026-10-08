@@ -45,7 +45,7 @@ var require_declared_data_contract = __commonJS({
     function fail(detail) {
       throw new Error(`Invalid declared data contract: ${detail}`);
     }
-    function record(value, name) {
+    function record2(value, name) {
       if (!value || typeof value !== "object" || Array.isArray(value)) fail(name);
     }
     function fields(value, columns, name, empty = false) {
@@ -55,11 +55,11 @@ var require_declared_data_contract = __commonJS({
       return result.sort();
     }
     function policy(value, label, edges = 0) {
-      record(value, label);
+      record2(value, label);
       const keys = Object.keys(value).sort().join(",");
       if (value.k === "o" && keys === "c,k" && identifier.test(value.c)) return { k: "o", c: value.c };
       if (value.k === "m" && keys === "k,m") {
-        record(value.m, label + ".member");
+        record2(value.m, label + ".member");
         const { g, m, u, mg, o } = value.m;
         const memberKeys = Object.keys(value.m).sort().join(",");
         if (!["g,m,mg,u", "g,m,mg,o,u"].includes(memberKeys) || !identifier.test(m) || !identifier.test(u) || !Array.isArray(g) || !g.length || !Array.isArray(mg) || g.length !== mg.length || [...g, ...mg].some((field) => typeof field !== "string" || !identifier.test(field)) || o !== void 0 && (!Array.isArray(o) || JSON.stringify(o) !== JSON.stringify(["read", "create", "update", "delete"].filter((operation) => o.includes(operation))) || !o.includes("read") && (o.includes("update") || o.includes("delete")))) fail(label);
@@ -86,7 +86,7 @@ var require_declared_data_contract = __commonJS({
       fail(label);
     }
     function policyRoles(value, label) {
-      record(value, label + ".roles");
+      record2(value, label + ".roles");
       if (Object.keys(value).sort().join(",") !== "create,delete,read,update") fail(label);
       const roles = {};
       for (const op of ["read", "create", "update", "delete"]) {
@@ -108,25 +108,25 @@ var require_declared_data_contract = __commonJS({
     }
     function canonicalize2(schema, intents, scopes, insertReceiptCapability) {
       validateInsertReceiptCapability(insertReceiptCapability);
-      record(schema, "schema");
-      record(intents, "intents");
-      record(scopes, "scopes");
+      record2(schema, "schema");
+      record2(intents, "intents");
+      record2(scopes, "scopes");
       const tables = [];
       const membershipTables = new Set(Object.values(schema).filter((table) => table && table.member).map((table) => table.member.m));
       for (const table of Object.values(schema)) if (table?.policy) policyMembershipTables(table.policy, membershipTables);
       for (const name of Object.keys(schema).sort()) {
         const table = schema[name];
-        record(table, `table ${name}`);
+        record2(table, `table ${name}`);
         if (table.client === void 0) {
           if (table.clientPrimaryKey !== void 0) fail(`${name} has a primary key without client permissions`);
           continue;
         }
         if (!identifier.test(name) || name.startsWith("_") || name.startsWith("sqlite_")) fail(`table ${name}`);
-        record(table.client, `${name}.client`);
+        record2(table.client, `${name}.client`);
         if (!Array.isArray(table.columns) || !table.columns.length) fail(`${name}.columns`);
         const seen = /* @__PURE__ */ new Set();
         const columns = table.columns.map((column) => {
-          record(column, `${name}.column`);
+          record2(column, `${name}.column`);
           if (typeof column.n !== "string" || !identifier.test(column.n) || seen.has(column.n) || !types.has(column.t)) fail(`${name}.column`);
           if (column.nul !== void 0 && column.nul !== 1 || column.d !== void 0 && column.d !== 1) fail(`${name}.${column.n} flags`);
           seen.add(column.n);
@@ -135,14 +135,14 @@ var require_declared_data_contract = __commonJS({
         const pk = table.clientPrimaryKey;
         if (!seen.has(pk) || !["integer", "text"].includes(columns.find((column) => column.n === pk).t)) fail(`${name} primary key`);
         const input = table.client;
-        if (Object.keys(input).some((key) => !["read", "publicRead", "create", "update", "delete", "identity", "links"].includes(key))) fail(`${name} permissions`);
+        if (Object.keys(input).some((key) => !["read", "publicRead", "create", "update", "delete", "identity", "links", "intake"].includes(key))) fail(`${name} permissions`);
         const read = typeof input.read === "boolean" ? input.read : fields(input.read, seen, `${name}.read`);
         if (Array.isArray(read) && !read.includes(pk)) fail(`${name}.read must include the primary key`);
         let publicRead = input.publicRead;
         if (typeof publicRead !== "boolean") {
-          record(publicRead, `${name} public read`);
+          record2(publicRead, `${name} public read`);
           if (Object.keys(publicRead).some((key) => key !== "where")) fail(`${name} public read`);
-          record(publicRead.where, `${name} public read predicate`);
+          record2(publicRead.where, `${name} public read predicate`);
           const entries = Object.entries(publicRead.where);
           if (!entries.length || entries.length > 8) fail(`${name} public read predicate`);
           const where = {};
@@ -176,7 +176,7 @@ var require_declared_data_contract = __commonJS({
         if ([...create || [], ...update || []].some((field) => field === pk || field === owner || field === author)) fail(`${name} identity writes`);
         let member = null;
         if (intent === "member") {
-          record(table.member, `${name}.member`);
+          record2(table.member, `${name}.member`);
           const { g, m, u, mg, o } = table.member;
           if (typeof m !== "string" || typeof u !== "string" || !identifier.test(m) || !identifier.test(u) || !Array.isArray(mg) || mg.some((field) => typeof field !== "string" || !identifier.test(field))) fail(`${name}.member`);
           fields(g, seen, `${name}.member.g`);
@@ -199,8 +199,9 @@ var require_declared_data_contract = __commonJS({
         if (normalizedPolicy?.k === "p" && create !== null && !create.includes(normalizedPolicy.v)) fail(`${name}.policy parent create`);
         let links = null;
         if (input.links !== void 0) {
-          record(input.links, `${name}.links`);
-          if (Object.keys(input.links).sort().join() !== "children,edit,maxDays,read") fail(`${name}.links`);
+          record2(input.links, `${name}.links`);
+          const linkKeys = Object.keys(input.links).sort().join();
+          if (linkKeys !== "children,edit,maxDays,read" && !(linkKeys === "anonymousCreate,children,edit,maxDays,read" && input.links.anonymousCreate === true)) fail(`${name}.links`);
           if (!(intent === "scoped" && !visitors) && normalizedPolicy?.k !== "a") fail(`${name}.links owner`);
           const readable = read === true ? columns.filter((column) => column.n !== author).map((column) => column.n) : read || [];
           const linkRead = fields(input.links.read, new Set(readable), `${name}.links.read`);
@@ -210,12 +211,31 @@ var require_declared_data_contract = __commonJS({
           if (!Array.isArray(children) || children.some((child) => typeof child !== "string" || !identifier.test(child)) || new Set(children).size !== children.length) fail(`${name}.links.children`);
           const maxDays = input.links.maxDays;
           if (maxDays !== null && !(Number.isSafeInteger(maxDays) && maxDays >= 1 && maxDays <= 365)) fail(`${name}.links.maxDays`);
-          links = { read: linkRead, edit: linkEdit, children: [...children].sort(), maxDays };
+          const anonymousCreate = input.links.anonymousCreate === true;
+          if (anonymousCreate && (intent !== "scoped" || visitors || normalizedPolicy || !create || create.length === 0 || columns.find((column) => column.n === pk).t !== "integer" || columns.some((column) => column.t === "blob"))) fail(`${name}.links.anonymousCreate`);
+          links = { read: linkRead, edit: linkEdit, children: [...children].sort(), maxDays, ...anonymousCreate ? { anonymousCreate: true } : {} };
+        }
+        let intake;
+        if (input.intake !== void 0) {
+          record2(input.intake, `${name}.intake`);
+          if (!["fields,target", "fields,target,where"].includes(Object.keys(input.intake).sort().join(","))) fail(`${name}.intake`);
+          record2(input.intake.target, `${name}.intake.target`);
+          if (Object.keys(input.intake.target).sort().join(",") !== "field,table" || ![input.intake.target.table, input.intake.target.field].every((value) => typeof value === "string" && identifier.test(value))) fail(`${name}.intake.target`);
+          if (membershipTables.has(name) || intent !== "scoped" || visitors || normalizedPolicy || columns.find((column) => column.n === pk).t !== "integer" || publicRead === true) fail(`${name}.intake owner`);
+          const accepted = fields(input.intake.fields, seen, `${name}.intake.fields`);
+          if (accepted.some((field) => field === pk || field === owner || field === author || columns.find((column) => column.n === field).t === "blob" || typeof publicRead === "object" && Object.hasOwn(publicRead.where, field)) || columns.some((column) => column.n !== pk && column.n !== owner && column.nul !== 1 && column.d !== 1 && !accepted.includes(column.n))) fail(`${name}.intake.fields`);
+          intake = { target: { table: input.intake.target.table, field: input.intake.target.field }, fields: accepted };
+          if (input.intake.where !== void 0) {
+            record2(input.intake.where, `${name}.intake.where`);
+            const keys = Object.keys(input.intake.where).sort();
+            if (!keys.length || keys.length > 8) fail(`${name}.intake.where`);
+            intake.where = Object.fromEntries(keys.map((field) => [field, input.intake.where[field]]));
+          }
         }
         tables.push({
           name,
           columns,
-          client: { identity: input.identity, read, publicRead, create, update, delete: input.delete, ...links ? { links } : {} },
+          client: { identity: input.identity, read, publicRead, create, update, delete: input.delete, ...links ? { links } : {}, ...intake ? { intake } : {} },
           primaryKey: pk,
           intent,
           owner,
@@ -227,13 +247,26 @@ var require_declared_data_contract = __commonJS({
       }
       const tableByName = new Map(tables.map((table) => [table.name, table]));
       for (const table of tables) {
+        const intake = table.client.intake;
+        if (!intake) continue;
+        const target = tableByName.get(intake.target.table);
+        const column = target?.columns.find((column2) => column2.n === intake.target.field);
+        const rawColumn = schema[intake.target.table]?.columns?.find((column2) => column2.n === intake.target.field);
+        if (!target || target.intent !== "scoped" || target.visitors || !target.client.publicRead || !Array.isArray(target.client.read) || !target.client.read.includes(intake.target.field) || !column || column.nul === 1 || !["text", "integer", "bigint"].includes(column.t) || rawColumn?.u !== 1) fail(`${table.name}.intake target`);
+        for (const [field, value] of Object.entries(intake.where || {})) {
+          const c = target.columns.find((column2) => column2.n === field);
+          if (!c) fail(`${table.name}.intake.where field`);
+          if (value === null ? c.nul !== 1 : c.t === "boolean" ? typeof value !== "boolean" : c.t === "integer" ? !Number.isSafeInteger(value) : c.t === "number" ? typeof value !== "number" || !Number.isFinite(value) : c.t === "bigint" ? !canonicalBigintText(value) : ["text", "timestamp"].includes(c.t) ? typeof value !== "string" || value.length > 256 : true) fail(`${table.name}.intake.where type`);
+        }
+      }
+      for (const table of tables) {
         const declared = schema[table.name].relations;
         if (declared === void 0) continue;
         if (!Array.isArray(declared)) fail(`${table.name}.relations`);
         const relations = [];
         const names = /* @__PURE__ */ new Set();
         for (const relation of declared) {
-          record(relation, `${table.name}.relation`);
+          record2(relation, `${table.name}.relation`);
           if (Object.keys(relation).some((key) => !["name", "kind", "table", "fk", "parentKey"].includes(key))) fail(`${table.name}.relation`);
           const { name, kind, table: relatedName, fk, parentKey } = relation;
           if (![name, relatedName, fk, parentKey].every((value) => typeof value === "string" && identifier.test(value)) || names.has(name)) {
@@ -295,6 +328,27 @@ function insertError(status, payload) {
   if (receipt) error.idempotency = receipt;
   return error;
 }
+// One logical request's outcome across its explicit retries (one value per request handle). A later
+// refusal, or this client's local retry horizon, describes only that attempt: it never erases an
+// earlier committed result, and after an unknown attempt it never proves the write absent.
+function requestOutcome() {
+  let known = null;
+  return {
+    done(result) { known = 'committed'; return result; },
+    failed(error) {
+      if (error.outcome === 'committed' || error.write_committed === true) { known = 'committed'; return error; }
+      if (known === 'committed') {
+        error.outcome = 'committed'; error.write_committed = true;
+        error.message += ' An earlier attempt of this request was already applied; do not create it again.';
+      } else if (error.outcome === 'unknown') known = 'unknown';
+      else if (known === 'unknown') {
+        error.outcome = 'unknown';
+        error.message += ' An earlier attempt of this request may still have been applied.';
+      }
+      return error;
+    },
+  };
+}
 async function createWithReceipt(table, values, extra, eligible) {
   // create takes only values: the retry key is a private random nonce this client allocates,
   // never a caller choice. Anything more refuses before the network.
@@ -307,7 +361,8 @@ async function createWithReceipt(table, values, extra, eligible) {
   const body = JSON.stringify({values, contract, table, operation:'create', idempotency_key:key});
   let handle;
   const attach = target => { Object.defineProperty(target, 'request', {value:handle, enumerable:false, writable:false, configurable:false}); return target; };
-  const send = async () => {
+  const outcome = requestOutcome();
+  const attempt = async () => {
     const now = Date.now();
     if (!Number.isFinite(createdAt) || !Number.isFinite(now) || now < createdAt || now >= createdAt + 691200000) {
       throw attach(insertError(410, {error:'IDEMPOTENCY_RETRY_EXPIRED', message:'This request can no longer be retried safely. Nothing was sent.'}));
@@ -325,9 +380,90 @@ async function createWithReceipt(table, values, extra, eligible) {
     payload.idempotency = insertReceipt(payload.idempotency);
     return attach(payload);
   };
+  const send = () => attempt().then(outcome.done, error => { throw outcome.failed(error); });
   handle = Object.freeze({key, createdAt, retry:send});
   return send();
 }
+`;
+    var ANONYMOUS_CLIENT_RUNTIME = String.raw`
+function creatorCapability(grant, secret, table) {
+  const capability = {grant};
+  Object.defineProperty(capability, 'secret', {value:secret, enumerable:false, writable:false, configurable:false});
+  // The creator link: the platform landing page, with everything in the fragment (never sent to a server).
+  const route = location.pathname + location.search + location.hash;
+  Object.defineProperty(capability, 'url', {value:location.origin + '/__sw/creator#' + grant + '.' + secret + '.' + table + '.' + b64url(route), enumerable:false, writable:false, configurable:false});
+  Object.defineProperty(capability, 'toJSON', {value:() => ({grant}), enumerable:false, writable:false, configurable:false});
+  return Object.freeze(capability);
+}
+async function createAnonymous(table, values, extra) {
+  if (extra.length !== 0) throw new DataError(400, {error:'DATA_INPUT_INVALID', message:'createAnonymous takes only the values to insert. Nothing was sent.'});
+  const hex = size => Array.from(crypto.getRandomValues(new Uint8Array(size)), byte => byte.toString(16).padStart(2,'0')).join('');
+  const key = hex(16), secret = hex(32), createdAt = Date.now();
+  const body = JSON.stringify({values, contract, table, operation:'create_anonymous', operation_key:key, creator_secret:secret});
+  let handle;
+  const attach = target => { Object.defineProperty(target, 'request', {value:handle, enumerable:false, writable:false, configurable:false}); return target; };
+  const outcome = requestOutcome();
+  const attempt = async () => {
+    const now = Date.now();
+    if (!Number.isFinite(createdAt) || !Number.isFinite(now) || now < createdAt || now >= createdAt + 691200000) {
+      throw attach(insertError(410, {error:'IDEMPOTENCY_RETRY_EXPIRED', message:'This request can no longer be retried safely. Nothing was sent.'}));
+    }
+    let response, payload;
+    try { response = await fetch('/__sw/data', {method:'POST', credentials:'same-origin', cache:'no-store', headers:{'Content-Type':'application/json'}, body}); }
+    catch (_) { throw attach(insertError(503, {error:'DB_WRITE_OUTCOME_UNKNOWN', message:'The write outcome could not be confirmed. Retry this request with its original key.', outcome:'unknown'})); }
+    try { payload = await response.json(); }
+    catch (_) { throw attach(insertError(response.status, {error:'INVALID_DATA_RESPONSE', message:'The write response could not be read. Retry this request with its original key.', outcome:'unknown'})); }
+    if (!response.ok) throw attach(insertError(response.status, payload));
+    const receipt = payload && typeof payload === 'object' && !Array.isArray(payload) ? insertReceipt(payload.idempotency) : null;
+    if (!receipt || typeof payload.grant !== 'string' || !/^crt_[0-9a-f]{32}$/.test(payload.grant)) {
+      throw insertError(502, {error:'IDEMPOTENCY_RECEIPT_INVALID', message:'The row was created, but retry protection could not be confirmed. Do not retry it.', outcome:'committed', write_committed:true});
+    }
+    return attach({data:payload.data === undefined ? null : payload.data, grant:payload.grant, idempotency:receipt, creator:creatorCapability(payload.grant, secret, table)});
+  };
+  const send = () => attempt().then(outcome.done, error => { throw outcome.failed(error); });
+  handle = Object.freeze({key, createdAt, retry:send});
+  return send();
+}
+`;
+    var INTAKE_CLIENT_RUNTIME = String.raw`
+async function intake(table, reference, values, extra) {
+  if (extra.length !== 0) throw new DataError(400, {error:'DATA_INPUT_INVALID', message:'intake takes only the reference and the values to submit. Nothing was sent.'});
+  const key = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2,'0')).join('');
+  const createdAt = Date.now();
+  const body = JSON.stringify({reference, values, contract, table, operation:'intake', operation_key:key});
+  let handle;
+  const attach = target => { Object.defineProperty(target, 'request', {value:handle, enumerable:false, writable:false, configurable:false}); return target; };
+  const outcome = requestOutcome();
+  const attempt = async () => {
+    const now = Date.now();
+    if (!Number.isFinite(createdAt) || !Number.isFinite(now) || now < createdAt || now >= createdAt + 691200000) {
+      throw attach(insertError(410, {error:'IDEMPOTENCY_RETRY_EXPIRED', message:'This request can no longer be retried safely. Nothing was sent.'}));
+    }
+    let response, payload;
+    try { response = await fetch('/__sw/data', {method:'POST', credentials:'same-origin', cache:'no-store', headers:{'Content-Type':'application/json'}, body}); }
+    catch (_) { throw attach(insertError(503, {error:'DB_WRITE_OUTCOME_UNKNOWN', message:'The write outcome could not be confirmed. Retry this request with its original key.', outcome:'unknown'})); }
+    try { payload = await response.json(); }
+    catch (_) { throw attach(insertError(response.status, {error:'INVALID_DATA_RESPONSE', message:'The write response could not be read. Retry this request with its original key.', outcome:'unknown'})); }
+    if (!response.ok) throw attach(insertError(response.status, payload));
+    const receipt = payload && typeof payload === 'object' && !Array.isArray(payload) && payload.accepted === true ? insertReceipt(payload.idempotency) : null;
+    if (!receipt) {
+      throw attach(insertError(502, {error:'IDEMPOTENCY_RECEIPT_INVALID', message:'The submission was accepted, but retry protection could not be confirmed. Do not retry it.', outcome:'committed', write_committed:true}));
+    }
+    return attach({accepted:true, idempotency:receipt});
+  };
+  const send = () => attempt().then(outcome.done, error => { throw outcome.failed(error); });
+  handle = Object.freeze({key, createdAt, retry:send});
+  return send();
+}
+`;
+    var CREATOR_CLIENT_RUNTIME = 'const creatorError=(status,payload)=>{const e=new DataError(status,payload);if(payload&&["committed","unknown","read_failed","not_committed"].includes(payload.outcome))e.outcome=payload.outcome;if(payload&&payload.write_committed===true)e.write_committed=true;e.retry=false;e.retryable=false;return e};const creatorDoor=async(path,init,write)=>{const lost=(status,code)=>creatorError(status,{error:code,message:write?"The creator operation could not be confirmed. Do not repeat it automatically.":"The creator operation result could not be read.",outcome:write?"unknown":"read_failed"});let response;try{response=await fetch(path,{credentials:"same-origin",cache:"no-store",...init})}catch(_){throw lost(503,"CREATOR_OUTCOME_UNKNOWN")}let payload;try{payload=await response.json()}catch(_){throw lost(response.status,"INVALID_DATA_RESPONSE")}if(!response.ok){if(!payload||typeof payload!=="object"||typeof payload.error!=="string")throw lost(response.status,"INVALID_DATA_RESPONSE");throw creatorError(response.status,payload)}if(!payload||typeof payload!=="object"||payload.ok!==true||!("data" in payload)||payload.data===undefined)throw lost(502,"INVALID_DATA_RESPONSE");return payload.data};const creatorPost=(body,write)=>creatorDoor("/__sw/creator",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({...body,contract})},write);const claimOutcomes=new Map();const creatorsOpened=()=>{try{const list=JSON.parse(sessionStorage.getItem("__sw_creators_opened")||"[]");return Array.isArray(list)?list:[]}catch(_){return[]}};const creators=Object.freeze({opened:creatorsOpened,sessions:async()=>({data:await creatorDoor("/__sw/creator/sessions",{method:"GET"})}),forget:async creatorId=>{await creatorDoor("/__sw/creator/forget",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify(creatorId===undefined?{}:{creator_id:creatorId})},true)}});const creatorView=spec=>creatorId=>{if(typeof creatorId!=="string"||!/^crt_[0-9a-f]{32}$/.test(creatorId))throw new DataError(400,{error:"DATA_INPUT_INVALID",message:"creator() needs a creator id"});const view={};for(const[table,canUpdate,children]of spec){const call=(action,fields,write)=>creatorPost({action,creator_id:creatorId,table,...fields},write);const root={get:id=>call("get",{id}).then(r=>({data:r.data})),links:id=>call("link_list",{id}),revokeLink:(id,linkId)=>call("link_revoke",{id,link_id:linkId},true),createLink:async(id,options={})=>{const result=await call("link_create",{id,access:options.access,...(options.expiresInDays===undefined?{}:{expires_in_days:options.expiresInDays})},true);const route=typeof options.returnTo==="string"?options.returnTo:location.pathname+location.search+location.hash;return{link_id:result.link_id,url:location.origin+"/__sw/link#"+result.secret+"."+b64url(route),expires_at:result.expires_at}},claim:async(id,options={})=>{const key=creatorId+"|"+table+"|"+String(id);let result;try{result=await call("claim",{id,keep_shares:options.keepShares===true},true)}catch(e){const known=claimOutcomes.get(key);if(e.outcome==="committed"||e.write_committed===true)claimOutcomes.set(key,"committed");else if(e.outcome==="unknown")claimOutcomes.set(key,"unknown");else if(known){e.outcome=known==="committed"?"committed":"unknown";if(known==="committed")e.write_committed=true;e.message+=" An earlier attempt of this claim may already have applied; check claimStatus() or your account."}throw e}claimOutcomes.set(key,"committed");try{sessionStorage.setItem("__sw_creators_opened",JSON.stringify(creatorsOpened().filter(e=>e&&e.creator_id!==creatorId)))}catch(_){}return result},claimStatus:id=>call("claim_status",{id})};if(canUpdate)root.update=(id,values)=>call("update",{id,values},true);const relations={};for(const[relation,child,canCreate,canUpdateChild]of children){relations[relation]=Object.freeze({list:(parentId,options={})=>call("relation_list",{relation,parent_id:parentId,...(options.after===undefined?{}:{after:options.after}),...(options.limit===undefined?{}:{limit:options.limit})})});const childOps={};if(canCreate)childOps.create=values=>call("child_create",{child,values},true);if(canUpdateChild)childOps.update=(id,values)=>call("child_update",{child,id,values},true);if(canCreate||canUpdateChild)view[child]=Object.freeze(childOps)}if(children.length)root.relations=Object.freeze(relations);view[table]=Object.freeze(root)}return Object.freeze(view)};\n';
+    var ANONYMOUS_CLIENT_DECLARATIONS = `
+  /** The private creator capability of a row created with createAnonymous. Keep it, and its url, private: anyone opening the url can read, edit, share and claim the row until it is claimed. */
+  export interface CreatorCapability { readonly grant: string; readonly secret: string; readonly url: string; }
+  export type AnonymousCreateResult<T> = T & { readonly grant: string; readonly idempotency: InsertReceipt; readonly creator: CreatorCapability; readonly request: InsertRequest<AnonymousCreateResult<T>> };
+`;
+    var INTAKE_CLIENT_DECLARATIONS = `
+  export interface IntakeResult { readonly accepted: true; readonly idempotency: InsertReceipt; readonly request: InsertRequest<IntakeResult> }
 `;
     var INSERT_CLIENT_DECLARATIONS = `
   export interface InsertReceipt { readonly replayed: boolean; readonly created_at: number; readonly result_until: number; readonly refuse_until: number; }
@@ -341,6 +477,10 @@ async function createWithReceipt(table, values, extra, eligible) {
       const runtimeTables = [];
       const receiptTables = [];
       const receiptCapable = insertReceiptCapability === "insert-v1";
+      const anonymousTables = [];
+      const intakeTables = [];
+      const creatorDeclarations = [];
+      const creatorSpec = [];
       const linkedDeclarations = [];
       const linkedSpec = [];
       for (const table of tables) {
@@ -377,6 +517,47 @@ async function createWithReceipt(table, values, extra, eligible) {
           if (receiptCapable && eligible) receiptTables.push(name);
           operations.push(`create(values: ${shape(columns, client.create, "create", required)}): Promise<${receiptCapable && eligible ? `InsertResult<${mutation}>` : mutation}>`);
           methods.push("create");
+          if (receiptCapable && eligible && client.links && client.links.anonymousCreate === true) {
+            operations.push(`createAnonymous(values: ${shape(columns, client.create, "create", required)}): Promise<AnonymousCreateResult<{ data: ${row} | null }>>`);
+            methods.push("createAnonymous");
+            anonymousTables.push(name);
+            const ownerUpdate = (client.update || []).filter((field) => field !== table.owner && field !== primaryKey);
+            const creatorRow = shape(columns, readable, "read");
+            const rootOps = [
+              `get(id: ${id}): Promise<{ data: ${creatorRow} | null }>`,
+              `links(id: ${id}): Promise<{ data: Array<{ link_id: string; access: 'read' | 'edit'; created_at: number; expires_at: number | null }> }>`,
+              `createLink(id: ${id}, options: { access: ${client.links.edit.length ? "'read' | 'edit'" : "'read'"}; expiresInDays?: number; returnTo?: string }): Promise<{ link_id: string; url: string; expires_at: number | null }>`,
+              `revokeLink(id: ${id}, linkId: string): Promise<{ revoked: boolean }>`,
+              `claim(id: ${id}, options?: { keepShares?: boolean }): Promise<{ claimed: true; table: string; id: ${id}; shares: 'kept' | 'revoked' | 'unknown'; reconciled?: true }>`,
+              `claimStatus(id: ${id}): Promise<{ status: 'claimed_by_you' | 'not_claimed' | 'unknown' }>`
+            ];
+            if (ownerUpdate.length) rootOps.push(`update(id: ${id}, values: ${shape(columns, ownerUpdate, "update")}): Promise<{ data: ${creatorRow} | null; count: number; changes: number }>`);
+            const childRelations = [], childSpecs = [];
+            for (const relationName of client.links.children) {
+              const relation = table.relations.find((item) => item.name === relationName);
+              const child = tables.find((candidate) => candidate.name === relation.table);
+              const childReadable = child.client.read === true ? child.columns.filter((column) => column.n !== child.author).map((column) => column.n) : child.client.read;
+              const childRow = shape(child.columns, childReadable, "read");
+              const childId = columnType(child.columns.find((column) => column.n === child.primaryKey));
+              childRelations.push(`${JSON.stringify(relationName)}: { list(parentId: ${id}, options?: { limit?: number; after?: ${childId} }): Promise<{ data: ${childRow}[]; next: ${childId} | null; has_more: boolean }> }`);
+              const childUpdate = child.client.update ? child.client.update.filter((field) => field !== relation.fk) : [];
+              const childOps = [];
+              if (child.client.create !== null) childOps.push(`create(values: ${shape(child.columns, child.client.create, "create", /* @__PURE__ */ new Set([relation.fk]))}): Promise<{ data: ${childRow} | null; count: number; changes: number }>`);
+              if (childUpdate.length) childOps.push(`update(id: ${childId}, values: ${shape(child.columns, childUpdate, "update")}): Promise<{ data: ${childRow} | null; count: number; changes: number }>`);
+              if (childOps.length) creatorDeclarations.push(`${JSON.stringify(child.name)}: { ${childOps.join("; ")} }`);
+              childSpecs.push([relationName, child.name, child.client.create !== null, childUpdate.length > 0]);
+            }
+            if (childRelations.length) rootOps.push(`relations: { ${childRelations.join("; ")} }`);
+            creatorDeclarations.push(`${JSON.stringify(name)}: { ${rootOps.join("; ")} }`);
+            creatorSpec.push([name, ownerUpdate.length > 0, childSpecs]);
+          }
+        }
+        if (receiptCapable && client.intake) {
+          const target = tables.find((candidate) => candidate.name === client.intake.target.table);
+          const reference = columnType({ ...target.columns.find((column) => column.n === client.intake.target.field), nul: void 0 });
+          operations.push(`intake(reference: ${reference}, values: ${shape(columns, client.intake.fields, "create")}): Promise<IntakeResult>`);
+          methods.push("intake");
+          intakeTables.push(name);
         }
         if (client.update !== null) {
           operations.push(`update(id: ${id}, values: ${shape(columns, client.update, "update")}): Promise<${mutation}>`);
@@ -433,20 +614,24 @@ async function createWithReceipt(table, values, extra, eligible) {
         declarations.push(`${JSON.stringify(name)}: { ${operations.join("; ")} }`);
         runtimeTables.push([name, methods, relationNames]);
       }
+      if (creatorSpec.length) {
+        declarations.push(`creators: { opened(): Array<{ creator_id: string; table: string; row_id: string }>; sessions(): Promise<{ data: Array<{ creator_id: string; table: string; row_id: string; expires_at: number }> }>; forget(creatorId?: string): Promise<void> }`);
+        declarations.push(`creator(creatorId: string): { ${creatorDeclarations.join("; ")} }`);
+      }
       if (linkedSpec.length) {
         declarations.push(`links: { opened(): Array<{ link_id: string; table: string; row_id: string; access: 'read' | 'edit' }>; sessions(): Promise<{ data: Array<{ link_id: string; table: string; row_id: string; access: 'read' | 'edit'; expires_at: number }> }>; forget(linkId?: string): Promise<void> }`);
         declarations.push(`linked(linkId: string): { ${linkedDeclarations.join("; ")} }`);
       }
       const declaration = `declare module ${JSON.stringify("somewhere:data")} {
   export type Json = string | number | boolean | null | Json[] | { [key: string]: Json };
-${receiptCapable ? localTypes ? INSERT_CLIENT_DECLARATIONS.replace("readonly idempotency:", "readonly idempotency?:").replace("readonly request:", "readonly request?:") : INSERT_CLIENT_DECLARATIONS : ""}  export class DataError extends Error { readonly status: number; readonly code: string | null;${receiptCapable ? " readonly request?: InsertRequest<unknown>; readonly outcome?: string; readonly write_committed?: boolean; readonly retry?: false; readonly retryable?: false; readonly idempotency?: InsertReceipt;" : ""} constructor(status: number, payload: unknown); }
+${receiptCapable ? localTypes ? INSERT_CLIENT_DECLARATIONS.replace("readonly idempotency:", "readonly idempotency?:").replace("readonly request:", "readonly request?:") : INSERT_CLIENT_DECLARATIONS : ""}${anonymousTables.length ? ANONYMOUS_CLIENT_DECLARATIONS : ""}${intakeTables.length ? INTAKE_CLIENT_DECLARATIONS : ""}  export class DataError extends Error { readonly status: number; readonly code: string | null;${receiptCapable ? " readonly request?: InsertRequest<unknown>; readonly outcome?: string; readonly write_committed?: boolean; readonly retry?: false; readonly retryable?: false; readonly idempotency?: InsertReceipt;" : ""} constructor(status: number, payload: unknown); }
   export const data: { ${declarations.join(";\n    ")} };
 }
 `;
       const runtime = `const contract=${JSON.stringify(contract_digest)};
 class DataError extends Error{constructor(status,payload){super(payload&&typeof payload.message==="string"?payload.message:payload&&typeof payload.error==="string"?payload.error:"Data operation failed");this.name="DataError";this.status=status;this.code=payload&&typeof payload.error==="string"?payload.error:null}}
 const invoke=async(table,operation,input)=>{const response=await fetch("/__sw/data",{method:"POST",credentials:"same-origin",headers:{"Content-Type":"application/json"},body:JSON.stringify({...input,contract,table,operation})});const payload=await response.json().catch(()=>{throw new DataError(response.status,{error:"INVALID_DATA_RESPONSE",message:"Data operation returned an invalid response"})});if(!response.ok)throw new DataError(response.status,payload);return payload};
-${receiptCapable ? INSERT_CLIENT_RUNTIME + "const receiptTables=" + JSON.stringify(receiptTables) + ";\n" : ""}${linkedSpec.length ? LINK_CLIENT_RUNTIME : ""}const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?${receiptCapable ? "(values,...extra)=>createWithReceipt(table,values,extra,receiptTables.includes(table))" : "values=>invoke(table,operation,{values})"}:operation==="update"?(id,values)=>invoke(table,operation,{id,values}):operation==="createLink"?(id,options)=>createLink(table,id,options):operation==="links"?id=>invoke(table,"link_list",{id}):operation==="revokeLink"?(id,link_id)=>invoke(table,"link_revoke",{id,link_id}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];}).concat(${linkedSpec.length ? `[["links",links],["linked",linkedView(${JSON.stringify(linkedSpec)})]]` : "[]"})));
+${receiptCapable ? INSERT_CLIENT_RUNTIME + "const receiptTables=" + JSON.stringify(receiptTables) + ";\n" : ""}${anonymousTables.length ? ANONYMOUS_CLIENT_RUNTIME + CREATOR_CLIENT_RUNTIME : ""}${intakeTables.length ? INTAKE_CLIENT_RUNTIME : ""}${linkedSpec.length ? LINK_CLIENT_RUNTIME : ""}const data=Object.freeze(Object.fromEntries(${JSON.stringify(runtimeTables)}.map(([table,operations,relations])=>{const entries=operations.map(operation=>[operation,operation==="list"||operation==="aggregate"?(options={})=>invoke(table,operation,options):operation==="create"?${receiptCapable ? "(values,...extra)=>createWithReceipt(table,values,extra,receiptTables.includes(table))" : "values=>invoke(table,operation,{values})"}:${anonymousTables.length ? 'operation==="createAnonymous"?(values,...extra)=>createAnonymous(table,values,extra):' : ""}${intakeTables.length ? 'operation==="intake"?(reference,values,...extra)=>intake(table,reference,values,extra):' : ""}operation==="update"?(id,values)=>invoke(table,operation,{id,values}):operation==="createLink"?(id,options)=>createLink(table,id,options):operation==="links"?id=>invoke(table,"link_list",{id}):operation==="revokeLink"?(id,link_id)=>invoke(table,"link_revoke",{id,link_id}):id=>invoke(table,operation,{id})]);if(relations.length)entries.push(["relations",Object.freeze(Object.fromEntries(relations.map(relation=>[relation,Object.freeze({list:(parent_id,options={})=>invoke(table,"relation_list",{...options,relation,parent_id})})])))]);return[table,Object.freeze(Object.fromEntries(entries))];}).concat(${linkedSpec.length ? `[["links",links],["linked",linkedView(${JSON.stringify(linkedSpec)})]]` : "[]"})${creatorSpec.length ? `.concat([["creators",creators],["creator",creatorView(${JSON.stringify(creatorSpec)})]])` : ""}));
 export{data,DataError};
 `;
       return { contract_digest, declaration, runtime, manifest: { version: 1, contract_digest, tables, declaration, ...insertReceiptCapability === void 0 ? {} : { insert_receipt: insertReceiptCapability } } };
@@ -3647,9 +3832,10 @@ var require_schema_types = __commonJS({
     identity?: 'authenticated' | 'visitor'; read?: boolean | readonly Field[]; publicRead?: boolean | { where: Partial<Record<Field, string | number | boolean | null>> };
     create?: readonly Field[] | false | null; update?: readonly Field[] | false | null; delete?: boolean;
     links?: ClientLinkPermissions<Field>;
+    intake?: { target: { table: string; field: string }; fields: readonly Field[]; where?: Record<string, string | number | boolean | null> };
   }
   interface ClientLinkPermissions<Field extends string> {
-    read: true | readonly Field[]; edit?: readonly Field[] | false; children?: readonly string[]; maxDays?: number;
+    read: true | readonly Field[]; edit?: readonly Field[] | false; children?: readonly string[]; maxDays?: number; anonymousCreate?: boolean;
   }
   interface FileCollection { readonly __somewhereFileCollection: unique symbol }
   type FileOperation = 'read' | 'upload' | 'replace' | 'delete';
@@ -3721,9 +3907,6 @@ __export(declared_data_vendor_entry_exports, {
 });
 module.exports = __toCommonJS(declared_data_vendor_entry_exports);
 
-// worker/src/utils/db-schema-deploy/schema-ownership.ts
-var SHARED_AUTHOR_COLUMN = "_sw_author_id";
-
 // worker/src/utils/db-schema-deploy/bigint-text.ts
 function isCanonicalBigintText(value) {
   if (!/^(0|-?[1-9][0-9]*)$/.test(value)) return false;
@@ -3741,7 +3924,7 @@ function parseClientPermissions(value, columns, scope) {
   }
   const input = value;
   for (const key of Object.keys(input)) {
-    if (!["identity", "read", "publicRead", "create", "update", "delete", "links"].includes(key)) {
+    if (!["identity", "read", "publicRead", "create", "update", "delete", "links", "intake"].includes(key)) {
       return fail(`Unknown client permission "${key}".`);
     }
   }
@@ -3763,25 +3946,9 @@ function parseClientPermissions(value, columns, scope) {
     if (!rawPublicRead || typeof rawPublicRead !== "object" || Array.isArray(rawPublicRead) || Object.keys(rawPublicRead).some((key) => key !== "where")) {
       return fail("client.publicRead must be true, false, or { where: { field: literal } }.");
     }
-    const where = rawPublicRead.where;
-    if (!where || typeof where !== "object" || Array.isArray(where)) return fail("client.publicRead.where must be a non-empty object.");
-    const entries = Object.entries(where);
-    if (entries.length === 0 || entries.length > 8) return fail("client.publicRead.where must declare 1 to 8 equality fields.");
-    const normalized = {};
-    for (const [rawName, literal] of entries) {
-      const name = rawName.toLowerCase();
-      const column = columns.find((candidate) => candidate.name === name);
-      if (Object.prototype.hasOwnProperty.call(normalized, name)) return fail(`client.publicRead.where declares field "${rawName}" twice.`);
-      if (!column || ["json", "blob"].includes(column.helper)) return fail(`client.publicRead.where names undeclared or non-scalar field "${rawName}".`);
-      if (!(literal === null || typeof literal === "boolean" || typeof literal === "string" || typeof literal === "number" && Number.isFinite(literal))) return fail(`client.publicRead.where field "${rawName}" must equal a literal scalar.`);
-      if (typeof literal === "string" && literal.length > 256) return fail(`client.publicRead.where field "${rawName}" exceeds 256 characters.`);
-      if (literal === null && !column.nullable) return fail(`client.publicRead.where field "${rawName}" cannot equal null because it is required.`);
-      if (literal !== null && (column.helper === "boolean" && typeof literal !== "boolean" || ["integer", "number"].includes(column.helper) && typeof literal !== "number" || column.helper === "integer" && !Number.isSafeInteger(literal) || column.helper === "bigint" && (typeof literal !== "string" || !isCanonicalBigintText(literal)) || ["text", "timestamp"].includes(column.helper) && typeof literal !== "string")) {
-        return fail(`client.publicRead.where field "${rawName}" must match its declared type.`);
-      }
-      normalized[name] = literal;
-    }
-    publicRead = { where: Object.fromEntries(Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b))) };
+    const where = parseEqualityWhere(rawPublicRead.where, columns, "client.publicRead.where");
+    if (typeof where === "string") return fail(where);
+    publicRead = { where };
   }
   if (read !== true && read !== false && !Array.isArray(read)) return fail("client.read must list readable fields, or be true or false.");
   if (publicRead && (!Array.isArray(read) || read.length === 0)) {
@@ -3829,17 +3996,8 @@ function parseClientPermissions(value, columns, scope) {
     writes[operation] = allowed.sort();
   }
   if (writes.create !== null) {
-    if (typeof publicRead === "object") {
-      let guaranteedPrivate = false;
-      for (const [name, publishedValue] of Object.entries(publicRead.where)) {
-        const column = fields.get(name);
-        if (column.autoNow) continue;
-        const defaultValue = column.hasDefault ? column.default : column.nullable ? null : void 0;
-        if (defaultValue !== void 0 && defaultValue !== publishedValue) guaranteedPrivate = true;
-      }
-      if (!guaranteedPrivate) {
-        return fail("client.create has no fixed publication-field default that guarantees a private row. Give at least one predicate field a private default, or use a server operation.");
-      }
+    if (typeof publicRead === "object" && !privateByDefault(publicRead.where, fields)) {
+      return fail("client.create has no fixed publication-field default that guarantees a private row. Give at least one predicate field a private default, or use a server operation.");
     }
     for (const column of columns) {
       if (column.helper !== "id" && !column.nullable && !column.hasDefault && !column.autoNow && !writes.create.includes(column.name)) {
@@ -3849,11 +4007,97 @@ function parseClientPermissions(value, columns, scope) {
   }
   let links;
   if (input.links !== void 0) {
-    const parsed = parseLinkPermissions(input.links, read, writes.update, columns, scope);
+    const parsed = parseLinkPermissions(input.links, read, writes.update, writes.create, columns, scope);
     if (typeof parsed === "string") return fail(parsed);
     links = parsed;
   }
-  return { ok: true, permissions: { identity, read, publicRead, ...writes, delete: remove, ...links ? { links } : {} } };
+  let intake;
+  if (input.intake !== void 0) {
+    const parsed = parseIntakePermissions(input.intake, columns, scope, publicRead);
+    if (typeof parsed === "string") return fail(parsed);
+    intake = parsed;
+  }
+  return { ok: true, permissions: { identity, read, publicRead, ...writes, delete: remove, ...links ? { links } : {}, ...intake ? { intake } : {} } };
+}
+function parseEqualityWhere(where, columns, label) {
+  if (!where || typeof where !== "object" || Array.isArray(where)) return `${label} must be a non-empty object.`;
+  const entries = Object.entries(where);
+  if (entries.length === 0 || entries.length > 8) return `${label} must declare 1 to 8 equality fields.`;
+  const normalized = {};
+  for (const [rawName, literal] of entries) {
+    const name = rawName.toLowerCase();
+    const column = columns?.find((candidate) => candidate.name === name);
+    if (Object.prototype.hasOwnProperty.call(normalized, name)) return `${label} declares field "${rawName}" twice.`;
+    if (columns && (!column || ["json", "blob"].includes(column.helper))) return `${label} names undeclared or non-scalar field "${rawName}".`;
+    if (!(literal === null || typeof literal === "boolean" || typeof literal === "string" || typeof literal === "number" && Number.isFinite(literal))) return `${label} field "${rawName}" must equal a literal scalar.`;
+    if (typeof literal === "string" && literal.length > 256) return `${label} field "${rawName}" exceeds 256 characters.`;
+    if (column && literal === null && !column.nullable) return `${label} field "${rawName}" cannot equal null because it is required.`;
+    if (column && literal !== null && (column.helper === "boolean" && typeof literal !== "boolean" || ["integer", "number"].includes(column.helper) && typeof literal !== "number" || column.helper === "integer" && !Number.isSafeInteger(literal) || column.helper === "bigint" && (typeof literal !== "string" || !isCanonicalBigintText(literal)) || ["text", "timestamp"].includes(column.helper) && typeof literal !== "string")) {
+      return `${label} field "${rawName}" must match its declared type.`;
+    }
+    normalized[name] = literal;
+  }
+  return Object.fromEntries(Object.entries(normalized).sort(([a], [b]) => a.localeCompare(b)));
+}
+function privateByDefault(where, fields) {
+  for (const [name, publishedValue] of Object.entries(where)) {
+    const column = fields.get(name);
+    if (column.autoNow) continue;
+    const defaultValue = column.hasDefault ? column.default : column.nullable ? null : void 0;
+    if (defaultValue !== void 0 && defaultValue !== publishedValue) return true;
+  }
+  return false;
+}
+function parseIntakePermissions(value, columns, scope, publicRead) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "client.intake must be an object: { target: { table, field }, fields, where? }.";
+  const input = value;
+  for (const key of Object.keys(input)) {
+    if (!["target", "fields", "where"].includes(key)) return `Unknown client.intake option "${key}". Allowed: target, fields, where.`;
+  }
+  if (scope.kind !== "owner" || scope.visitors === true) return "client.intake needs owner() without visitors: each accepted row belongs to the target row's owner.";
+  const id = columns.find((column) => column.helper === "id");
+  if (!id || id.uuid === true) return "client.intake needs an integer id(), not id({ uuid: true }).";
+  if (publicRead === true) return "client.intake cannot accept rows into a table whose rows are all public (client.publicRead: true).";
+  const target = input.target;
+  if (!target || typeof target !== "object" || Array.isArray(target) || Object.keys(target).sort().join() !== "field,table") {
+    return "client.intake.target must be { table, field }: the public table and its unique reference field.";
+  }
+  const { table, field } = target;
+  if (typeof table !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(table) || typeof field !== "string" || !/^[A-Za-z_][A-Za-z0-9_]{0,63}$/.test(field)) {
+    return "client.intake.target must name a table and one of its fields.";
+  }
+  if (!Array.isArray(input.fields) || input.fields.length === 0) return "client.intake.fields must list at least one field a submission supplies.";
+  const byName2 = new Map(columns.map((column) => [column.name, column]));
+  const fields = [];
+  for (const entry of input.fields) {
+    if (typeof entry !== "string") return "client.intake.fields must be column names.";
+    const name = entry.toLowerCase();
+    const column = byName2.get(name);
+    if (!column) return `client.intake.fields names undeclared or platform-managed field "${entry}".`;
+    if (column.helper === "id" || name === scope.column) return `client.intake.fields cannot set the platform-assigned identity field "${entry}".`;
+    if (column.helper === "blob") return `client.intake.fields cannot accept binary field "${entry}". Use project files for uploads.`;
+    if (column.autoNow) return `client.intake.fields cannot set "${entry}", which the platform fills in.`;
+    if (typeof publicRead === "object" && Object.prototype.hasOwnProperty.call(publicRead.where, name)) {
+      return `client.intake.fields cannot set publication field "${entry}".`;
+    }
+    if (fields.includes(name)) return `client.intake.fields declares field "${entry}" twice.`;
+    fields.push(name);
+  }
+  for (const column of columns) {
+    if (column.helper !== "id" && !column.nullable && !column.hasDefault && !column.autoNow && !fields.includes(column.name)) {
+      return `client.intake.fields must include required field "${column.name}", or that field needs a declared default.`;
+    }
+  }
+  if (typeof publicRead === "object" && !privateByDefault(publicRead.where, byName2)) {
+    return "client.intake has no fixed publication-field default that guarantees a private row. Give at least one predicate field a private default.";
+  }
+  let where;
+  if (input.where !== void 0) {
+    const parsed = parseEqualityWhere(input.where, null, "client.intake.where");
+    if (typeof parsed === "string") return parsed;
+    where = parsed;
+  }
+  return { target: { table: table.toLowerCase(), field: field.toLowerCase() }, fields: fields.sort(), ...where ? { where } : {} };
 }
 function authoredClientFromCanonical(client) {
   if (!client || typeof client !== "object" || Array.isArray(client)) return client;
@@ -3861,16 +4105,17 @@ function authoredClientFromCanonical(client) {
   if (!links || typeof links !== "object" || Array.isArray(links)) return client;
   const l = links;
   const keys = Object.keys(l).sort().join(",");
-  if (keys !== "children,edit,maxDays,read" || !Array.isArray(l.read) || !Array.isArray(l.edit) || !Array.isArray(l.children) || !(l.maxDays === null || typeof l.maxDays === "number")) return client;
+  if (keys !== "children,edit,maxDays,read" && !(keys === "anonymousCreate,children,edit,maxDays,read" && l.anonymousCreate === true) || !Array.isArray(l.read) || !Array.isArray(l.edit) || !Array.isArray(l.children) || !(l.maxDays === null || typeof l.maxDays === "number")) return client;
   const authored = { read: l.read, edit: l.edit.length === 0 ? false : l.edit, children: l.children };
   if (l.maxDays !== null) authored.maxDays = l.maxDays;
+  if (l.anonymousCreate === true) authored.anonymousCreate = true;
   return { ...client, links: authored };
 }
-function parseLinkPermissions(value, read, update, columns, scope) {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return "client.links must be an object: { read, edit?, children?, maxDays? }.";
+function parseLinkPermissions(value, read, update, create, columns, scope) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "client.links must be an object: { read, edit?, children?, maxDays?, anonymousCreate? }.";
   const input = value;
   for (const key2 of Object.keys(input)) {
-    if (!["read", "edit", "children", "maxDays"].includes(key2)) return `Unknown client.links option "${key2}". Allowed: read, edit, children, maxDays.`;
+    if (!["read", "edit", "children", "maxDays", "anonymousCreate"].includes(key2)) return `Unknown client.links option "${key2}". Allowed: read, edit, children, maxDays, anonymousCreate.`;
   }
   const owned = scope.kind === "owner" && scope.visitors !== true || scope.kind === "policy" && typeof scope.column === "string";
   if (!owned) return "client.links needs rows with one signed-in owner: owner() (without visitors) or anyOf(owner(), ...).";
@@ -3917,8 +4162,63 @@ function parseLinkPermissions(value, read, update, columns, scope) {
     }
     maxDays = input.maxDays;
   }
-  return { read: linkRead, edit, children, maxDays };
+  if (input.anonymousCreate !== void 0 && typeof input.anonymousCreate !== "boolean") return "client.links.anonymousCreate must be true or false.";
+  if (input.anonymousCreate === true) {
+    if (scope.kind !== "owner" || scope.visitors === true) return "client.links.anonymousCreate needs owner() without visitors.";
+    if (!create || create.length === 0) return "client.links.anonymousCreate needs client.create: it creates rows with the fields the app data client creates.";
+    if (columns.find((column) => column.helper === "id")?.uuid === true) return "client.links.anonymousCreate needs an integer id(), not id({ uuid: true }).";
+    if (columns.some((column) => column.helper === "blob")) return "client.links.anonymousCreate is not available on a table with a blob() column.";
+  }
+  return { read: linkRead, edit, children, maxDays, ...input.anonymousCreate === true ? { anonymousCreate: true } : {} };
 }
+
+// worker/src/utils/authority/intake-bake.ts
+function record(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+function bakeIntakePermissions(schema, declarations, intents, scopes) {
+  const membershipTables = /* @__PURE__ */ new Set();
+  const members = (policy) => {
+    if (policy.k === "m") membershipTables.add(policy.m.m);
+    else if (policy.k === "a") policy.p.forEach(members);
+    else if (policy.k === "p") members(policy.p);
+  };
+  for (const table of Object.values(schema)) {
+    if (table.member) membershipTables.add(table.member.m);
+    if (table.policy) members(table.policy);
+  }
+  for (const [name, table] of Object.entries(schema)) {
+    const intake = table.client?.intake;
+    if (!intake) continue;
+    let valid = false;
+    const target = schema[intake.target.table];
+    try {
+      const declared = record(JSON.parse(declarations[intake.target.table]));
+      const scope = record(declared?.scope);
+      const destination = record(JSON.parse(declarations[name]));
+      const destinationScope = record(destination?.scope);
+      const rawColumns = declared?.columns;
+      const matches = Array.isArray(rawColumns) ? rawColumns.map(record).filter((c) => c?.name === intake.target.field) : [];
+      const column = matches.length === 1 ? matches[0] : null;
+      const bakedColumn = target?.columns.find((c) => c.n === intake.target.field);
+      const owner = scope?.column;
+      if (!membershipTables.has(name) && destination?.name === name && destinationScope?.kind === "owner" && destinationScope.column === scopes[name] && declared?.name === intake.target.table && scope?.kind === "owner" && scope.visitors !== true && typeof owner === "string" && scopes[intake.target.table] === owner && intents[intake.target.table] === "scoped" && intents[name] === "scoped" && scopes[name] && !table.visitors && !table.member && !table.policy && target && !target.visitors && !target.member && !target.policy && target.client?.publicRead && Array.isArray(target.client.read) && target.client.read.includes(intake.target.field) && column && column.nullable === false && ["id", "text", "integer", "bigint"].includes(String(column.helper)) && (column.helper === "id" || column.unique === true) && bakedColumn && !bakedColumn.nul && bakedColumn.t === (column.helper === "id" ? column.uuid === true ? "text" : "integer" : column.helper)) {
+        const predicateColumns = rawColumns;
+        const columns = predicateColumns.map((c) => ({ name: String(c.name), helper: String(c.helper), nullable: c.nullable === true }));
+        valid = !intake.where || typeof parseEqualityWhere(intake.where, columns, "client.intake.where") !== "string";
+        if (valid) target.columns = target.columns.map((c) => c.n === intake.target.field ? { ...c, u: 1 } : c);
+      }
+    } catch {
+    }
+    if (!valid && table.client) {
+      const { intake: _intake, ...client } = table.client;
+      table.client = client;
+    }
+  }
+}
+
+// worker/src/utils/db-schema-deploy/schema-ownership.ts
+var SHARED_AUTHOR_COLUMN = "_sw_author_id";
 
 // worker/src/services/jobs/limits.ts
 var STALE_JOB_WINDOW_MS = 45 * 60 * 1e3;
@@ -4117,8 +4417,8 @@ function validateBindings(input, tableInfo, errors) {
       }
       if (c.helper !== helper || c.nullable) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" must be ${what}.`);
       if (info.identity.includes(name)) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" is the table's access column; a payment never moves a row.`);
-      const writable = [...info.table.client?.create ?? [], ...info.table.client?.update ?? []];
-      if (writable.includes(name)) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" is browser-writable through client.create or client.update. Remove it there; the server sets prices and the payment sets the status.`);
+      const writable = [...info.table.client?.create ?? [], ...info.table.client?.update ?? [], ...info.table.client?.intake?.fields ?? []];
+      if (writable.includes(name)) errors.push(`${at(p, field)}payment binding "${p.name}": "${p.table}"."${name}" is browser-writable through client.create, client.update or client.intake. Remove it there; the server sets prices and the payment sets the status.`);
     }
     if ((/* @__PURE__ */ new Set([p.amount, p.currency, p.status.column])).size !== 3) errors.push(`${at(p, "")}payment binding "${p.name}" must name three different columns for amount, currency and status.`);
     const status = column(p.status.column);
@@ -4185,6 +4485,7 @@ function bakedTableSchemaFromDeclared(declaredJson) {
     permissionColumns.push({
       name: entry.n,
       helper: col.helper,
+      ...col.uuid === true ? { uuid: true } : {},
       nullable: col.nullable === true,
       hasDefault: col.hasDefault === true,
       autoNow: col.autoNow === true,
@@ -4730,6 +5031,56 @@ function validateRowLinks(tables, tableByName, errors) {
   for (const [child, parent] of childOf) {
     if (tableByName.get(child)?.client?.links) {
       errors.push(`Table "${child}" declares client.links and is also a link child of "${parent}". Links reach one level of children.`);
+    }
+  }
+}
+
+// worker/src/utils/db-schema-deploy/extract-schema-intake.ts
+var REFERENCE_HELPERS = ["id", "text", "integer", "bigint"];
+function validateIntake(tables, tableByName, errors) {
+  for (const t of tables) {
+    const intake = t.client?.intake;
+    if (!intake) continue;
+    const at = `Table "${t.name}" client.intake`;
+    const target = tableByName.get(intake.target.table);
+    if (!target) {
+      errors.push(`${at} targets "${intake.target.table}", which is not a table declared in db/schema.ts.`);
+      continue;
+    }
+    if (target.scope.kind !== "owner" || target.scope.visitors === true) {
+      errors.push(`${at} targets "${target.name}", which must be scoped owner() without visitors: its owner receives the submissions.`);
+      continue;
+    }
+    const client = target.client;
+    if (!client || !client.publicRead || !Array.isArray(client.read)) {
+      errors.push(`${at} targets "${target.name}", which declares no client.publicRead. Only a published table can receive public submissions.`);
+      continue;
+    }
+    const field = intake.target.field;
+    const column = target.columns.find((c) => c.name === field);
+    if (!column) {
+      errors.push(`${at} names reference "${field}", which is not a declared column of "${target.name}".`);
+      continue;
+    }
+    if (!client.read.includes(field)) {
+      errors.push(`${at} names reference "${field}", which "${target.name}" does not list in client.read. The reference must be a public field.`);
+      continue;
+    }
+    if (!REFERENCE_HELPERS.includes(column.helper)) {
+      errors.push(`${at} names reference "${field}", a ${column.helper} column. A reference is an id, text, integer or bigint column.`);
+      continue;
+    }
+    if (column.helper !== "id" && !column.unique) {
+      errors.push(`${at} names reference "${field}", which is not unique on "${target.name}". Declare it { unique: true }; a reference must name one row.`);
+      continue;
+    }
+    if (column.nullable) {
+      errors.push(`${at} names reference "${field}", which is nullable on "${target.name}". A reference must be required.`);
+      continue;
+    }
+    if (intake.where) {
+      const typed = parseEqualityWhere(intake.where, target.columns, "client.intake.where");
+      if (typeof typed === "string") errors.push(`${at} (target "${target.name}"): ${typed}`);
     }
   }
 }
@@ -5742,7 +6093,7 @@ function readClientPermissions(r) {
       }
       out[key.name] = fields;
     } else {
-      out[key.name] = key.name === "links" && r.peek().kind === "punct" && r.peek().value === "{" ? readClientPermissions(r) : r.readLiteral(`for client.${key.name}`);
+      out[key.name] = ["links", "intake", "target", "where"].includes(key.name) && r.peek().kind === "punct" && r.peek().value === "{" ? readClientPermissions(r) : r.readLiteral(`for client.${key.name}`);
     }
     if (!r.tryPunct(",")) {
       r.expectPunct("}", "closing client permissions");
@@ -6535,7 +6886,7 @@ function extractSchemaTs(source) {
           continue;
         }
         const membershipCols = knownColumns(membershipTable);
-        if (membershipTable.client && (membershipTable.client.create !== null || membershipTable.client.update !== null || membershipTable.client.delete)) {
+        if (membershipTable.client && (membershipTable.client.create !== null || membershipTable.client.update !== null || membershipTable.client.delete || membershipTable.client.intake !== void 0)) {
           errors.push(`Table "${sc.membership}" grants membership access to "${t.name}" and cannot allow client writes. Change membership through a server function.`);
         }
         if (!membershipCols.has(sc.memberUser)) {
@@ -6554,11 +6905,12 @@ function extractSchemaTs(source) {
     }
     validateDeclaredRelations(tables, tableByName, knownColumns, (table) => removedTables.includes(table) ? "removedTable()" : exportedTables.includes(table) ? "exported()" : null, errors);
     validateRowLinks(tables, tableByName, errors);
+    validateIntake(tables, tableByName, errors);
     if (fileCollections) {
       errors.push(...fileErrors);
       validateFileCollections(fileCollections, (name) => {
         const t = tableByName.get(name);
-        return t ? { columns: knownColumns(t), clientWrites: Boolean(t.client && (t.client.create !== null || t.client.update !== null || t.client.delete)), parentTarget: fileParentTarget(t) } : null;
+        return t ? { columns: knownColumns(t), clientWrites: Boolean(t.client && (t.client.create !== null || t.client.update !== null || t.client.delete || t.client.intake !== void 0)), parentTarget: fileParentTarget(t) } : null;
       }, errors);
     }
     if (groupRoles || appRoles) errors.push(...validateDeclaredRoles(groupRoles, appRoles));
@@ -6655,6 +7007,7 @@ function schemaAuthorityFromSource(files) {
     const ownerColumn = declaredOwnerColumn(table.scope);
     if (declaredScopeIntent(table.scope) === "scoped" && ownerColumn) declareEntry(scopes, table.name, ownerColumn);
   }
+  bakeIntakePermissions(schema, Object.fromEntries(parsed.declaration.tables.map((table) => [table.name, JSON.stringify(canonicalTableShape(table))])), intents, scopes);
   return { schema, intents, scopes };
 }
 function declaredFilesFromSource(files) {
