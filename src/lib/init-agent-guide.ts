@@ -9,7 +9,7 @@ export const AGENT_WORKFLOW = `## Getting started — build, deploy, verify
 Sign-in is included except in minimal/bare. See README for the file map. \`init --catalog --json\` lists \`--features\` modules.
 \`npx @somewhere-tech/cli deploy\` publishes a temporary app and prints its live
 URL, claim URL and expiry. Login is needed for account-owned operations,
-the email test inbox and cron. \`somewhere login\` prints a browser approval code and keeps you signed in.
+the email test inbox and cron. On a hosted VM, \`somewhere login\` uses browser approval and keeps you signed in.
 For a reference, use \`somewhere docs <topic> --section <id>\` (MCP: \`docs({ topic })\`, \`catalog\`).
 
 After every change:
