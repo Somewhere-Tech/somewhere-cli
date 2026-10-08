@@ -1690,6 +1690,29 @@ type SomewherePaymentsPortalOptions = {
 } & ({ customer_id: string; customerId?: string } | { customer_id?: string; customerId: string });
 interface SomewherePaymentsPortalForUserOptions { return_url?: string; returnUrl?: string; env?: SomewherePaymentsEnv }
 interface SomewherePaymentsPortalResult { url: string; stripe_mode: SomewherePaymentsStripeMode }
+// The signed-in user's own plan subscription; no user, customer or subscription argument.
+interface SomewherePaymentsSubscriptionForUserOptions { env?: SomewherePaymentsEnv }
+interface SomewherePaymentsUserSubscription {
+  subscription_id: string;
+  plan: string;
+  status: string;
+  access: boolean;
+  cancel_at_period_end: boolean;
+  current_period_end: string | null;
+  stripe_mode: SomewherePaymentsStripeMode;
+}
+interface SomewherePaymentsCancelForUserOptions { env?: SomewherePaymentsEnv; immediately?: boolean }
+interface SomewherePaymentsCancelForUserResult {
+  subscription_id: string;
+  status: string;
+  cancel_at_period_end: boolean;
+  // Null when already canceled: the stored grant does not keep the provider's cancellation time.
+  canceled_at: string | null;
+  current_period_end: string | null;
+  stripe_mode: SomewherePaymentsStripeMode;
+  cancellation: 'confirmed' | 'not_confirmed' | 'already_canceled';
+  access_sync: 'applied' | 'pending' | 'not_applied' | 'not_confirmed' | 'not_needed';
+}
 interface SomewherePaymentsEventsOptions { limit?: number; before?: number | null; type?: string }
 interface SomewherePaymentsEvent {
   id: string;
@@ -1719,6 +1742,9 @@ interface SomewhereRuntimePayments {
   portal(opts: SomewherePaymentsPortalOptions): Promise<SomewherePaymentsPortalResult>;
   // The app user is the request's verified principal; no user id argument.
   portalForUser(opts: SomewherePaymentsPortalForUserOptions): Promise<SomewherePaymentsPortalResult>;
+  // The signed-in user's own plan subscription for this project and env; refuses NO_SUBSCRIPTION.
+  subscriptionForUser(opts?: SomewherePaymentsSubscriptionForUserOptions | null): Promise<SomewherePaymentsUserSubscription>;
+  cancelForUser(opts?: SomewherePaymentsCancelForUserOptions | null): Promise<SomewherePaymentsCancelForUserResult>;
   events(opts?: SomewherePaymentsEventsOptions | null): Promise<SomewherePaymentsEventsResult>;
 }
 

@@ -114,3 +114,43 @@ test('the runtime-only file is never deployed', (t) => {
   assert.equal(collected.files[`src/${DATA_DECLARATION_FILE}`], undefined);
   assert.ok(collected.functions['api/hello.ts']);
 });
+
+test('current-user subscription helpers accept their options and reject authority selectors', async (t) => {
+  const root = project(t, {
+    'src/main.ts': 'export {};\n',
+    'api/subscription.ts': `export default async function (req: Request, sw: SomewhereRuntimeContext) {
+  await sw.payments.subscriptionForUser();
+  await sw.payments.subscriptionForUser(null);
+  const subscription = await sw.payments.subscriptionForUser({ env: 'dev' });
+  const access: boolean = subscription.access;
+  const period: string | null = subscription.current_period_end;
+  await sw.payments.cancelForUser();
+  await sw.payments.cancelForUser(null);
+  const cancellation = await sw.payments.cancelForUser({ env: 'prod', immediately: true });
+  const sync: 'applied' | 'pending' | 'not_applied' | 'not_confirmed' | 'not_needed' = cancellation.access_sync;
+  return Response.json({ access, period, sync });
+}\n`,
+  });
+  const good = await check(root);
+  assert.equal(good.ok, true, good.raw);
+  const invalidCalls = [
+    "sw.payments.subscriptionForUser({ user_id: 'other' })",
+    "sw.payments.subscriptionForUser({ customer_id: 'cus_other' })",
+    "sw.payments.subscriptionForUser({ subscription_id: 'sub_other' })",
+    "sw.payments.subscriptionForUser({ immediately: true })",
+    "sw.payments.subscriptionForUser({ env: 'test' })",
+    "sw.payments.cancelForUser({ user_id: 'other' })",
+    "sw.payments.cancelForUser({ customer_id: 'cus_other' })",
+    "sw.payments.cancelForUser({ subscription_id: 'sub_other' })",
+    "sw.payments.cancelForUser({ env: 'test' })",
+    "sw.payments.cancelForUser({ immediately: 'yes' })",
+  ];
+  writeFileSync(join(root, 'api/subscription.ts'),
+    'export default async function (req: Request, sw: SomewhereRuntimeContext) {\n' +
+    invalidCalls.map(call => `  await ${call};`).join('\n') + '\n}\n');
+  const bad = await check(root);
+  assert.equal(bad.ok, false);
+  assert.deepEqual(bad.errors.map(error => error.line).sort((a, b) => a - b), invalidCalls.map((_, i) => i + 2));
+  assert.ok(bad.errors.every(error => error.file.endsWith('api/subscription.ts')));
+  assert.ok(bad.errors.every(error => ['TS2353', 'TS2322'].includes(error.code)), bad.raw);
+});
