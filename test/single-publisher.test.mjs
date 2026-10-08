@@ -28,9 +28,12 @@ test('canonical publisher alone publishes, serializes both triggers and pins imm
   for (const workflow of [guard, publisher]) {
     assert.match(workflow, /node-version: '22'/);
     assert.match(workflow, /npm install -g npm@11\.19\.0/);
-    assert.ok(workflow.indexOf('npm install -g') < workflow.indexOf('npm ci'));
-    assert.match(workflow, /npm test/);
   }
+  assert.doesNotMatch(guard, /npm ci|npm test|npm run build/);
+  assert.match(guard, /run: node scripts\/version-guard\.mjs/);
+  assert.ok(publisher.indexOf('npm install -g') < publisher.indexOf('npm ci'));
+  assert.match(publisher, /npm test/);
+  assert.ok(publisher.indexOf('npm test') < publisher.indexOf('npm publish --provenance'));
   assert.equal((publisher.match(/npm publish --provenance --access public/g) ?? []).length, 1);
   assert.doesNotMatch(publisher, /tags:|cancel-in-progress: true|download-artifact|git push/);
   assert.match(publisher, /group: somewhere-cli-publish\n  cancel-in-progress: false/);

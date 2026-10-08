@@ -49,8 +49,4 @@ jobs:
           echo "::error::src/ changed on master but package.json is still ${{ steps.compare.outputs.version }}, which is already published from a different commit. Bump the version (patch at minimum) so npm and master stay in step — merging the bump auto-publishes."
           exit 1
 
-      - name: Gate (build + tests)
-        if: steps.compare.outputs.mode == 'release'
-        run: |
-          npm ci
-          npm test
+      # publish.yml owns build and test gates before its sole npm publication.
