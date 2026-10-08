@@ -18,6 +18,37 @@ interface RunResult {
 /** The runner clamps to [1, 30000]; default 10000 (mirrors run_code). */
 const MAX_TIMEOUT_MS = 30_000;
 
+interface RunOptions {
+  project?: string;
+  timeout?: string;
+  includeEnv?: boolean;
+  json?: boolean;
+  arg: string[];
+}
+
+function parseArgs(values: string[]): Record<string, string> | undefined {
+  if (!values.length) return undefined;
+  if (values.length > 64) throw new Error('--arg accepts at most 64 entries.');
+  const entries: Array<[string, string]> = [];
+  const names = new Set<string>();
+  for (const value of values) {
+    const split = value.indexOf('=');
+    const name = value.slice(0, split);
+    if (split < 0 || !/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)
+      || ['__proto__', 'prototype', 'constructor'].includes(name)) {
+      throw new Error('--arg must be name=value; names must match [A-Za-z_][A-Za-z0-9_]* and cannot be __proto__, prototype, or constructor.');
+    }
+    if (names.has(name)) throw new Error(`Duplicate --arg name: ${name}`);
+    names.add(name);
+    entries.push([name, value.slice(split + 1)]);
+  }
+  const args = Object.fromEntries(entries);
+  if (Buffer.byteLength(JSON.stringify(args), 'utf8') > 16 * 1024) {
+    throw new Error('--arg exceeds the 16384-byte UTF-8 JSON limit.');
+  }
+  return args;
+}
+
 export function registerRun(program: Command) {
   program
     .command('run <script>')
@@ -31,8 +62,16 @@ export function registerRun(program: Command) {
     .option('--project <id>', 'Project ID (defaults to the linked project)')
     .option('--timeout <ms>', 'Abort the script after N ms (default 10000, max 30000)')
     .option('--include-env', 'Expose the project env vars as sw.env (off by default)')
+    .option('--arg <name=value>', 'Per-run string input passed as args to export default async (sw, args); repeat for multiple values',
+      (value: string, previous: string[]) => [...previous, value], [])
     .option('--json', 'Print the raw { result, logs, duration_ms } envelope as JSON')
-    .action(async (script: string, opts) => {
+    .action(async (script: string, opts: RunOptions) => {
+      let args: Record<string, string> | undefined;
+      try { args = parseArgs(opts.arg); }
+      catch (err) {
+        error(err instanceof Error ? err.message : String(err));
+        process.exit(1);
+      }
       const client = new ApiClient(getToken());
 
       let projectId = opts.project as string | undefined;
@@ -78,6 +117,7 @@ export function registerRun(program: Command) {
           {
             project_id: projectId,
             code,
+            args,
             timeout_ms: timeoutMs,
             include_env: opts.includeEnv === true,
           },
