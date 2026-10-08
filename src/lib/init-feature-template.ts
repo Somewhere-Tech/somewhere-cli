@@ -484,6 +484,7 @@ export interface NotesController {
   cancelEdit(): void;
   saving: boolean;
   canSave: boolean;
+  retryingCreate: boolean;
   save(): Promise<void>;
   removingId: NoteId | null;
   remove(note: Note): Promise<void>;
@@ -524,10 +525,41 @@ export async function listNotes(): Promise<{ notes: Note[]; truncated: boolean }
   return { notes: page.data, truncated: page.has_more };
 }
 
-export async function createNote(draft: NoteDraft): Promise<Note> {
-  const result = await data.notes.create(normalizeDraft(draft));
-  if (!result.data) throw new Error('The note was not saved. Try again.');
-  return result.data;
+/** Keep one logical create in memory; retry never calls create() again. */
+export class NoteCreateError extends Error {
+  constructor(message: string, readonly outcome: 'unknown' | 'committed', readonly retry: (() => Promise<Note>) | null) {
+    super(message);
+    this.name = 'NoteCreateError';
+  }
+}
+
+async function finishCreate(send: () => Promise<unknown>): Promise<Note> {
+  let result: unknown;
+  try {
+    result = await send();
+  } catch (reason: unknown) {
+    if (reason instanceof DataError && (reason.outcome === 'unknown'
+      || reason.outcome === 'committed' || reason.write_committed === true)) {
+      const request = reason.request;
+      const retry = reason.outcome === 'unknown' && reason.write_committed !== true
+        && reason.code !== 'IDEMPOTENCY_RETRY_EXPIRED' && request
+        ? () => finishCreate(() => request.retry()) : null;
+      throw new NoteCreateError(retry
+        ? 'The save could not be confirmed. Retry the original save; edits below will be kept.'
+        : 'The note may already be saved. Check your notes before starting another save.', reason.outcome === 'unknown' && reason.write_committed !== true ? 'unknown' : 'committed', retry);
+    }
+    throw reason;
+  }
+  const row = result && typeof result === 'object' && 'data' in result ? result.data : null;
+  if (!row || typeof row !== 'object' || !('id' in row) || typeof row.id !== 'number'
+    || !('title' in row) || typeof row.title !== 'string' || !('body' in row) || typeof row.body !== 'string') {
+    throw new NoteCreateError('The save returned no readable note. Check your notes before starting another save.', 'committed', null);
+  }
+  return { id: row.id, title: row.title, body: row.body };
+}
+
+export function createNote(draft: NoteDraft): Promise<Note> {
+  return finishCreate(() => data.notes.create(normalizeDraft(draft)));
 }
 
 export async function updateNote(note: Note, draft: NoteDraft): Promise<NoteSaveResult> {
@@ -583,6 +615,7 @@ import { useAuth } from '@somewhere-tech/sdk/react';
 import type { Note, NoteDraft, NoteDraftErrors, NoteId, NotesController, NotesStatus } from '../../types/notes';
 import {
   createNote,
+  NoteCreateError,
   isSessionEnded,
   listNotes,
   NOTE_LIMITS,
@@ -608,6 +641,8 @@ export function useNotes(): NotesController {
   const [draft, setDraft] = useState<NoteDraft>(EMPTY_DRAFT);
   const [editingId, setEditingId] = useState<NoteId | null>(null);
   const [saving, setSaving] = useState(false);
+  const busy = useRef(false);
+  const [pendingCreate, setPendingCreate] = useState<{ error: NoteCreateError; draft: NoteDraft } | null>(null);
   const [removingId, setRemovingId] = useState<NoteId | null>(null);
   const [notice, setNotice] = useState<NotesController['notice']>(null);
 
@@ -644,7 +679,7 @@ export function useNotes(): NotesController {
   // An empty title disables Save; it is not flagged while the user types.
   const draftErrors: NoteDraftErrors = draft.title.trim() ? errors : { body: errors.body };
   const editing = editingId === null ? null : notes.find((note) => note.id === editingId) ?? null;
-  const canSave = !saving && Object.keys(errors).length === 0;
+  const canSave = !saving && (pendingCreate ? pendingCreate.error.retry !== null : Object.keys(errors).length === 0);
 
   function fail(reason: unknown) {
     setNotice({ tone: 'error', text: notesErrorMessage(reason) });
@@ -652,11 +687,14 @@ export function useNotes(): NotesController {
   }
 
   async function save() {
-    if (!canSave) return;
+    if (!canSave || busy.current) return;
+    busy.current = true;
     setSaving(true);
     setNotice(null);
+    const submitted = pendingCreate?.draft ?? { ...draft };
+    const creating = pendingCreate !== null || !editing;
     try {
-      if (editing) {
+      if (!creating && editing) {
         const result = await updateNote(editing, draft);
         if (!mounted.current) return;
         if (result.kind === 'saved') {
@@ -669,16 +707,23 @@ export function useNotes(): NotesController {
           setNotice({ tone: 'error', text: 'That note was already removed.' });
         }
       } else {
-        const created = await createNote(draft);
+        const created = pendingCreate?.error.retry
+          ? await pendingCreate.error.retry() : await createNote(submitted);
         if (!mounted.current) return;
         setNotes((list) => [...list, created]);
-        setNotice({ tone: 'info', text: 'Added.' });
+        setPendingCreate(null);
+        setNotice({ tone: 'info', text: pendingCreate ? 'Original note added.' : 'Added.' });
       }
-      setDraft(EMPTY_DRAFT);
-      setEditingId(null);
+      // A retry saves the original values, not edits made while it was uncertain.
+      setDraft((current) => current.title === submitted.title && current.body === submitted.body ? EMPTY_DRAFT : current);
+      if (!pendingCreate) setEditingId((current) => current === editingId ? null : current);
     } catch (reason: unknown) {
-      if (mounted.current) fail(reason);
+      if (mounted.current) {
+        if (creating && reason instanceof NoteCreateError) setPendingCreate({ error: reason, draft: submitted });
+        fail(reason);
+      }
     } finally {
+      busy.current = false;
       if (mounted.current) setSaving(false);
     }
   }
@@ -716,7 +761,7 @@ export function useNotes(): NotesController {
     startEdit(note) {
       setEditingId(note.id);
       setDraft({ title: note.title, body: note.body });
-      setNotice(null);
+      if (!pendingCreate) setNotice(null);
     },
     cancelEdit() {
       setEditingId(null);
@@ -724,6 +769,7 @@ export function useNotes(): NotesController {
     },
     saving,
     canSave,
+    retryingCreate: pendingCreate?.error.retry != null,
     save,
     removingId,
     remove,
@@ -1814,7 +1860,7 @@ export function NotesBoard({ notes }: { notes: NotesController }) {
         </div>
         <div className="actions">
           <button type="submit" className="button" disabled={!notes.canSave} aria-busy={notes.saving}>
-            {notes.saving ? 'Saving…' : editing ? 'Save changes' : 'Add note'}
+            {notes.saving ? 'Saving…' : notes.retryingCreate ? 'Retry original save' : editing ? 'Save changes' : 'Add note'}
           </button>
           {editing ? <button type="button" className="button button--quiet" onClick={notes.cancelEdit} disabled={notes.saving}>Cancel</button> : null}
         </div>
@@ -2007,7 +2053,7 @@ export function NotesBoard({ notes }: { notes: NotesController }) {
           {draftErrors.body ? <span role="alert"> {draftErrors.body}</span> : null}
         </p>
         <button type="submit" disabled={!notes.canSave} aria-busy={notes.saving}>
-          {notes.saving ? 'Saving…' : editing ? 'Save changes' : 'Add note'}
+          {notes.saving ? 'Saving…' : notes.retryingCreate ? 'Retry original save' : editing ? 'Save changes' : 'Add note'}
         </button>{' '}
         {editing ? <button type="button" onClick={notes.cancelEdit}>Cancel</button> : null}
         <p role="status">{notes.notice?.text ?? ''}</p>
