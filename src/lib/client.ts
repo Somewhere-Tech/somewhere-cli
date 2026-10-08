@@ -40,7 +40,7 @@ export class ApiClient {
   /** Run a one-off script against the project's live DEV bindings via the
    *  dedicated runner worker. Same auth + `{ ok, data }` envelope as call(), but
    *  rooted at RUNNER_BASE_URL instead of the /v1 API (see that constant for the
-   *  loop-protection reason). Body: { project_id, code, timeout_ms?, include_env? };
+   *  loop-protection reason). Body: { project_id, code, timeout_ms?, include_env?, args? };
    *  resolves to { result, logs, duration_ms, error? }. */
   async callRunner<T = unknown>(
     body: unknown,
