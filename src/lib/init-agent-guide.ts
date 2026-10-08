@@ -51,15 +51,15 @@ Functions: a bare \`export default async function (req, sw)\` returning a
 \`params.id\` there, \`sw.params.id\` bare. \`somewhere typecheck\` types bare
 handlers as \`(req: Request, sw: SomewhereRuntimeContext)\`.
 
-Data: declare tables in \`db/schema.ts\`; pages use the generated
-\`somewhere:data\` client (\`data.notes.list()\`, \`.create()\`, \`.update(id, …)\`), so
-normal data needs no API file. Scope: \`owner()\` per user, \`group()\` per team,
-\`appRole()\` for staff; \`client\` names the browser's columns, and
-\`publicRead: { where }\` opens rows to visitors. When one write does not fit,
-such as a public form filing a row for an owner, keep the client and add one
-function for that write; do not make every table \`serverOnly()\`. Validate
-the body, then take the ownership step; \`handle\` is the public intake address
-an owner opted into by claiming it (a private profile is not a recipient):
+Data: declare tables in \`db/schema.ts\`; pages use \`somewhere:data\`
+(\`data.notes.list()\`, \`.create()\`, \`.update(id, …)\`) without API files.
+Use \`owner()\` for personal rows, \`group()\` for invited teams, \`appRole()\`
+for app-wide roles, and \`anyOf()\` for owner or a permitted role.
+\`shared()\` gives signed-in reads and creator-only writes. \`client\` sets browser
+columns; \`publicRead: { where }\` admits visitors. Keep these rules; add one
+function for an exceptional write, not \`serverOnly()\` everywhere. Validate
+first. Here \`handle\` is a public intake address its owner claimed, never a
+private profile:
 
 \`\`\`ts
 const { handle, title, from_email } = body as { handle?: unknown; title?: unknown; from_email?: unknown };
